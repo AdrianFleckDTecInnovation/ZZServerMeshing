@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sim-server
+spec:
+  serviceName: sim-server
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sim-server
+  template:
+    metadata:
+      labels:
+        app: sim-server
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sim-server
+                topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: sim-server
+          image: IMAGE_PLACEHOLDER
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ORDINAL=${HOSTNAME##*-}
+              SERVER_ID=$((ORDINAL + 1))
+              WS_PORT=$((7877 + SERVER_ID))
+              UDP_PORT=$((9100 + SERVER_ID))
+              METRICS_PORT=$((8100 + SERVER_ID))
+              exec sim-server \
+                --server-id $SERVER_ID \
+                --port $WS_PORT \
+                --udp-port $UDP_PORT \
+                --metrics-port $METRICS_PORT \
+                --coordinator coordinator:7870 \
+                --initial-npcs 10
+          ports:
+            - containerPort: 7878
+              protocol: TCP
+            - containerPort: 7879
+              protocol: TCP
+            - containerPort: 7880
+              protocol: TCP
+            - containerPort: 9101
+              protocol: UDP
+            - containerPort: 9102
+              protocol: UDP
+            - containerPort: 9103
+              protocol: UDP
+            - containerPort: 8101
+              protocol: TCP
+            - containerPort: 8102
+              protocol: TCP
+            - containerPort: 8103
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sim-server
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: sim-server
+  ports:
+    - name: ws
+      port: 7878
+      protocol: TCP
+    - name: udp
+      port: 9101
+      protocol: UDP
+    - name: metrics
+      port: 8101
+      protocol: TCP

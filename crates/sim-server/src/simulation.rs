@@ -1,3 +1,4 @@
+use crate::metrics::{MetricsCollector, TickTimings};
 use crate::replication;
 use crate::world::World;
 use shared::entity::{EntityType, EntityId, ServerId};
@@ -6,8 +7,9 @@ use shared::tick::{TICK_DURATION_MS, TICK_RATE};
 use glam::Vec3;
 use rand::Rng;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use uuid::Uuid;
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
@@ -19,6 +21,7 @@ pub async fn run_game_loop(
     world: Arc<RwLock<World>>,
     mut input_rx: mpsc::UnboundedReceiver<ClientMessage>,
     udp_socket: Arc<UdpSocket>,
+    metrics: Arc<Mutex<MetricsCollector>>,
 ) {
     let mut interval = tokio::time::interval(TICK_DURATION);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -27,19 +30,28 @@ pub async fn run_game_loop(
 
     loop {
         interval.tick().await;
+        let tick_start = Instant::now();
 
-        // Drain all pending inputs
+        // Phase 1: Drain all pending inputs
+        let t0 = Instant::now();
         while let Ok(input) = input_rx.try_recv() {
             let mut w = world.write().await;
             process_input(&mut w, input);
         }
+        let input_drain_dur = t0.elapsed();
 
         // Simulate + replicate + handle transfers
+        let (sim_dur, transfer_dur, repl_dur, shadow_dur);
         {
             let mut w = world.write().await;
-            simulate_tick(&mut w);
 
-            // Process pending authority transfers
+            // Phase 2: Simulate
+            let t1 = Instant::now();
+            simulate_tick(&mut w);
+            sim_dur = t1.elapsed();
+
+            // Phase 3: Process pending authority transfers
+            let t2 = Instant::now();
             process_transfers(&mut w, &udp_socket).await;
 
             // Handle graceful drain
@@ -50,12 +62,32 @@ pub async fn run_game_loop(
                     std::process::exit(0);
                 }
             }
+            transfer_dur = t2.elapsed();
 
-            // Replicate authoritative entities to peers
+            // Phase 4: Replicate authoritative entities to peers
+            let t3 = Instant::now();
             replication::replicate_to_peers(&w, &udp_socket).await;
+            repl_dur = t3.elapsed();
 
-            // Clean up stale shadow entities
+            // Phase 5: Clean up stale shadow entities
+            let t4 = Instant::now();
             w.cleanup_shadows();
+            shadow_dur = t4.elapsed();
+
+            // Update metrics collector state
+            let mut m = metrics.lock().await;
+            m.current_tick = w.tick;
+            m.entity_count = w.entities.len();
+            m.shadow_count = w.shadow_entities.len();
+            m.peer_count = w.peer_addrs.len();
+            m.record(TickTimings {
+                input_drain: input_drain_dur,
+                simulation: sim_dur,
+                transfers: transfer_dur,
+                replication: repl_dur,
+                shadow_cleanup: shadow_dur,
+                total: tick_start.elapsed(),
+            });
         }
     }
 }

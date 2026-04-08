@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coordinator
+  template:
+    metadata:
+      labels:
+        app: coordinator
+    spec:
+      containers:
+        - name: coordinator
+          image: IMAGE_PLACEHOLDER
+          command: ["coordinator", "--port", "7870"]
+          ports:
+            - containerPort: 7870
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator
+spec:
+  type: ClusterIP
+  selector:
+    app: coordinator
+  ports:
+    - port: 7870
+      targetPort: 7870

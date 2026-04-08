@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: IMAGE_PLACEHOLDER
+          command:
+            - gateway
+            - "--port"
+            - "4322"
+            - "--coordinator"
+            - "coordinator:7870"
+            - "--metrics-port"
+            - "8200"
+          ports:
+            - containerPort: 4322
+            - containerPort: 8200
+          resources:
+            requests:
+              cpu: 200m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  type: LoadBalancer
+  selector:
+    app: gateway
+  ports:
+    - name: ws
+      port: 80
+      targetPort: 4322
+    - name: metrics
+      port: 8200
+      targetPort: 8200

@@ -1,0 +1,128 @@
+# Server Meshing Test Cluster
+# Simulates Raspberry Pi Zero W2 constraints per sim-server:
+#   - BCM2710A1: 4x ARM Cortex-A53 @ 1GHz
+#   - Docker can't throttle clock speed, so we approximate with:
+#     cpus: 0.25 (~1 core at 25% of host speed ≈ 1GHz ARM equivalent)
+#   - 512MB RAM
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml build
+#   docker compose -f docker-compose.test.yml up
+#   ./test.sh --docker
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust
+    entrypoint: ["coordinator"]
+    command: ["--port", "7870"]
+    ports:
+      - "7870:7870"
+    cpus: 0.25
+    mem_limit: 512m
+    networks:
+      - mesh
+
+  sim-server-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust
+    entrypoint: ["sim-server"]
+    command: [
+      "--server-id", "1",
+      "--port", "7878",
+      "--udp-port", "9101",
+      "--metrics-port", "8101",
+      "--coordinator", "coordinator:7870",
+      "--advertise-host", "sim-server-1",
+      "--initial-npcs", "10"
+    ]
+    ports:
+      - "7878:7878"
+      - "8101:8101"
+      - "9101:9101/udp"
+    cpus: 0.25
+    mem_limit: 512m
+    depends_on:
+      - coordinator
+    networks:
+      - mesh
+
+  sim-server-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust
+    entrypoint: ["sim-server"]
+    command: [
+      "--server-id", "2",
+      "--port", "7879",
+      "--udp-port", "9102",
+      "--metrics-port", "8102",
+      "--coordinator", "coordinator:7870",
+      "--advertise-host", "sim-server-2",
+      "--initial-npcs", "10"
+    ]
+    ports:
+      - "7879:7879"
+      - "8102:8102"
+      - "9102:9102/udp"
+    cpus: 0.25
+    mem_limit: 512m
+    depends_on:
+      - coordinator
+    networks:
+      - mesh
+
+  sim-server-3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust
+    entrypoint: ["sim-server"]
+    command: [
+      "--server-id", "3",
+      "--port", "7880",
+      "--udp-port", "9103",
+      "--metrics-port", "8103",
+      "--coordinator", "coordinator:7870",
+      "--advertise-host", "sim-server-3",
+      "--initial-npcs", "10"
+    ]
+    ports:
+      - "7880:7880"
+      - "8103:8103"
+      - "9103:9103/udp"
+    cpus: 0.25
+    mem_limit: 512m
+    depends_on:
+      - coordinator
+    networks:
+      - mesh
+
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust
+    entrypoint: ["gateway"]
+    command: [
+      "--port", "4322",
+      "--coordinator", "coordinator:7870",
+      "--metrics-port", "8200"
+    ]
+    ports:
+      - "4322:4322"
+      - "8200:8200"
+    cpus: 0.25
+    mem_limit: 512m
+    depends_on:
+      - coordinator
+      - sim-server-1
+      - sim-server-2
+      - sim-server-3
+    networks:
+      - mesh
+
+networks:
+  mesh:
+    driver: bridge

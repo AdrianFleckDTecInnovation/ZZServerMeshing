@@ -22,7 +22,7 @@ True server meshing: multiple Rust simulation servers share authority over the S
 | Service       | Port  |
 |---------------|-------|
 | Coordinator   | 7870  |
-| Sim-server N  | 7878+N (ws), 9100+N (udp) |
+| Sim-server N  | 7878+N (ws), 9100+N (udp), 8100+N (metrics) |
 | Gateway       | 4322  |
 | Client (Vite) | 4321  |
 
@@ -47,6 +47,42 @@ cd client && npm run dev
 - 20 Hz tick rate (50ms per tick)
 - Each sim-server broadcasts only authoritative entities; gateway aggregates from all servers
 - Entities color-coded by authority server in the client
+
+## Test Suite
+
+Single-command test runner that starts the cluster, runs scenarios, and reports results.
+
+```sh
+./test.sh                              # all scenarios, local cluster
+./test.sh --json                       # JSON output (for automated parsing)
+./test.sh --json spawn-burst           # single scenario with JSON
+./test.sh --docker                     # run in Docker with Pi Zero W2 resource limits
+./test.sh --no-start                   # use already-running cluster
+./test.sh spawn-burst,steady-scale     # run specific scenarios only
+```
+
+### Metrics Endpoint
+Each sim-server exposes `http://localhost:810N/metrics` with per-tick phase timing (p50/p95/p99):
+```sh
+curl localhost:8101/metrics | jq .      # server 1 metrics
+```
+
+### Scenarios
+| Scenario | What it tests |
+|----------|--------------|
+| spawn-burst | 500 entities in 2s, peak budget + recovery |
+| steady-scale | +10/sec until 80% budget, finds entity ceiling |
+| crash-recovery | Kill server, verify entity adoption |
+| rebalance-storm | 300 entities on one server, convergence |
+| spatial-hotspot | 200 clustered entities, UDP packet stress |
+| input-latency | MoveInput round-trip p50/p95/p99 |
+
+### Docker (Pi Zero W2 simulation)
+Each container is limited to 1.0 CPU / 512MB RAM to simulate Raspberry Pi Zero W2 hardware.
+```sh
+docker compose -f docker-compose.test.yml up --build   # start constrained cluster
+docker compose -f docker-compose.test.yml down          # stop
+```
 
 ## Conventions
 - Rust: standard formatting (`cargo fmt`), no unsafe unless justified

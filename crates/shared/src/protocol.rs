@@ -69,6 +69,10 @@ pub enum CoordClientMsg {
         server_id: u16,
         udp_port: u16,
         ws_port: u16,
+        /// Advertised hostname for peer discovery (Docker/k8s networking).
+        /// Falls back to the connection source IP when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     Heartbeat {
         server_id: u16,
@@ -96,8 +100,12 @@ pub enum CoordServerMsg {
         target_servers: Vec<u16>,
     },
     /// A server died — adopt its orphaned shadow entities.
+    /// `survivors` is the sorted list of surviving sim-server IDs so each
+    /// server adopts a distinct subset (by UUID hash).
     RecoverEntities {
         dead_server_id: u16,
+        #[serde(default)]
+        survivors: Vec<u16>,
     },
 }
 

@@ -63,43 +63,94 @@ export class WorldView {
 
   /** Timestamp of most recent snapshot arrival */
   private lastSnapshotTime: number = performance.now();
-  private static readonly TICK_DURATION_MS = 50; // 20Hz
+  /** Measured interval between snapshots (adapts to actual network rate) */
+  private measuredIntervalMs: number = 100;
+  private prevSnapshotTime: number = 0;
+  /** Raw frame counter for Hz display */
+  private frameCount: number = 0;
+  private lastHzTime: number = performance.now();
+  private displayHz: number = 0;
+  /** Measured network snapshot rate for debug overlay */
+  get measuredHz(): number { return this.displayHz; }
+  /** Number of snapshots applied — skip interpolation during warmup */
+  private snapshotCount: number = 0;
+  private static readonly WARMUP_SNAPSHOTS = 3;
+
+  /** Call for every frame received (before duplicate filtering) to track true network rate */
+  countFrame(): void {
+    this.frameCount++;
+    const now = performance.now();
+    const elapsed = now - this.lastHzTime;
+    if (elapsed >= 1000) {
+      this.displayHz = Math.round(this.frameCount / (elapsed / 1000));
+      this.frameCount = 0;
+      this.lastHzTime = now;
+    }
+  }
 
   applySnapshot(snapshot: WorldSnapshot): void {
+    // Skip duplicate ticks — gateway may send the same tick twice
+    if (snapshot.tick === this.currentTick) return;
+
     this.currentTick = snapshot.tick;
-    this.lastSnapshotTime = performance.now();
+    const now = performance.now();
+    if (this.prevSnapshotTime > 0) {
+      const interval = now - this.prevSnapshotTime;
+      if (interval > 10 && interval < 500) {
+        this.measuredIntervalMs = this.measuredIntervalMs * 0.8 + interval * 0.2;
+      }
+    }
+    this.prevSnapshotTime = now;
+
+    this.snapshotCount++;
+
+    // During warmup, don't interpolate — snap to server positions
+    if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
+      this.lastSnapshotTime = now;
+      // Will snap all entities to currentPosition below (hasSecondSnapshot stays false)
+    } else {
+      // Run interpolation one last time before applying new data
+      // so entity.position reflects what was actually rendered
+      this.interpolate(0);
+      this.lastSnapshotTime = now;
+    }
 
     if (snapshot._metrics) {
       this.metrics = snapshot._metrics;
     }
 
     const incomingIds = new Set<string>();
-    this.serverEntityCounts.clear();
 
     for (const raw of snapshot.entities) {
       const id = raw.id;
       const serverId = raw.authority_server;
 
       incomingIds.add(id);
-      this.serverEntityCounts.set(
-        serverId,
-        (this.serverEntityCounts.get(serverId) || 0) + 1
-      );
 
       const pos = toVec3(raw.position);
       const vel = toVec3(raw.velocity);
 
       const existing = this.entities.get(id);
       if (existing) {
-        // Shift current -> previous, set new current
-        existing.previousPosition.copy(existing.currentPosition);
-        existing.currentPosition.copy(pos);
-        existing.velocity.copy(vel);
-        existing.entityType = raw.entity_type;
-        existing.authorityServer = serverId;
-        existing.hasSecondSnapshot = true;
+        if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
+          // During warmup: snap everything, no interpolation
+          existing.position.copy(pos);
+          existing.previousPosition.copy(pos);
+          existing.currentPosition.copy(pos);
+          existing.velocity.copy(vel);
+          existing.entityType = raw.entity_type;
+          existing.authorityServer = serverId;
+          existing.hasSecondSnapshot = false;
+        } else {
+          // Normal: interpolate from rendered position to new server position
+          existing.previousPosition.copy(existing.position);
+          existing.currentPosition.copy(pos);
+          existing.velocity.copy(vel);
+          existing.entityType = raw.entity_type;
+          existing.authorityServer = serverId;
+          existing.hasSecondSnapshot = true;
+        }
       } else {
-        // First time seeing this entity — snap to position
         this.entities.set(id, {
           id,
           position: pos.clone(),
@@ -119,13 +170,78 @@ export class WorldView {
         this.entities.delete(id);
       }
     }
+
+    // Rebuild server counts from the deduplicated entity map
+    this.serverEntityCounts.clear();
+    for (const entity of this.entities.values()) {
+      this.serverEntityCounts.set(
+        entity.authorityServer,
+        (this.serverEntityCounts.get(entity.authorityServer) || 0) + 1
+      );
+    }
+  }
+
+  /** Apply a delta frame: update changed entities, remove deleted ones.
+   *  Does NOT reset lastSnapshotTime — interpolation timer only resets on full snapshots.
+   *  This prevents unchanged entities from warping back to previousPosition. */
+  applyDelta(tick: number, updates: RawEntity[], removals: string[], metrics?: GatewayMetrics): void {
+    if (tick === this.currentTick) return;
+    this.currentTick = tick;
+
+    if (metrics) {
+      this.metrics = metrics;
+    }
+
+    // Apply updates (new or changed entities)
+    for (const raw of updates) {
+      const id = raw.id;
+      const serverId = raw.authority_server;
+      const pos = toVec3(raw.position);
+      const vel = toVec3(raw.velocity);
+
+      const existing = this.entities.get(id);
+      if (existing) {
+        // Snap previousPosition to current rendered position for smooth transition
+        existing.previousPosition.copy(existing.position);
+        existing.currentPosition.copy(pos);
+        existing.velocity.copy(vel);
+        existing.entityType = raw.entity_type;
+        existing.authorityServer = serverId;
+        existing.hasSecondSnapshot = true;
+      } else {
+        this.entities.set(id, {
+          id,
+          position: pos.clone(),
+          previousPosition: pos.clone(),
+          currentPosition: pos.clone(),
+          velocity: vel,
+          entityType: raw.entity_type,
+          authorityServer: serverId,
+          hasSecondSnapshot: false,
+        });
+      }
+    }
+
+    // Apply removals
+    for (const id of removals) {
+      this.entities.delete(id);
+    }
+
+    // Recompute server entity counts
+    this.serverEntityCounts.clear();
+    for (const entity of this.entities.values()) {
+      this.serverEntityCounts.set(
+        entity.authorityServer,
+        (this.serverEntityCounts.get(entity.authorityServer) || 0) + 1
+      );
+    }
   }
 
   interpolate(_dt: number): void {
     const now = performance.now();
     const timeSinceSnapshot = now - this.lastSnapshotTime;
-    // alpha: 0 at snapshot arrival, 1.0 one tick later, cap at 1.2 for slight extrapolation
-    const alpha = Math.min(timeSinceSnapshot / WorldView.TICK_DURATION_MS, 1.2);
+    // Use measured interval instead of hardcoded 50ms — adapts to actual network rate
+    const alpha = Math.min(timeSinceSnapshot / this.measuredIntervalMs, 1.2);
 
     for (const entity of this.entities.values()) {
       if (!entity.hasSecondSnapshot) {

@@ -3,8 +3,8 @@ import { WorldView, SERVER_COLORS } from './world-view';
 export class DebugOverlay {
   private el: HTMLElement;
   private worldView: WorldView;
-  private fps = 0;
-  private frameCount = 0;
+  private renderFps = 0;
+  private renderFrameCount = 0;
   private lastFpsTime = performance.now();
   private connected = false;
   private followMode = true;
@@ -17,12 +17,16 @@ export class DebugOverlay {
   setConnected(connected: boolean): void { this.connected = connected; }
   setFollowMode(follow: boolean): void { this.followMode = follow; }
 
+  /** Call from the render loop (requestAnimationFrame) to count actual render FPS */
+  tick(): void {
+    this.renderFrameCount++;
+  }
+
   update(): void {
-    this.frameCount++;
     const now = performance.now();
     if (now - this.lastFpsTime >= 1000) {
-      this.fps = this.frameCount;
-      this.frameCount = 0;
+      this.renderFps = this.renderFrameCount;
+      this.renderFrameCount = 0;
       this.lastFpsTime = now;
     }
 
@@ -61,8 +65,11 @@ export class DebugOverlay {
       metricsLine = `Net: ${m.snapshotsPerSec} snap/s | ${m.bandwidthKBps} KB | ${m.rebalanceEvents} rebalances`;
     }
 
+    // Network snapshot rate (measured from actual arrivals)
+    const netHz = wv.measuredHz > 0 ? `${wv.measuredHz.toFixed(0)}` : '?';
+
     this.el.innerHTML =
-`${connStatus} | Tick ${wv.currentTick} | FPS ${this.fps}
+`${connStatus} | Tick ${wv.currentTick} | Render ${this.renderFps} FPS | Net ${netHz} Hz
 Entities: ${totalEntities} | Camera: ${this.followMode ? 'follow' : 'free'} [F]
 ${playerInfo}
 ${metricsLine}

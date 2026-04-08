@@ -1,0 +1,10 @@
+FROM node:20-slim
+
+WORKDIR /app
+COPY gateway/package*.json ./
+RUN npm ci --production
+COPY gateway/src/ src/
+COPY gateway/tsconfig.json ./
+
+EXPOSE 4322
+CMD ["npx", "tsx", "src/index.ts"]

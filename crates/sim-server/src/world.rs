@@ -24,7 +24,7 @@ pub struct World {
 }
 
 /// Max ticks before a shadow entity is considered stale and removed.
-const SHADOW_STALE_TICKS: u64 = 100; // 5 seconds at 20Hz
+const SHADOW_STALE_TICKS: u64 = shared::tick::TICK_RATE as u64 * 5; // 5 seconds
 
 impl World {
     pub fn new(server_id: ServerId) -> Self {
@@ -138,11 +138,26 @@ impl World {
     }
 
     /// Recover orphaned entities from a dead server by promoting shadows to authoritative.
-    pub fn recover_from_dead_server(&mut self, dead_server_id: u16) {
+    /// Recover entities from a dead server.
+    /// `survivor_ids` is the sorted list of all surviving server IDs.
+    /// Each survivor only adopts entities whose UUID hashes to its position
+    /// in the survivor list, preventing duplicate adoption.
+    pub fn recover_from_dead_server(&mut self, dead_server_id: u16, survivor_ids: &[u16]) {
+        let my_index = survivor_ids.iter().position(|&id| id == self.server_id.0);
+        let my_index = match my_index {
+            Some(i) => i,
+            None => return, // we're not in the survivor list
+        };
+        let survivor_count = survivor_ids.len();
+
         let to_adopt: Vec<EntityId> = self
             .shadow_entities
             .iter()
             .filter(|(_, e)| e.authority_server.0 == dead_server_id)
+            .filter(|(id, _)| {
+                // Distribute entities across survivors by UUID hash
+                (id.0.as_u128() as usize) % survivor_count == my_index
+            })
             .map(|(id, _)| *id)
             .collect();
 

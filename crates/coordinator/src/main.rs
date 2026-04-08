@@ -22,6 +22,7 @@ enum RegistryEvent {
         server_id: u16,
         udp_port: u16,
         ws_port: u16,
+        host: Option<String>,
         /// Channel to send messages back to this server's WS connection.
         reply_tx: mpsc::UnboundedSender<String>,
     },
@@ -103,12 +104,16 @@ async fn handle_server_connection(
                     server_id: sid,
                     udp_port,
                     ws_port,
+                    host,
                 }) => {
+                    // Use advertised host if provided, otherwise use the peer's source IP
+                    let resolved_host = host.unwrap_or_else(|| addr.ip().to_string());
                     server_id = Some(sid);
                     let _ = event_tx.send(RegistryEvent::Register {
                         server_id: sid,
                         udp_port,
                         ws_port,
+                        host: Some(resolved_host),
                         reply_tx: reply_tx.clone(),
                     });
                 }
@@ -150,8 +155,8 @@ async fn run_registry(mut event_rx: mpsc::UnboundedReceiver<RegistryEvent>) {
             event = event_rx.recv() => {
                 let Some(event) = event else { break };
                 match event {
-                    RegistryEvent::Register { server_id, udp_port, ws_port, reply_tx } => {
-                        registry.register(server_id, udp_port, ws_port, reply_tx);
+                    RegistryEvent::Register { server_id, udp_port, ws_port, host, reply_tx } => {
+                        registry.register(server_id, udp_port, ws_port, host, reply_tx);
                         tracing::info!(
                             "Registered S{server_id} (udp:{udp_port} ws:{ws_port}) | {} servers total",
                             registry.server_count()

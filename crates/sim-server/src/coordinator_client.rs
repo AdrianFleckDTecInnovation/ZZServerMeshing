@@ -2,6 +2,7 @@ use crate::world::World;
 use futures_util::{SinkExt, StreamExt};
 use shared::protocol::{CoordClientMsg, CoordServerMsg};
 use std::sync::Arc;
+use tokio::net::lookup_host;
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -12,6 +13,7 @@ pub async fn run_coordinator_client(
     udp_port: u16,
     ws_port: u16,
     world: Arc<RwLock<World>>,
+    advertise_host: Option<String>,
 ) {
     loop {
         tracing::info!("Connecting to coordinator at {coordinator_addr}...");
@@ -34,6 +36,7 @@ pub async fn run_coordinator_client(
             server_id,
             udp_port,
             ws_port,
+            host: advertise_host.clone(),
         };
         if let Ok(json) = serde_json::to_string(&reg) {
             let _ = ws_sink.send(Message::Text(json.into())).await;
@@ -70,8 +73,15 @@ pub async fn run_coordinator_client(
                         let mut w = world.write().await;
                         w.peer_addrs.clear();
                         for peer in &peers {
-                            if let Ok(addr) = peer.udp_addr.parse() {
+                            // Try direct parse first (IP:port), fall back to DNS resolution (hostname:port)
+                            let addr = match peer.udp_addr.parse() {
+                                Ok(a) => Some(a),
+                                Err(_) => lookup_host(&peer.udp_addr).await.ok().and_then(|mut addrs| addrs.next()),
+                            };
+                            if let Some(addr) = addr {
                                 w.peer_addrs.insert(peer.server_id, addr);
+                            } else {
+                                tracing::warn!("Could not resolve peer address: {}", peer.udp_addr);
                             }
                         }
                         tracing::info!(
@@ -94,9 +104,9 @@ pub async fn run_coordinator_client(
                             target_servers.iter().map(|s| format!("S{s}")).collect::<Vec<_>>()
                         );
                     }
-                    Ok(CoordServerMsg::RecoverEntities { dead_server_id }) => {
+                    Ok(CoordServerMsg::RecoverEntities { dead_server_id, survivors }) => {
                         let mut w = world.write().await;
-                        w.recover_from_dead_server(dead_server_id);
+                        w.recover_from_dead_server(dead_server_id, &survivors);
                     }
                     Err(e) => {
                         tracing::warn!("Bad coordinator message: {e}");
