@@ -3,12 +3,25 @@ use shared::spatial::{clamp_to_world, WORLD_EXTENT};
 use glam::Vec3;
 use rand::Rng;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 pub struct World {
     pub server_id: ServerId,
     pub tick: u64,
+    /// Entities this server is authoritative for.
     pub entities: HashMap<EntityId, EntityState>,
+    /// Read-only copies of entities from peer servers.
+    pub shadow_entities: HashMap<EntityId, EntityState>,
+    /// Tick at which each shadow was last updated (for stale cleanup).
+    pub shadow_last_seen: HashMap<EntityId, u64>,
+    /// UDP addresses of peer servers.
+    pub peer_addrs: HashMap<u16, SocketAddr>,
+    /// Pending rebalance: (entity_id strings, target_server_id). Set by coordinator client.
+    pub pending_transfers: Option<(Vec<String>, u16)>,
 }
+
+/// Max ticks before a shadow entity is considered stale and removed.
+const SHADOW_STALE_TICKS: u64 = 100; // 5 seconds at 20Hz
 
 impl World {
     pub fn new(server_id: ServerId) -> Self {
@@ -16,6 +29,10 @@ impl World {
             server_id,
             tick: 0,
             entities: HashMap::new(),
+            shadow_entities: HashMap::new(),
+            shadow_last_seen: HashMap::new(),
+            peer_addrs: HashMap::new(),
+            pending_transfers: None,
         }
     }
 
@@ -42,6 +59,20 @@ impl World {
         id
     }
 
+    /// Spawn a player with a specific UUID (assigned by the gateway).
+    pub fn spawn_player_with_id(&mut self, uuid: uuid::Uuid, position: Vec3) -> EntityId {
+        let id = EntityId(uuid);
+        let entity = EntityState {
+            id,
+            position,
+            velocity: Vec3::ZERO,
+            entity_type: EntityType::Player,
+            authority_server: self.server_id,
+        };
+        self.entities.insert(id, entity);
+        id
+    }
+
     pub fn remove_entity(&mut self, id: &EntityId) {
         self.entities.remove(id);
     }
@@ -56,8 +87,36 @@ impl World {
         }
     }
 
+    /// Returns only authoritative entities (for WebSocket broadcast).
     pub fn get_snapshot(&self) -> Vec<EntityState> {
         self.entities.values().cloned().collect()
+    }
+
+    /// Apply incoming shadow entity data from a peer server.
+    pub fn apply_peer_update(&mut self, tick: u64, entities: Vec<EntityState>) {
+        for entity in entities {
+            // Don't overwrite our own authoritative entities
+            if self.entities.contains_key(&entity.id) {
+                continue;
+            }
+            self.shadow_last_seen.insert(entity.id, tick);
+            self.shadow_entities.insert(entity.id, entity);
+        }
+    }
+
+    /// Remove stale shadow entities.
+    pub fn cleanup_shadows(&mut self) {
+        let tick = self.tick;
+        let stale: Vec<EntityId> = self
+            .shadow_last_seen
+            .iter()
+            .filter(|(_, &last)| tick.saturating_sub(last) > SHADOW_STALE_TICKS)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.shadow_entities.remove(&id);
+            self.shadow_last_seen.remove(&id);
+        }
     }
 
     pub fn clamp_all_positions(&mut self) {

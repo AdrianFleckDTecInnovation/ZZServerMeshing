@@ -7,6 +7,8 @@ export class NetworkClient {
   private reconnectDelay = 1000;
   private maxReconnectDelay = 10000;
   private connected = false;
+  /** Our player entity ID, assigned by the gateway. */
+  playerId: string | null = null;
 
   constructor(url: string, worldView: WorldView) {
     this.url = url;
@@ -29,6 +31,10 @@ export class NetworkClient {
         const msg = JSON.parse(event.data);
         if (msg.type === 'WorldSnapshot') {
           this.worldView.applySnapshot(msg as WorldSnapshot);
+        } else if (msg.type === 'PlayerAssigned') {
+          this.playerId = msg.player_id;
+          this.worldView.localPlayerId = msg.player_id;
+          console.log('Assigned player:', msg.player_id);
         }
       } catch (e) {
         console.warn('Failed to parse server message:', e);
@@ -38,6 +44,8 @@ export class NetworkClient {
     this.ws.onclose = () => {
       console.log('Disconnected from server');
       this.connected = false;
+      this.playerId = null;
+      this.worldView.localPlayerId = null;
       this.scheduleReconnect();
     };
 

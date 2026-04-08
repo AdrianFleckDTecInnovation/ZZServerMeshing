@@ -1,7 +1,8 @@
 use crate::entity::{EntityId, EntityState, ServerId};
 use serde::{Deserialize, Serialize};
 
-/// Messages sent from the server to browser clients (JSON over WebSocket).
+// ── Server → Browser Client (JSON over WebSocket) ──
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
@@ -16,7 +17,8 @@ pub enum ServerMessage {
     },
 }
 
-/// Messages sent from browser clients to the server (JSON over WebSocket).
+// ── Browser Client / Gateway → Server (JSON over WebSocket) ──
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
@@ -24,14 +26,24 @@ pub enum ClientMessage {
         position: [f32; 3],
         entity_type: String,
     },
+    /// Gateway assigns a specific UUID for a player entity.
+    SpawnPlayer {
+        player_id: String,
+        position: [f32; 3],
+    },
     MoveInput {
         entity_id: String,
         direction: [f32; 3],
     },
+    /// Gateway requests removal of a player entity on disconnect.
+    RemoveEntity {
+        entity_id: String,
+    },
     RequestSnapshot,
 }
 
-/// Messages sent between sim-servers (bincode over UDP). Used in Phase 2+.
+// ── Sim-Server ↔ Sim-Server (bincode over UDP) ──
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerMessage {
     EntityStateUpdate {
@@ -45,9 +57,40 @@ pub enum PeerMessage {
         to_server: ServerId,
         full_state: EntityState,
     },
-    Heartbeat {
-        server_id: ServerId,
-        entity_count: u32,
-        cpu_load: f32,
+}
+
+// ── Sim-Server → Coordinator (JSON over WebSocket) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CoordClientMsg {
+    Register {
+        server_id: u16,
+        udp_port: u16,
+        ws_port: u16,
     },
+    Heartbeat {
+        server_id: u16,
+        entity_count: u32,
+    },
+}
+
+// ── Coordinator → Sim-Server (JSON over WebSocket) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CoordServerMsg {
+    PeerList { peers: Vec<PeerInfo> },
+    /// Instruct a server to transfer entities to another server.
+    RebalanceDirective {
+        entity_ids: Vec<String>,
+        target_server: u16,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub server_id: u16,
+    pub udp_addr: String,
+    pub ws_addr: String,
 }

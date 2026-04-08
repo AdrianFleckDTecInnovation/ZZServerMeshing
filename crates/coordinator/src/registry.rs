@@ -1,0 +1,147 @@
+use shared::protocol::{CoordServerMsg, PeerInfo};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+
+pub struct ServerEntry {
+    pub server_id: u16,
+    pub udp_port: u16,
+    pub ws_port: u16,
+    pub entity_count: u32,
+    pub reply_tx: mpsc::UnboundedSender<String>,
+    pub last_heartbeat: std::time::Instant,
+}
+
+pub struct Registry {
+    servers: HashMap<u16, ServerEntry>,
+}
+
+impl Registry {
+    pub fn new() -> Self {
+        Self {
+            servers: HashMap::new(),
+        }
+    }
+
+    pub fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+
+    pub fn register(
+        &mut self,
+        server_id: u16,
+        udp_port: u16,
+        ws_port: u16,
+        reply_tx: mpsc::UnboundedSender<String>,
+    ) {
+        self.servers.insert(
+            server_id,
+            ServerEntry {
+                server_id,
+                udp_port,
+                ws_port,
+                entity_count: 0,
+                reply_tx,
+                last_heartbeat: std::time::Instant::now(),
+            },
+        );
+    }
+
+    pub fn unregister(&mut self, server_id: u16) {
+        self.servers.remove(&server_id);
+    }
+
+    pub fn heartbeat(&mut self, server_id: u16, entity_count: u32) {
+        if let Some(entry) = self.servers.get_mut(&server_id) {
+            entry.entity_count = entity_count;
+            entry.last_heartbeat = std::time::Instant::now();
+        }
+    }
+
+    /// Check load balance and issue rebalance directives if needed.
+    /// Returns true if a rebalance was triggered.
+    pub fn try_rebalance(&self) -> bool {
+        let sim_servers: Vec<&ServerEntry> = self
+            .servers
+            .values()
+            .filter(|s| s.server_id > 0)
+            .collect();
+
+        if sim_servers.len() < 2 {
+            return false;
+        }
+
+        let total_entities: u32 = sim_servers.iter().map(|s| s.entity_count).sum();
+        if total_entities == 0 {
+            return false;
+        }
+
+        let avg = total_entities as f32 / sim_servers.len() as f32;
+
+        // Find most overloaded and most underloaded
+        let overloaded = sim_servers.iter().max_by_key(|s| s.entity_count).unwrap();
+        let underloaded = sim_servers.iter().min_by_key(|s| s.entity_count).unwrap();
+
+        let diff = overloaded.entity_count as i32 - underloaded.entity_count as i32;
+
+        // Only rebalance if the imbalance is significant (>30% of average, and at least 5 entities)
+        if diff < 5 || (diff as f32) < avg * 0.3 {
+            return false;
+        }
+
+        // Transfer enough entities to bring closer to average (cap at 10% of overloaded)
+        let transfer_count = (diff as u32 / 2).min(overloaded.entity_count / 10).max(1);
+
+        tracing::info!(
+            "Rebalancing: S{} ({} entities) -> S{} ({} entities), transferring {}",
+            overloaded.server_id,
+            overloaded.entity_count,
+            underloaded.server_id,
+            underloaded.entity_count,
+            transfer_count,
+        );
+
+        // Tell the overloaded server to transfer N entities to the underloaded server.
+        // The server will pick which entities to transfer (it knows positions for clustering).
+        let msg = CoordServerMsg::RebalanceDirective {
+            entity_ids: Vec::new(), // empty = server picks
+            target_server: underloaded.server_id,
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = overloaded.reply_tx.send(json);
+        }
+
+        true
+    }
+
+    /// Build a PeerList and send it to every connected server.
+    /// Each server receives a list excluding itself.
+    /// Server ID 0 (gateway) is excluded from sim-server peer lists.
+    pub fn broadcast_peer_list(&self) {
+        // Only real sim-servers (id > 0) go in the peer list
+        let sim_peers: Vec<PeerInfo> = self
+            .servers
+            .values()
+            .filter(|s| s.server_id > 0)
+            .map(|s| PeerInfo {
+                server_id: s.server_id,
+                udp_addr: format!("127.0.0.1:{}", s.udp_port),
+                ws_addr: format!("127.0.0.1:{}", s.ws_port),
+            })
+            .collect();
+
+        for entry in self.servers.values() {
+            // Exclude self from peer list
+            let peers: Vec<PeerInfo> = sim_peers
+                .iter()
+                .filter(|p| p.server_id != entry.server_id)
+                .cloned()
+                .collect();
+
+            let msg = CoordServerMsg::PeerList { peers };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = entry.reply_tx.send(json);
+            }
+        }
+    }
+}

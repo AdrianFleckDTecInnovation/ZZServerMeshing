@@ -1,10 +1,14 @@
 mod world;
 mod simulation;
 mod network;
+mod replication;
+mod receiver;
+mod coordinator_client;
 
 use clap::Parser;
 use shared::entity::ServerId;
 use std::sync::Arc;
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 
 #[derive(Parser, Debug)]
@@ -14,13 +18,17 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     server_id: u16,
 
-    /// WebSocket port for client connections
-    #[arg(long, default_value_t = 9001)]
+    /// WebSocket port for client/gateway connections
+    #[arg(long, default_value_t = 7878)]
     port: u16,
 
-    /// UDP port for peer server communication (Phase 2)
+    /// UDP port for peer server communication
     #[arg(long, default_value_t = 9101)]
     udp_port: u16,
+
+    /// Coordinator address (host:port)
+    #[arg(long, default_value = "127.0.0.1:7870")]
+    coordinator: String,
 
     /// Number of NPCs to spawn initially
     #[arg(long, default_value_t = 20)]
@@ -33,21 +41,27 @@ async fn main() {
     let args = Args::parse();
 
     let server_id = ServerId(args.server_id);
-    tracing::info!("Sim-server {} starting on port {}", server_id, args.port);
+    tracing::info!("Sim-server {} starting (ws:{} udp:{})", server_id, args.port, args.udp_port);
 
     // Create the world
     let mut world = world::World::new(server_id);
-
-    // Spawn initial NPCs at random positions
     world.spawn_initial_npcs(args.initial_npcs);
     tracing::info!("Spawned {} initial NPCs", args.initial_npcs);
 
     let world = Arc::new(RwLock::new(world));
 
+    // Bind UDP socket for peer communication
+    let udp_socket = Arc::new(
+        UdpSocket::bind(format!("0.0.0.0:{}", args.udp_port))
+            .await
+            .expect("Failed to bind UDP port"),
+    );
+    tracing::info!("UDP bound on port {}", args.udp_port);
+
     // Channel for client inputs -> game loop
     let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-    // Start WebSocket server
+    // Start WebSocket server for clients/gateway
     let ws_world = Arc::clone(&world);
     let ws_handle = tokio::spawn(network::run_websocket_server(
         args.port,
@@ -55,18 +69,30 @@ async fn main() {
         input_tx,
     ));
 
-    // Run the game loop
-    let sim_handle = tokio::spawn(simulation::run_game_loop(world, input_rx));
+    // Start UDP receiver (incoming peer entity states)
+    let recv_world = Arc::clone(&world);
+    let recv_socket = Arc::clone(&udp_socket);
+    let recv_handle = tokio::spawn(receiver::run_udp_receiver(recv_socket, recv_world));
+
+    // Connect to coordinator
+    let coord_world = Arc::clone(&world);
+    let coord_handle = tokio::spawn(coordinator_client::run_coordinator_client(
+        args.coordinator,
+        args.server_id,
+        args.udp_port,
+        args.port,
+        coord_world,
+    ));
+
+    // Run the game loop (includes replication)
+    let sim_world = Arc::clone(&world);
+    let sim_handle = tokio::spawn(simulation::run_game_loop(sim_world, input_rx, udp_socket));
 
     tokio::select! {
-        r = ws_handle => {
-            if let Err(e) = r { tracing::error!("WebSocket server error: {e}"); }
-        }
-        r = sim_handle => {
-            if let Err(e) = r { tracing::error!("Game loop error: {e}"); }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutting down");
-        }
+        r = ws_handle => { if let Err(e) = r { tracing::error!("WS error: {e}"); } }
+        r = recv_handle => { if let Err(e) = r { tracing::error!("UDP receiver error: {e}"); } }
+        r = coord_handle => { if let Err(e) = r { tracing::error!("Coordinator client error: {e}"); } }
+        r = sim_handle => { if let Err(e) = r { tracing::error!("Game loop error: {e}"); } }
+        _ = tokio::signal::ctrl_c() => { tracing::info!("Shutting down"); }
     }
 }

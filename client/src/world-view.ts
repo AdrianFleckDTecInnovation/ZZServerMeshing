@@ -50,6 +50,8 @@ export class WorldView {
   entities: Map<string, EntityData> = new Map();
   currentTick: number = 0;
   serverEntityCounts: Map<number, number> = new Map();
+  /** Our local player entity ID, set by the gateway. */
+  localPlayerId: string | null = null;
 
   applySnapshot(snapshot: WorldSnapshot): void {
     this.currentTick = snapshot.tick;
