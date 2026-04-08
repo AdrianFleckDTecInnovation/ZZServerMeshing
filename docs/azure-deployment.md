@@ -1,6 +1,8 @@
 # Azure Deployment Plan
 
-Deploy the server meshing prototype to Azure for real cross-host network testing. The client is hosted on **Azure App Service** (familiar workflow, static files). Everything else runs on **AKS** with sim-servers spread across different nodes to test real UDP latency.
+Deploy the server meshing prototype to Azure for real cross-host network testing. The client is hosted on **Azure App Service** (static files). Everything else runs on **AKS** with sim-servers spread across different nodes to test real UDP latency.
+
+All services are Rust — coordinator, sim-server, and gateway share one Docker image with different entrypoints.
 
 ## Architecture
 
@@ -31,7 +33,7 @@ Deploy the server meshing prototype to Azure for real cross-host network testing
          │              │  └─────────┘              │   │
          │              │                           │   │
          │              │  ┌─────────────────┐      │   │
-         └──────────────┼─►│    Gateway      │──────┘   │
+         └──────────────┼─►│  Gateway (Rust) │──────┘   │
                         │  │    :4322        │          │
                         │  │  LoadBalancer   │          │
                         │  │  (public IP)    │          │
@@ -44,7 +46,7 @@ Deploy the server meshing prototype to Azure for real cross-host network testing
 | Service | Hosting | Exposed? | Why |
 |---------|---------|----------|-----|
 | Client (Vite build) | App Service | Yes — public URL | Static files, familiar deploy workflow |
-| Gateway | AKS (LoadBalancer) | Yes — public IP | Browser needs WebSocket access |
+| Gateway (Rust) | AKS (LoadBalancer) | Yes — public IP | Browser WebSocket, binary protocol |
 | Coordinator | AKS (ClusterIP) | No — internal only | Only sim-servers and gateway connect |
 | Sim-Servers (N) | AKS (headless Service) | No — internal only | Communicate via UDP, no public access |
 
@@ -57,12 +59,10 @@ Deploy the server meshing prototype to Azure for real cross-host network testing
 
 ## Step 1: Create Azure Resources
 
-Names and regions are placeholders — fill in during setup.
-
 ```bash
 # Variables (customize these)
 RESOURCE_GROUP="rg-servermesh"
-LOCATION="eastus"                  # pick region closest to testers
+LOCATION="eastus"
 ACR_NAME="servermeshacr"           # must be globally unique
 AKS_NAME="aks-servermesh"
 APP_SERVICE_PLAN="plan-servermesh"
@@ -71,7 +71,7 @@ APP_NAME="servermesh-client"       # must be globally unique
 # Resource group
 az group create --name $RESOURCE_GROUP --location $LOCATION
 
-# Container registry (for Docker images)
+# Container registry
 az acr create \
   --resource-group $RESOURCE_GROUP \
   --name $ACR_NAME \
@@ -103,54 +103,20 @@ az webapp create \
   --runtime "NODE:20-lts"
 ```
 
-## Step 2: Dockerfiles
+## Step 2: Build & Push Docker Image
 
-Three images needed: Rust services (shared image, different entrypoint), gateway, and client (build-only, for local iteration).
-
-### `docker/Dockerfile.rust`
-
-Multi-stage build for both coordinator and sim-server binaries.
-
-```dockerfile
-# Build stage
-FROM rust:1.83-bookworm AS builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ crates/
-RUN cargo build --release -p coordinator -p sim-server
-
-# Runtime stage
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/coordinator /usr/local/bin/
-COPY --from=builder /app/target/release/sim-server /usr/local/bin/
-```
-
-### `docker/Dockerfile.gateway`
-
-```dockerfile
-FROM node:22-alpine
-WORKDIR /app
-COPY gateway/package.json gateway/package-lock.json ./
-RUN npm ci
-COPY gateway/ .
-CMD ["npx", "tsx", "src/index.ts"]
-```
-
-### Build & push
+One image for all three Rust services — `docker/Dockerfile.rust` builds coordinator, sim-server, and gateway binaries.
 
 ```bash
 # Login to ACR
 az acr login --name $ACR_NAME
 
-# Build and push Rust image
+# Build and push (single image for all Rust services)
 docker build -f docker/Dockerfile.rust -t $ACR_NAME.azurecr.io/mesh-rust:latest .
 docker push $ACR_NAME.azurecr.io/mesh-rust:latest
-
-# Build and push gateway image
-docker build -f docker/Dockerfile.gateway -t $ACR_NAME.azurecr.io/mesh-gateway:latest .
-docker push $ACR_NAME.azurecr.io/mesh-gateway:latest
 ```
+
+No separate gateway image needed — the Node.js gateway has been replaced with Rust.
 
 ## Step 3: Kubernetes Manifests
 
@@ -225,23 +191,25 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # Derive server-id from pod ordinal (sim-server-0 → 1, sim-server-1 → 2, etc.)
               ORDINAL=${HOSTNAME##*-}
               SERVER_ID=$((ORDINAL + 1))
               WS_PORT=$((7877 + SERVER_ID))
               UDP_PORT=$((9100 + SERVER_ID))
-              NPC_COUNT=10
+              METRICS_PORT=$((8100 + SERVER_ID))
               exec sim-server \
                 --server-id $SERVER_ID \
                 --port $WS_PORT \
                 --udp-port $UDP_PORT \
+                --metrics-port $METRICS_PORT \
                 --coordinator coordinator:7870 \
-                --initial-npcs $NPC_COUNT
+                --initial-npcs 10
           ports:
             - containerPort: 7878
               protocol: TCP
             - containerPort: 9101
               protocol: UDP
+            - containerPort: 8101
+              protocol: TCP
 ---
 # Headless service for pod-to-pod DNS and UDP discovery
 apiVersion: v1
@@ -260,9 +228,12 @@ spec:
     - name: udp
       port: 9101
       protocol: UDP
+    - name: metrics
+      port: 8101
+      protocol: TCP
 ```
 
-**Important:** The coordinator broadcasts peer IPs to each sim-server via `PeerList`. In AKS, these will be pod IPs. The sim-servers use these IPs directly for UDP replication — this works out of the box because K8s pod networking is flat (any pod can reach any other pod by IP).
+**Note:** The coordinator broadcasts pod IPs to each sim-server via `PeerList`. In AKS, K8s pod networking is flat — any pod can reach any other pod by IP, so UDP replication works out of the box. No `--advertise-host` needed (that's only for Docker Compose where container hostnames aren't IPs).
 
 ### `k8s/gateway.yaml`
 
@@ -283,14 +254,18 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: ${ACR_NAME}.azurecr.io/mesh-gateway:latest
-          env:
-            - name: COORDINATOR_URL
-              value: "ws://coordinator:7870"
-            - name: GATEWAY_PORT
-              value: "4322"
+          image: ${ACR_NAME}.azurecr.io/mesh-rust:latest
+          command:
+            - gateway
+            - "--port"
+            - "4322"
+            - "--coordinator"
+            - "coordinator:7870"
+            - "--metrics-port"
+            - "8200"
           ports:
             - containerPort: 4322
+            - containerPort: 8200
 ---
 apiVersion: v1
 kind: Service
@@ -301,8 +276,12 @@ spec:
   selector:
     app: gateway
   ports:
-    - port: 80
+    - name: ws
+      port: 80
       targetPort: 4322
+    - name: metrics
+      port: 8200
+      targetPort: 8200
 ```
 
 After applying, get the public IP:
@@ -314,7 +293,7 @@ kubectl get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 
 The client currently hardcodes the gateway URL. Needs to be configurable for deployment.
 
-**File:** `client/src/main.ts`, line 8
+**File:** `client/src/main.ts`
 
 ```typescript
 // Before (hardcoded)
@@ -332,11 +311,7 @@ cd client
 VITE_GATEWAY_URL="ws://<gateway-public-ip>" npm run build
 ```
 
-This produces a `dist/` folder of static files.
-
 ## Step 5: Deploy Client to App Service
-
-After building with the correct gateway URL:
 
 ```bash
 cd client
@@ -345,16 +320,13 @@ cd client
 VITE_GATEWAY_URL="ws://$(kubectl get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" \
   npm run build
 
-# Deploy static files to App Service
-# Option A: ZIP deploy
+# ZIP deploy
 cd dist && zip -r ../client.zip . && cd ..
 az webapp deploy \
   --resource-group $RESOURCE_GROUP \
   --name $APP_NAME \
   --src-path client.zip \
   --type zip
-
-# Option B: Use App Service local git deploy or GitHub Actions
 ```
 
 The client will be available at: `https://$APP_NAME.azurewebsites.net`
@@ -380,25 +352,42 @@ kubectl get svc gateway -w
 ## Deployment Order
 
 1. Create Azure resources (resource group, ACR, AKS, App Service)
-2. Build and push Docker images to ACR
-3. Deploy AKS manifests (coordinator first, then sim-servers, then gateway)
+2. Build and push Docker image to ACR
+3. Deploy AKS manifests (coordinator → sim-servers → gateway)
 4. Wait for gateway LoadBalancer IP
 5. Build client with `VITE_GATEWAY_URL` pointing to gateway IP
 6. Deploy client `dist/` to App Service
 7. Open `https://$APP_NAME.azurewebsites.net` in browser
 
+## Running the Test Suite Against AKS
+
+Port-forward the metrics endpoints, then run the test suite:
+
+```bash
+# In separate terminals, forward each sim-server's metrics port
+kubectl port-forward sim-server-0 8101:8101 &
+kubectl port-forward sim-server-1 8102:8102 &
+kubectl port-forward sim-server-2 8103:8103 &
+kubectl port-forward svc/gateway 8200:8200 &
+
+# Get gateway public IP
+GW_IP=$(kubectl get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+# Run test suite
+cd tools
+npx tsx test-suite/runner.ts "ws://${GW_IP}" 8101 3 --json
+```
+
 ## Updating After Code Changes
 
 ```bash
-# Rust changes: rebuild and push image, then restart
+# Rebuild and push (one image for all Rust services)
 docker build -f docker/Dockerfile.rust -t $ACR_NAME.azurecr.io/mesh-rust:latest .
 docker push $ACR_NAME.azurecr.io/mesh-rust:latest
-kubectl rollout restart statefulset/sim-server
-kubectl rollout restart deployment/coordinator
 
-# Gateway changes: rebuild and push, restart
-docker build -f docker/Dockerfile.gateway -t $ACR_NAME.azurecr.io/mesh-gateway:latest .
-docker push $ACR_NAME.azurecr.io/mesh-gateway:latest
+# Restart all services
+kubectl rollout restart deployment/coordinator
+kubectl rollout restart statefulset/sim-server
 kubectl rollout restart deployment/gateway
 
 # Client changes: rebuild and redeploy to App Service
@@ -427,12 +416,31 @@ kubectl logs -f statefulset/sim-server        # follows pod 0
 kubectl logs -f sim-server-1                   # specific server
 kubectl logs -f deployment/gateway
 
+# Metrics (with port-forward active)
+curl localhost:8101/metrics | jq .   # sim-server 1
+curl localhost:8200/metrics | jq .   # gateway
+
 # Shell into a pod
 kubectl exec -it sim-server-0 -- /bin/sh
 
 # Check UDP connectivity between sim-servers
-kubectl exec -it sim-server-0 -- sh -c 'apt-get update && apt-get install -y netcat-openbsd && nc -u -z sim-server-1.sim-server 9102'
+kubectl exec -it sim-server-0 -- sh -c 'nc -u -z sim-server-1.sim-server 9102'
 ```
+
+## Protocol Notes
+
+The gateway uses a **binary WebSocket protocol** for client broadcasts (not JSON). This reduces bandwidth ~5x:
+
+| Protocol | Per-entity size | 5K entities/frame |
+|----------|----------------|-------------------|
+| JSON | ~200 bytes | ~1 MB |
+| Binary | 43 bytes | ~215 KB |
+
+Additionally, **delta compression** sends only changed entities most ticks, with a full snapshot every 1 second for reliability.
+
+Frame types (first byte):
+- `0x01` — Full snapshot (all entities)
+- `0x02` — Delta (changed entities + removed entity IDs)
 
 ## Cost Estimate (Pay-As-You-Go)
 
@@ -445,13 +453,12 @@ kubectl exec -it sim-server-0 -- sh -c 'apt-get update && apt-get install -y net
 | Load Balancer | Standard | ~$18 |
 | **Total** | | **~$246/mo** |
 
-Can reduce cost by using B-series burstable VMs for AKS nodes (~$90/mo for 3x B2ms) if sustained compute isn't needed.
+Can reduce cost by using B-series burstable VMs for AKS nodes (~$90/mo for 3x B2ms).
 
 ## Open Questions
 
 - [ ] Azure subscription and resource group naming
-- [ ] Region selection (closest to testers for lowest latency to client/gateway)
+- [ ] Region selection (closest to testers for lowest latency)
 - [ ] Custom domain / TLS for the client App Service?
-- [ ] CI/CD pipeline (GitHub Actions?) or manual deploys for now?
-- [ ] How many sim-servers for initial testing?
+- [ ] CI/CD pipeline (GitHub Actions?) or manual deploys?
 - [ ] Node VM size — D2s_v5 (steady) vs B2ms (burstable, cheaper)?

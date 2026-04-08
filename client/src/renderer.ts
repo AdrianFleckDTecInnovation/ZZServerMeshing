@@ -33,6 +33,7 @@ export class Renderer {
 
   private keys = new Set<string>();
   followPlayer = true;
+  onRenderFrame: (() => void) | null = null;
   private cameraOffset = new THREE.Vector3(0, 200, 200);
 
   constructor(worldView: WorldView, network: NetworkClient) {
@@ -165,6 +166,7 @@ export class Renderer {
 
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    this.onRenderFrame?.();
   }
 
   private handleKeyboardInput(): void {

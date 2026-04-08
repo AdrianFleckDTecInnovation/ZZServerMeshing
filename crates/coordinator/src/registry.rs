@@ -6,6 +6,7 @@ pub struct ServerEntry {
     pub server_id: u16,
     pub udp_port: u16,
     pub ws_port: u16,
+    pub host: String,
     pub entity_count: u32,
     pub reply_tx: mpsc::UnboundedSender<String>,
     pub last_heartbeat: std::time::Instant,
@@ -31,6 +32,7 @@ impl Registry {
         server_id: u16,
         udp_port: u16,
         ws_port: u16,
+        host: Option<String>,
         reply_tx: mpsc::UnboundedSender<String>,
     ) {
         self.servers.insert(
@@ -39,6 +41,7 @@ impl Registry {
                 server_id,
                 udp_port,
                 ws_port,
+                host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
                 entity_count: 0,
                 reply_tx,
                 last_heartbeat: std::time::Instant::now(),
@@ -91,7 +94,13 @@ impl Registry {
 
     /// Broadcast recovery directive for a dead server to all surviving servers.
     pub fn broadcast_recovery(&self, dead_server_id: u16) {
-        let msg = CoordServerMsg::RecoverEntities { dead_server_id };
+        let mut survivors: Vec<u16> = self.servers.keys()
+            .filter(|&&id| id > 0)
+            .copied()
+            .collect();
+        survivors.sort();
+
+        let msg = CoordServerMsg::RecoverEntities { dead_server_id, survivors };
         if let Ok(json) = serde_json::to_string(&msg) {
             for entry in self.servers.values() {
                 if entry.server_id > 0 {
@@ -119,6 +128,11 @@ impl Registry {
             return false;
         }
 
+        let counts: Vec<String> = sim_servers.iter()
+            .map(|s| format!("S{}:{}", s.server_id, s.entity_count))
+            .collect();
+        tracing::debug!("Rebalance check: {} | total={total_entities}", counts.join(" "));
+
         let avg = total_entities as f32 / sim_servers.len() as f32;
 
         // Find most overloaded and most underloaded
@@ -127,8 +141,8 @@ impl Registry {
 
         let diff = overloaded.entity_count as i32 - underloaded.entity_count as i32;
 
-        // Only rebalance if the imbalance is significant (>30% of average, and at least 5 entities)
-        if diff < 5 || (diff as f32) < avg * 0.3 {
+        // Rebalance if diff > 20% of average and at least 10 entities apart
+        if diff < 10 || (diff as f32) < avg * 0.2 {
             return false;
         }
 
@@ -169,8 +183,8 @@ impl Registry {
             .filter(|s| s.server_id > 0)
             .map(|s| PeerInfo {
                 server_id: s.server_id,
-                udp_addr: format!("127.0.0.1:{}", s.udp_port),
-                ws_addr: format!("127.0.0.1:{}", s.ws_port),
+                udp_addr: format!("{}:{}", s.host, s.udp_port),
+                ws_addr: format!("{}:{}", s.host, s.ws_port),
             })
             .collect();
 
