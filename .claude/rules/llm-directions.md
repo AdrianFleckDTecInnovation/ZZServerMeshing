@@ -1,0 +1,1 @@
+Before doing ANY work on this project, read `docs/LLMDirections.md`. It contains the full system design, where every piece of code lives, protocol reference, conventions, and common task patterns. Do not skip this step.

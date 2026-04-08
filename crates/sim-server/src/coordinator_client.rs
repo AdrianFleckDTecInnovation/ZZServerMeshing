@@ -85,6 +85,19 @@ pub async fn run_coordinator_client(
                         w.pending_transfers = Some((entity_ids, target_server));
                         tracing::info!("Received rebalance directive -> S{target_server}");
                     }
+                    Ok(CoordServerMsg::DrainDirective { target_servers }) => {
+                        let mut w = world.write().await;
+                        w.draining = true;
+                        w.drain_targets = Some(target_servers.clone());
+                        tracing::info!(
+                            "Received drain directive -> {:?}",
+                            target_servers.iter().map(|s| format!("S{s}")).collect::<Vec<_>>()
+                        );
+                    }
+                    Ok(CoordServerMsg::RecoverEntities { dead_server_id }) => {
+                        let mut w = world.write().await;
+                        w.recover_from_dead_server(dead_server_id);
+                    }
                     Err(e) => {
                         tracing::warn!("Bad coordinator message: {e}");
                     }

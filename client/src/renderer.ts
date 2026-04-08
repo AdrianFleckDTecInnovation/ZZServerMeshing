@@ -1,9 +1,9 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { WorldView, SERVER_COLORS, PLAYER_COLOR } from './world-view';
+import { WorldView, SERVER_COLORS, PLAYER_COLOR, EntityData } from './world-view';
 import { NetworkClient } from './network';
 
-const LOCAL_PLAYER_COLOR = new THREE.Color(0x00ff88); // Bright green for YOUR player
+const LOCAL_PLAYER_COLOR = new THREE.Color(0x00ff88);
 
 export class Renderer {
   private renderer!: THREE.WebGPURenderer;
@@ -17,15 +17,21 @@ export class Renderer {
   private npcGeometry!: THREE.SphereGeometry;
   private playerGeometry!: THREE.BoxGeometry;
 
+  // Shared materials — one per server color, plus player/local player
+  private serverMaterials: Map<number, THREE.MeshStandardNodeMaterial> = new Map();
+  private playerMaterial!: THREE.MeshStandardNodeMaterial;
+  private localPlayerMaterial!: THREE.MeshStandardNodeMaterial;
+
+  // Mesh pools for reuse
+  private npcMeshPool: THREE.Mesh[] = [];
+  private playerMeshPool: THREE.Mesh[] = [];
+
   private raycaster = new THREE.Raycaster();
   private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private mouse = new THREE.Vector2();
-
   private lastTime = performance.now();
 
-  // Keyboard state
   private keys = new Set<string>();
-  /** Camera follows player when true. Press F to toggle. */
   followPlayer = true;
   private cameraOffset = new THREE.Vector3(0, 200, 200);
 
@@ -57,13 +63,11 @@ export class Renderer {
     this.controls.minDistance = 30;
     this.controls.maxDistance = 1000;
 
-    // Lighting
     this.scene.add(new THREE.AmbientLight(0x606080, 2));
     const dir = new THREE.DirectionalLight(0xffffff, 3);
     dir.position.set(200, 400, 200);
     this.scene.add(dir);
 
-    // Ground
     const groundGeom = new THREE.PlaneGeometry(1000, 1000);
     const groundMat = new THREE.MeshStandardNodeMaterial();
     groundMat.color = new THREE.Color(0x1a2a1a);
@@ -74,7 +78,6 @@ export class Renderer {
 
     this.scene.add(new THREE.GridHelper(1000, 20, 0x333333, 0x222222));
 
-    // World bounds
     const boundsEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1000, 10, 1000));
     const boundsLine = new THREE.LineSegments(boundsEdges, new THREE.LineBasicMaterial({ color: 0x444444 }));
     boundsLine.position.y = 5;
@@ -84,18 +87,62 @@ export class Renderer {
     this.npcGeometry = new THREE.SphereGeometry(4, 16, 12);
     this.playerGeometry = new THREE.BoxGeometry(6, 10, 6);
 
+    // Pre-create shared materials
+    for (let i = 0; i < SERVER_COLORS.length; i++) {
+      const mat = new THREE.MeshStandardNodeMaterial();
+      mat.roughness = 0.5;
+      mat.metalness = 0.3;
+      mat.color = SERVER_COLORS[i].clone();
+      this.serverMaterials.set(i + 1, mat);
+    }
+
+    this.playerMaterial = new THREE.MeshStandardNodeMaterial();
+    this.playerMaterial.roughness = 0.5;
+    this.playerMaterial.metalness = 0.3;
+    this.playerMaterial.color = PLAYER_COLOR.clone();
+
+    this.localPlayerMaterial = new THREE.MeshStandardNodeMaterial();
+    this.localPlayerMaterial.roughness = 0.5;
+    this.localPlayerMaterial.metalness = 0.3;
+    this.localPlayerMaterial.color = LOCAL_PLAYER_COLOR.clone();
+    this.localPlayerMaterial.emissive = new THREE.Color(0x003311);
+
     // Events
     window.addEventListener('resize', this.onResize.bind(this));
     this.renderer.domElement.addEventListener('click', this.onClick.bind(this));
     window.addEventListener('keydown', (e) => {
       this.keys.add(e.key.toLowerCase());
-      if (e.key.toLowerCase() === 'f') {
-        this.followPlayer = !this.followPlayer;
-      }
+      if (e.key.toLowerCase() === 'f') this.followPlayer = !this.followPlayer;
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.key.toLowerCase()));
 
     this.renderer.setAnimationLoop(this.animate.bind(this));
+  }
+
+  private getMaterialForEntity(entity: EntityData): THREE.MeshStandardNodeMaterial {
+    if (entity.id === this.worldView.localPlayerId) return this.localPlayerMaterial;
+    if (entity.entityType === 'Player') return this.playerMaterial;
+    return this.serverMaterials.get(entity.authorityServer) ?? this.serverMaterials.get(1)!;
+  }
+
+  private acquireMesh(entity: EntityData): THREE.Mesh {
+    const isPlayer = entity.entityType === 'Player';
+    const pool = isPlayer ? this.playerMeshPool : this.npcMeshPool;
+    let mesh = pool.pop();
+    if (mesh) {
+      mesh.material = this.getMaterialForEntity(entity);
+    } else {
+      const geom = isPlayer ? this.playerGeometry : this.npcGeometry;
+      mesh = new THREE.Mesh(geom, this.getMaterialForEntity(entity));
+    }
+    this.scene.add(mesh);
+    return mesh;
+  }
+
+  private releaseMesh(mesh: THREE.Mesh): void {
+    this.scene.remove(mesh);
+    const isPlayer = mesh.geometry === this.playerGeometry;
+    (isPlayer ? this.playerMeshPool : this.npcMeshPool).push(mesh);
   }
 
   private animate(): void {
@@ -103,16 +150,10 @@ export class Renderer {
     const dt = (now - this.lastTime) / 1000;
     this.lastTime = now;
 
-    // Send WASD input for our player
     this.handleKeyboardInput();
-
-    // Interpolate
     this.worldView.interpolate(dt);
-
-    // Sync meshes
     this.syncMeshes();
 
-    // Camera follow
     if (this.followPlayer && this.worldView.localPlayerId) {
       const player = this.worldView.entities.get(this.worldView.localPlayerId);
       if (player) {
@@ -128,13 +169,11 @@ export class Renderer {
 
   private handleKeyboardInput(): void {
     if (!this.network.playerId) return;
-
     let dx = 0, dz = 0;
     if (this.keys.has('w') || this.keys.has('arrowup')) dz = -1;
     if (this.keys.has('s') || this.keys.has('arrowdown')) dz = 1;
     if (this.keys.has('a') || this.keys.has('arrowleft')) dx = -1;
     if (this.keys.has('d') || this.keys.has('arrowright')) dx = 1;
-
     if (dx !== 0 || dz !== 0) {
       this.network.moveInput(this.network.playerId, dx, 0, dz);
     }
@@ -149,39 +188,25 @@ export class Renderer {
 
       let mesh = this.entityMeshes.get(entity.id);
       if (!mesh) {
-        const geom = entity.entityType === 'Player' ? this.playerGeometry : this.npcGeometry;
-        const mat = new THREE.MeshStandardNodeMaterial();
-        mat.roughness = 0.5;
-        mat.metalness = 0.3;
-        // Local player gets a distinct color
-        if (entity.id === localId) {
-          mat.color = LOCAL_PLAYER_COLOR.clone();
-          mat.emissive = new THREE.Color(0x003311);
-        } else {
-          mat.color = this.worldView.getColorForEntity(entity).clone();
-        }
-        mesh = new THREE.Mesh(geom, mat);
-        this.scene.add(mesh);
+        mesh = this.acquireMesh(entity);
         this.entityMeshes.set(entity.id, mesh);
       }
 
       const yOffset = entity.entityType === 'Player' ? 5 : 4;
       mesh.position.set(entity.position.x, entity.position.y + yOffset, entity.position.z);
 
-      // Update color (skip local player — always green)
+      // Swap material if authority changed (skip local player)
       if (entity.id !== localId) {
-        const targetColor = this.worldView.getColorForEntity(entity);
-        const mat = mesh.material as THREE.MeshStandardNodeMaterial;
-        if (!mat.color.equals(targetColor)) {
-          mat.color.copy(targetColor);
+        const correctMat = this.getMaterialForEntity(entity);
+        if (mesh.material !== correctMat) {
+          mesh.material = correctMat;
         }
       }
     }
 
     for (const [id, mesh] of this.entityMeshes) {
       if (!activeIds.has(id)) {
-        this.scene.remove(mesh);
-        (mesh.material as THREE.MeshStandardNodeMaterial).dispose();
+        this.releaseMesh(mesh);
         this.entityMeshes.delete(id);
       }
     }

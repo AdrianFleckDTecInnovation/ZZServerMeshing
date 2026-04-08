@@ -2,21 +2,29 @@ import * as THREE from 'three/webgpu';
 
 export interface EntityData {
   id: string;
-  position: THREE.Vector3;
+  position: THREE.Vector3;         // interpolated (rendered) position
+  previousPosition: THREE.Vector3; // server position at tick N-1
+  currentPosition: THREE.Vector3;  // server position at tick N (latest)
   velocity: THREE.Vector3;
-  targetPosition: THREE.Vector3;
   entityType: 'Player' | 'Npc';
   authorityServer: number;
-  lastUpdate: number;
+  hasSecondSnapshot: boolean;      // false until we have two positions to lerp between
 }
 
 export interface WorldSnapshot {
   type: 'WorldSnapshot';
   tick: number;
   entities: RawEntity[];
+  _metrics?: GatewayMetrics;
 }
 
-// Raw entity format from server JSON -- handles both array [x,y,z] and object {x,y,z} for Vec3
+export interface GatewayMetrics {
+  snapshotsPerSec: number;
+  bandwidthKBps: number;
+  rebalanceEvents: number;
+  serverCount: number;
+}
+
 type Vec3Like = [number, number, number] | { x: number; y: number; z: number };
 
 export interface RawEntity {
@@ -50,11 +58,20 @@ export class WorldView {
   entities: Map<string, EntityData> = new Map();
   currentTick: number = 0;
   serverEntityCounts: Map<number, number> = new Map();
-  /** Our local player entity ID, set by the gateway. */
   localPlayerId: string | null = null;
+  metrics: GatewayMetrics | null = null;
+
+  /** Timestamp of most recent snapshot arrival */
+  private lastSnapshotTime: number = performance.now();
+  private static readonly TICK_DURATION_MS = 50; // 20Hz
 
   applySnapshot(snapshot: WorldSnapshot): void {
     this.currentTick = snapshot.tick;
+    this.lastSnapshotTime = performance.now();
+
+    if (snapshot._metrics) {
+      this.metrics = snapshot._metrics;
+    }
 
     const incomingIds = new Set<string>();
     this.serverEntityCounts.clear();
@@ -64,8 +81,6 @@ export class WorldView {
       const serverId = raw.authority_server;
 
       incomingIds.add(id);
-
-      // Track per-server counts
       this.serverEntityCounts.set(
         serverId,
         (this.serverEntityCounts.get(serverId) || 0) + 1
@@ -76,20 +91,24 @@ export class WorldView {
 
       const existing = this.entities.get(id);
       if (existing) {
+        // Shift current -> previous, set new current
+        existing.previousPosition.copy(existing.currentPosition);
+        existing.currentPosition.copy(pos);
         existing.velocity.copy(vel);
-        existing.targetPosition.copy(pos);
         existing.entityType = raw.entity_type;
         existing.authorityServer = serverId;
-        existing.lastUpdate = performance.now();
+        existing.hasSecondSnapshot = true;
       } else {
+        // First time seeing this entity — snap to position
         this.entities.set(id, {
           id,
           position: pos.clone(),
+          previousPosition: pos.clone(),
+          currentPosition: pos.clone(),
           velocity: vel,
-          targetPosition: pos,
           entityType: raw.entity_type,
           authorityServer: serverId,
-          lastUpdate: performance.now(),
+          hasSecondSnapshot: false,
         });
       }
     }
@@ -102,10 +121,18 @@ export class WorldView {
     }
   }
 
-  interpolate(dt: number): void {
-    const lerpFactor = Math.min(1.0, dt * 15); // Smooth interpolation
+  interpolate(_dt: number): void {
+    const now = performance.now();
+    const timeSinceSnapshot = now - this.lastSnapshotTime;
+    // alpha: 0 at snapshot arrival, 1.0 one tick later, cap at 1.2 for slight extrapolation
+    const alpha = Math.min(timeSinceSnapshot / WorldView.TICK_DURATION_MS, 1.2);
+
     for (const entity of this.entities.values()) {
-      entity.position.lerp(entity.targetPosition, lerpFactor);
+      if (!entity.hasSecondSnapshot) {
+        entity.position.copy(entity.currentPosition);
+        continue;
+      }
+      entity.position.lerpVectors(entity.previousPosition, entity.currentPosition, alpha);
     }
   }
 

@@ -32,6 +32,9 @@ enum RegistryEvent {
     Disconnected {
         server_id: u16,
     },
+    Draining {
+        server_id: u16,
+    },
 }
 
 #[tokio::main]
@@ -118,6 +121,9 @@ async fn handle_server_connection(
                         entity_count,
                     });
                 }
+                Ok(CoordClientMsg::Draining { server_id: sid }) => {
+                    let _ = event_tx.send(RegistryEvent::Draining { server_id: sid });
+                }
                 Err(e) => {
                     tracing::warn!("Bad message from {addr}: {e}");
                 }
@@ -156,16 +162,35 @@ async fn run_registry(mut event_rx: mpsc::UnboundedReceiver<RegistryEvent>) {
                         registry.heartbeat(server_id, entity_count);
                     }
                     RegistryEvent::Disconnected { server_id } => {
+                        let had_entities = registry.server_count() > 0;
                         registry.unregister(server_id);
                         tracing::info!(
                             "Unregistered S{server_id} | {} servers remain",
                             registry.server_count()
                         );
                         registry.broadcast_peer_list();
+                        // If this was an unexpected disconnect (crash), trigger recovery
+                        if server_id > 0 && had_entities {
+                            tracing::warn!("S{server_id} crashed — broadcasting recovery");
+                            registry.broadcast_recovery(server_id);
+                        }
+                    }
+                    RegistryEvent::Draining { server_id } => {
+                        tracing::info!("S{server_id} requesting graceful drain");
+                        registry.drain_server(server_id);
                     }
                 }
             }
             _ = rebalance_interval.tick() => {
+                // Check for dead servers
+                let dead = registry.detect_dead_servers();
+                for sid in dead {
+                    tracing::warn!("S{sid} missed heartbeat — marking as dead");
+                    registry.unregister(sid);
+                    registry.broadcast_peer_list();
+                    registry.broadcast_recovery(sid);
+                }
+                // Rebalance
                 if last_rebalance.elapsed() >= rebalance_cooldown && registry.try_rebalance() {
                     last_rebalance = std::time::Instant::now();
                 }

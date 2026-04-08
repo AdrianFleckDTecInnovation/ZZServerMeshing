@@ -38,21 +38,34 @@ pub async fn run_udp_receiver(
                 w.apply_peer_update(tick, entities);
             }
             PeerMessage::AuthorityTransfer {
+                tick: _,
                 entity_id,
                 from_server,
-                to_server: _,
+                to_server,
                 full_state,
             } => {
                 let mut w = world.write().await;
-                // Accept: add to our authoritative entities, remove from shadows
+                // Validate: only accept if targeted at us
+                if to_server != w.server_id {
+                    tracing::warn!(
+                        "Ignoring transfer for {} targeted at {}, we are {}",
+                        entity_id, to_server, w.server_id
+                    );
+                    continue;
+                }
+                // Reject if already authoritative (duplicate transfer)
+                if w.entities.contains_key(&entity_id) {
+                    tracing::warn!(
+                        "Ignoring duplicate transfer for {} from {}",
+                        entity_id, from_server
+                    );
+                    continue;
+                }
+                // Accept: promote from shadow to authoritative
                 w.shadow_entities.remove(&entity_id);
                 w.shadow_last_seen.remove(&entity_id);
                 w.entities.insert(entity_id, full_state);
-                tracing::info!(
-                    "Accepted entity {} from S{}",
-                    entity_id,
-                    from_server
-                );
+                tracing::info!("Accepted entity {} from {}", entity_id, from_server);
             }
         }
     }

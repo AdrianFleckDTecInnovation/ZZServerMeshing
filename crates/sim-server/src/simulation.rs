@@ -42,6 +42,15 @@ pub async fn run_game_loop(
             // Process pending authority transfers
             process_transfers(&mut w, &udp_socket).await;
 
+            // Handle graceful drain
+            if w.draining {
+                process_drain(&mut w, &udp_socket).await;
+                if w.entities.is_empty() {
+                    tracing::info!("Drain complete — shutting down");
+                    std::process::exit(0);
+                }
+            }
+
             // Replicate authoritative entities to peers
             replication::replicate_to_peers(&w, &udp_socket).await;
 
@@ -171,6 +180,7 @@ async fn process_transfers(world: &mut World, udp_socket: &UdpSocket) {
             entity.authority_server = ServerId(target_server);
 
             let msg = PeerMessage::AuthorityTransfer {
+                tick: world.tick,
                 entity_id: *id,
                 from_server: world.server_id,
                 to_server: ServerId(target_server),
@@ -194,3 +204,42 @@ async fn process_transfers(world: &mut World, udp_socket: &UdpSocket) {
         );
     }
 }
+
+/// Drain all entities to target servers (round-robin). Called when draining.
+async fn process_drain(world: &mut World, udp_socket: &UdpSocket) {
+    let targets = match &world.drain_targets {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => return,
+    };
+
+    let entity_ids: Vec<EntityId> = world.entities.keys().copied().collect();
+    let mut transferred = 0;
+
+    for (i, id) in entity_ids.iter().enumerate() {
+        let target_server = targets[i % targets.len()];
+        let target_addr = match world.peer_addrs.get(&target_server) {
+            Some(addr) => *addr,
+            None => continue,
+        };
+
+        if let Some(mut entity) = world.entities.remove(id) {
+            entity.authority_server = ServerId(target_server);
+            let msg = PeerMessage::AuthorityTransfer {
+                tick: world.tick,
+                entity_id: *id,
+                from_server: world.server_id,
+                to_server: ServerId(target_server),
+                full_state: entity,
+            };
+            if let Ok(bytes) = bincode::serialize(&msg) {
+                let _ = udp_socket.send_to(&bytes, target_addr).await;
+                transferred += 1;
+            }
+        }
+    }
+
+    if transferred > 0 {
+        tracing::info!("Drained {transferred} entities ({} remaining)", world.entities.len());
+    }
+}
+

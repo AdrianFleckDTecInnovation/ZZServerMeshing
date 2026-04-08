@@ -14,13 +14,8 @@ export class DebugOverlay {
     this.worldView = worldView;
   }
 
-  setConnected(connected: boolean): void {
-    this.connected = connected;
-  }
-
-  setFollowMode(follow: boolean): void {
-    this.followMode = follow;
-  }
+  setConnected(connected: boolean): void { this.connected = connected; }
+  setFollowMode(follow: boolean): void { this.followMode = follow; }
 
   update(): void {
     this.frameCount++;
@@ -34,13 +29,11 @@ export class DebugOverlay {
     const wv = this.worldView;
     const totalEntities = wv.entities.size;
     const connStatus = this.connected ? 'Connected' : 'Disconnected';
-    const playerId = wv.localPlayerId;
 
     // Per-server bars
     let serverLines = '';
     const sortedServers = [...wv.serverEntityCounts.entries()].sort((a, b) => a[0] - b[0]);
     const maxCount = Math.max(1, ...sortedServers.map(([, c]) => c));
-
     for (const [serverId, count] of sortedServers) {
       const colorIdx = (serverId - 1) % SERVER_COLORS.length;
       const c = SERVER_COLORS[colorIdx >= 0 ? colorIdx : 0];
@@ -52,8 +45,8 @@ export class DebugOverlay {
 
     // Player info
     let playerInfo = '';
-    if (playerId) {
-      const player = wv.entities.get(playerId);
+    if (wv.localPlayerId) {
+      const player = wv.entities.get(wv.localPlayerId);
       if (player) {
         playerInfo = `Player: S${player.authorityServer} (${Math.round(player.position.x)}, ${Math.round(player.position.z)})`;
       } else {
@@ -61,10 +54,18 @@ export class DebugOverlay {
       }
     }
 
+    // Network metrics
+    let metricsLine = '';
+    if (wv.metrics) {
+      const m = wv.metrics;
+      metricsLine = `Net: ${m.snapshotsPerSec} snap/s | ${m.bandwidthKBps} KB | ${m.rebalanceEvents} rebalances`;
+    }
+
     this.el.innerHTML =
 `${connStatus} | Tick ${wv.currentTick} | FPS ${this.fps}
 Entities: ${totalEntities} | Camera: ${this.followMode ? 'follow' : 'free'} [F]
 ${playerInfo}
+${metricsLine}
 ${serverLines}`;
   }
 }

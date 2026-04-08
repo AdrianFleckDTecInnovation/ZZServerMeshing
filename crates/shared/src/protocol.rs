@@ -52,6 +52,7 @@ pub enum PeerMessage {
         entities: Vec<EntityState>,
     },
     AuthorityTransfer {
+        tick: u64,
         entity_id: EntityId,
         from_server: ServerId,
         to_server: ServerId,
@@ -73,6 +74,10 @@ pub enum CoordClientMsg {
         server_id: u16,
         entity_count: u32,
     },
+    /// Server wants to leave gracefully — drain all entities first.
+    Draining {
+        server_id: u16,
+    },
 }
 
 // ── Coordinator → Sim-Server (JSON over WebSocket) ──
@@ -85,6 +90,14 @@ pub enum CoordServerMsg {
     RebalanceDirective {
         entity_ids: Vec<String>,
         target_server: u16,
+    },
+    /// Instruct a server to drain ALL entities to the listed targets, then exit.
+    DrainDirective {
+        target_servers: Vec<u16>,
+    },
+    /// A server died — adopt its orphaned shadow entities.
+    RecoverEntities {
+        dead_server_id: u16,
     },
 }
 

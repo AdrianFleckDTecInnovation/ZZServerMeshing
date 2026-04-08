@@ -18,6 +18,9 @@ pub struct World {
     pub peer_addrs: HashMap<u16, SocketAddr>,
     /// Pending rebalance: (entity_id strings, target_server_id). Set by coordinator client.
     pub pending_transfers: Option<(Vec<String>, u16)>,
+    /// Graceful drain mode: transfer all entities and exit.
+    pub draining: bool,
+    pub drain_targets: Option<Vec<u16>>,
 }
 
 /// Max ticks before a shadow entity is considered stale and removed.
@@ -33,6 +36,8 @@ impl World {
             shadow_last_seen: HashMap::new(),
             peer_addrs: HashMap::new(),
             pending_transfers: None,
+            draining: false,
+            drain_targets: None,
         }
     }
 
@@ -93,11 +98,18 @@ impl World {
     }
 
     /// Apply incoming shadow entity data from a peer server.
+    /// Discards stale updates (lower tick than what we already have).
     pub fn apply_peer_update(&mut self, tick: u64, entities: Vec<EntityState>) {
         for entity in entities {
             // Don't overwrite our own authoritative entities
             if self.entities.contains_key(&entity.id) {
                 continue;
+            }
+            // Discard stale packets (out-of-order UDP)
+            if let Some(&last_tick) = self.shadow_last_seen.get(&entity.id) {
+                if tick < last_tick {
+                    continue;
+                }
             }
             self.shadow_last_seen.insert(entity.id, tick);
             self.shadow_entities.insert(entity.id, entity);
@@ -122,6 +134,30 @@ impl World {
     pub fn clamp_all_positions(&mut self) {
         for entity in self.entities.values_mut() {
             entity.position = clamp_to_world(entity.position);
+        }
+    }
+
+    /// Recover orphaned entities from a dead server by promoting shadows to authoritative.
+    pub fn recover_from_dead_server(&mut self, dead_server_id: u16) {
+        let to_adopt: Vec<EntityId> = self
+            .shadow_entities
+            .iter()
+            .filter(|(_, e)| e.authority_server.0 == dead_server_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut adopted = 0;
+        for id in to_adopt {
+            if let Some(mut entity) = self.shadow_entities.remove(&id) {
+                entity.authority_server = self.server_id;
+                self.entities.insert(id, entity);
+                self.shadow_last_seen.remove(&id);
+                adopted += 1;
+            }
+        }
+
+        if adopted > 0 {
+            tracing::info!("Recovered {} entities from dead S{}", adopted, dead_server_id);
         }
     }
 }

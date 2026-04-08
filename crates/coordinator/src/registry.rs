@@ -57,6 +57,50 @@ impl Registry {
         }
     }
 
+    /// Detect servers that have missed heartbeats.
+    pub fn detect_dead_servers(&self) -> Vec<u16> {
+        let timeout = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        self.servers
+            .values()
+            .filter(|s| s.server_id > 0)
+            .filter(|s| now.duration_since(s.last_heartbeat) > timeout)
+            .map(|s| s.server_id)
+            .collect()
+    }
+
+    /// Tell a draining server which targets to distribute entities to.
+    pub fn drain_server(&self, server_id: u16) {
+        let targets: Vec<u16> = self.servers.keys()
+            .filter(|&&id| id != server_id && id > 0)
+            .copied()
+            .collect();
+
+        if targets.is_empty() {
+            tracing::warn!("No servers available to drain S{server_id} into");
+            return;
+        }
+
+        let msg = CoordServerMsg::DrainDirective { target_servers: targets };
+        if let Some(entry) = self.servers.get(&server_id) {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = entry.reply_tx.send(json);
+            }
+        }
+    }
+
+    /// Broadcast recovery directive for a dead server to all surviving servers.
+    pub fn broadcast_recovery(&self, dead_server_id: u16) {
+        let msg = CoordServerMsg::RecoverEntities { dead_server_id };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            for entry in self.servers.values() {
+                if entry.server_id > 0 {
+                    let _ = entry.reply_tx.send(json.clone());
+                }
+            }
+        }
+    }
+
     /// Check load balance and issue rebalance directives if needed.
     /// Returns true if a rebalance was triggered.
     pub fn try_rebalance(&self) -> bool {

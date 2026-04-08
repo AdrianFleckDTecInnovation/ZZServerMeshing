@@ -63,7 +63,8 @@ class Gateway {
     setInterval(() => {
       const snapshot = this.aggregator.getSnapshot();
       if (!snapshot) return;
-      const json = JSON.stringify(snapshot);
+      const metrics = this.aggregator.updateMetrics();
+      const json = JSON.stringify({ ...snapshot, _metrics: metrics });
       for (const client of this.clients) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(json);
@@ -189,9 +190,10 @@ class Gateway {
 
     ws.on('message', (data) => {
       try {
-        const msg = JSON.parse(data.toString());
+        const raw = data.toString();
+        const msg = JSON.parse(raw);
         if (msg.type === 'WorldSnapshot') {
-          this.aggregator.onServerSnapshot(peer.server_id, msg);
+          this.aggregator.onServerSnapshot(peer.server_id, msg, raw.length);
         }
       } catch (e) {}
     });

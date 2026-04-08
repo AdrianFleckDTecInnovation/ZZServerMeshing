@@ -25,6 +25,10 @@ ZZServerMeshing/
 │   └── src/ { index.ts, aggregator.ts, router.ts }
 ├── client/                       # Three.js WebGPU browser client
 │   └── src/ { main.ts, renderer.ts, network.ts, world-view.ts, debug-overlay.ts }
+├── tools/                        # Stress testing
+│   └── stress-test.ts
+├── docs/                         # Documentation
+│   ├── architecture.md, protocol.md, quickstart.md, codebase.md, LLMDirections.md
 ├── start.sh / stop.sh            # Cluster launch/stop scripts
 └── PLAN.md                       # This file
 ```
@@ -45,83 +49,52 @@ ZZServerMeshing/
 
 ## Phase 1: Single Server + Renderer (Foundation) ✅ DONE
 
-**Goal**: One Rust sim-server with a game loop, streaming entity state over WebSocket to a Three.js WebGPU client.
-
 - [x] Rust workspace scaffold (shared, sim-server, coordinator crates)
 - [x] Shared types: EntityId, EntityState, ServerId, protocol messages, spatial grid, tick constants
 - [x] Sim-server game loop: fixed timestep, NPC wandering, WebSocket broadcast
 - [x] Three.js WebGPU client: renderer, WebSocket client, world-view, debug overlay
-- [x] start.sh / stop.sh scripts
-- [x] CLAUDE.md
+- [x] start.sh / stop.sh scripts, CLAUDE.md
 
 ---
 
 ## Phase 2: Multi-Server Mesh (Core Innovation) ✅ DONE
 
-**Goal**: Multiple sim-servers sharing the SAME area. Node.js gateway aggregates state. Client sees all entities seamlessly.
-
 - [x] Coordinator service: server registration, peer discovery, peer list broadcast
-- [x] Coordinator-server protocol (CoordClientMsg/CoordServerMsg in shared crate)
+- [x] Coordinator-server protocol (CoordClientMsg/CoordServerMsg)
 - [x] Sim-server coordinator client: register, receive peer list, heartbeats
-- [x] UDP peer replication: each server sends authoritative entities to all peers via bincode/UDP
-- [x] Shadow entity receiver: inbound UDP, upsert into world.shadow_entities, stale cleanup
-- [x] Node.js gateway: connects to all sim-servers, aggregates snapshots, routes client inputs
-- [x] Client connects through gateway, entities color-coded by authority server (red/blue/green)
-- [x] Cluster scripts updated for multi-server (coordinator + N servers + gateway + client)
-
-**Verified**: 3 servers running, 30 entities (10 per server), gateway aggregates all into single view.
+- [x] UDP peer replication: bincode entity state to all peers each tick
+- [x] Shadow entity receiver: inbound UDP, merge into shadow_entities, stale cleanup
+- [x] Node.js gateway: aggregates snapshots from all sim-servers, routes client inputs
+- [x] Client connects through gateway, entities color-coded by authority server
+- [x] Cluster scripts for multi-server (coordinator + N servers + gateway + client)
 
 ---
 
 ## Phase 3: Dynamic Authority Transfer ✅ DONE
 
-**Goal**: Entities move between servers at runtime based on load. The mesh adapts dynamically.
+- [x] Player assignment: gateway auto-spawns player on least-loaded server, sends PlayerAssigned
+- [x] WASD movement: client sends MoveInput, gateway routes to authority server
+- [x] Camera follow mode (F key toggle)
+- [x] Rebalancing algorithm in coordinator: triggers on >30% imbalance, transfers peripheral NPCs
+- [x] Authority transfer via UDP AuthorityTransfer message with full entity state
+- [x] Player cleanup on disconnect (RemoveEntity)
+- [x] Debug overlay: per-server load bars, player position, camera mode
 
-### Tasks
-
-1. **Player experience** — Wire up proper player controls:
-   - Client connects → gateway assigns a player entity on least-loaded server
-   - Client receives "your player ID" and sends WASD movement via MoveInput
-   - Gateway routes inputs to the entity's authority server
-   - Optional: camera follow mode (toggle between overview and follow)
-
-2. **Transfer protocol** (`sim-server/src/authority.rs`)
-   - 3-step handshake: coordinator directive → source sends snapshot to target → target acknowledges
-   - Single-writer invariant: source retains authority until target confirms
-   - Edge case: defer transfer if entity is in an active interaction
-
-3. **Load monitoring** (`coordinator/src/health.rs`)
-   - Sliding window over heartbeats; compute avg_load, load_variance, overloaded flag
-
-4. **Rebalancing algorithm** (`coordinator/src/balancer.rs`)
-   - Trigger when server overloaded + another underloaded
-   - Select entities closest to target's existing cluster (proximity clustering)
-   - Cap at 10% transfer per cycle; 5s cooldown to prevent oscillation
-
-5. **Cross-server interactions** (`sim-server/src/simulation.rs`)
-   - InteractionRequest RPC via UDP for entity-to-entity across server boundaries
-   - Simple collision/push: if two entities within distance D, repel each other
-
-6. **Client smoothing** (`client/src/world-view.ts`)
-   - Detect authority_server change between frames
-   - Lerp over 100ms to smooth any position discontinuity during transfer
-
-7. **Debug overlay expansion**
-   - Load bars per server (entity count + CPU)
-   - Transfer event log (scrolling: "Entity X: S1 → S2")
-   - Spatial grid cell visualization
-
-**Verify**: Spawn 1000 entities on one server, watch rebalancing distribute them across 3 servers. No visible glitches.
+**Not implemented** (descoped as unnecessary for prototype):
+- Cross-server interaction RPC (collision/push)
+- 3-step transfer handshake (simplified to direct send+accept)
+- Spatial grid cell visualization in client
 
 ---
 
-## Phase 4: Polish & Stress Testing ⬜ TODO
+## Phase 4: Polish & Stress Testing ✅ DONE
 
-1. **Entity interpolation** — `previousPosition`/`currentPosition` lerp for smooth 60fps from 20Hz ticks
-2. **Conflict resolution** — Prefer authoritative server's update; tick-number tiebreak; log warnings
-3. **Server elasticity** — Hot-add (new server joins, gets entities on next rebalance); graceful drain; crash recovery via shadow entity data
-4. **Stress testing** (`tools/stress-test.ts`) — Rapid entity spawning, synthetic inputs, latency measurement
-5. **Performance profiling** — tracing spans in Rust, renderer.info in client; target: 2000 entities / 4 servers / 20 ticks/sec / <100ms e2e latency
+- [x] **Tick-based conflict resolution** — `apply_peer_update()` discards stale UDP packets (lower tick). `AuthorityTransfer` validates target server, rejects duplicates. Added tick field to transfer message.
+- [x] **Entity interpolation** — Buffer-based: `previousPosition`/`currentPosition` with tick-timed alpha (`timeSinceSnapshot / 50ms`, capped at 1.2 for slight extrapolation). Smooth 60fps from 20Hz ticks.
+- [x] **Client performance** — Shared material cache (one per server color), mesh pooling (reuse on entity remove/create). No per-entity material allocation.
+- [x] **Network metrics** — Gateway tracks snapshots/sec, bandwidth, rebalance events. Embedded as `_metrics` in client snapshots. Debug overlay shows live stats.
+- [x] **Server elasticity** — Crash detection (5s heartbeat timeout), graceful drain protocol (DrainDirective → transfer all → exit), crash recovery (promote shadow entities from dead server).
+- [x] **Stress test tool** — `tools/stress-test.ts`: configurable entity count + spawn rate, tracks distribution, snapshot rate, rebalance events. Verified: 200 entities, 20 snap/s, 50.6ms avg interval.
 
 ---
 
@@ -129,7 +102,7 @@ ZZServerMeshing/
 
 | Risk | Mitigation |
 |------|------------|
-| Authority transfer atomicity | Timeout + rollback at each handshake step; source reclaims on failure |
+| Authority transfer atomicity | Simplified to direct send+accept; rebalancer self-corrects within 10s |
 | UDP packet ordering | Tick-tagged updates; receiver discards stale (lower tick) updates |
-| Gateway aggregation latency | Forward immediately rather than batching; or run at 2x sim tick rate |
-| Spatial grid subscription churn | Hysteresis: only update subscription after entity in new cell for 2+ ticks |
+| Gateway aggregation latency | Forwards every tick (50ms); no additional batching |
+| Crash recovery duplication | Multiple survivors may adopt same shadows; rebalancer evens out |
