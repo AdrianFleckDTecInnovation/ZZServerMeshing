@@ -275,3 +275,192 @@ async fn process_drain(world: &mut World, udp_socket: &UdpSocket) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::entity::{EntityType, ServerId};
+
+    fn make_world(server_id: u16) -> World {
+        World::new(ServerId(server_id))
+    }
+
+    // -- process_input tests --
+
+    #[test]
+    fn process_input_spawn_npc() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::SpawnEntity {
+            position: [10.0, 0.0, -20.0],
+            entity_type: "npc".to_string(),
+        });
+        assert_eq!(w.entities.len(), 1);
+        let e = w.entities.values().next().unwrap();
+        assert_eq!(e.entity_type, EntityType::Npc);
+        assert!((e.position.x - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn process_input_spawn_player() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::SpawnEntity {
+            position: [0.0, 0.0, 0.0],
+            entity_type: "player".to_string(),
+        });
+        assert_eq!(w.entities.len(), 1);
+        let e = w.entities.values().next().unwrap();
+        assert_eq!(e.entity_type, EntityType::Player);
+    }
+
+    #[test]
+    fn process_input_spawn_unknown_type_defaults_to_npc() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::SpawnEntity {
+            position: [0.0, 0.0, 0.0],
+            entity_type: "unknown_thing".to_string(),
+        });
+        let e = w.entities.values().next().unwrap();
+        assert_eq!(e.entity_type, EntityType::Npc);
+    }
+
+    #[test]
+    fn process_input_spawn_player_with_id() {
+        let mut w = make_world(1);
+        let uuid = Uuid::new_v4();
+        process_input(&mut w, ClientMessage::SpawnPlayer {
+            player_id: uuid.to_string(),
+            position: [5.0, 0.0, 5.0],
+        });
+        assert_eq!(w.entities.len(), 1);
+        let e = w.entities.values().next().unwrap();
+        assert_eq!(e.id.0, uuid);
+        assert_eq!(e.entity_type, EntityType::Player);
+    }
+
+    #[test]
+    fn process_input_spawn_player_invalid_uuid_ignored() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::SpawnPlayer {
+            player_id: "not-a-uuid".to_string(),
+            position: [0.0, 0.0, 0.0],
+        });
+        assert_eq!(w.entities.len(), 0);
+    }
+
+    #[test]
+    fn process_input_move_input() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+        });
+        let e = &w.entities[&id];
+        assert!(e.velocity.x > 0.0);
+    }
+
+    #[test]
+    fn process_input_move_input_invalid_uuid_ignored() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: "bad".to_string(),
+            direction: [1.0, 0.0, 0.0],
+        });
+        // No panic
+    }
+
+    #[test]
+    fn process_input_remove_entity() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        assert_eq!(w.entities.len(), 1);
+        process_input(&mut w, ClientMessage::RemoveEntity {
+            entity_id: id.0.to_string(),
+        });
+        assert_eq!(w.entities.len(), 0);
+    }
+
+    #[test]
+    fn process_input_remove_invalid_uuid_ignored() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::RemoveEntity {
+            entity_id: "garbage".to_string(),
+        });
+        // No panic
+    }
+
+    #[test]
+    fn process_input_request_snapshot_is_noop() {
+        let mut w = make_world(1);
+        process_input(&mut w, ClientMessage::RequestSnapshot);
+        assert_eq!(w.entities.len(), 0);
+    }
+
+    // -- simulate_tick tests --
+
+    #[test]
+    fn simulate_tick_advances_tick() {
+        let mut w = make_world(1);
+        assert_eq!(w.tick, 0);
+        simulate_tick(&mut w);
+        assert_eq!(w.tick, 1);
+        simulate_tick(&mut w);
+        assert_eq!(w.tick, 2);
+    }
+
+    #[test]
+    fn simulate_tick_integrates_position() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        w.apply_move_input(&id, Vec3::new(1.0, 0.0, 0.0)); // velocity = 5.0 * normalized
+        let old_pos = w.entities[&id].position;
+
+        simulate_tick(&mut w);
+
+        let new_pos = w.entities[&id].position;
+        // Position should have moved in +X direction
+        assert!(new_pos.x > old_pos.x);
+    }
+
+    #[test]
+    fn simulate_tick_clamps_to_world_bounds() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::new(499.0, 0.0, 0.0), EntityType::Npc);
+        // Give a large velocity pushing past the boundary
+        w.entities.get_mut(&id).unwrap().velocity = Vec3::new(100.0, 0.0, 0.0);
+
+        // Run multiple ticks to push past boundary
+        for _ in 0..100 {
+            simulate_tick(&mut w);
+        }
+
+        assert!(w.entities[&id].position.x <= 500.0);
+    }
+
+    #[test]
+    fn simulate_tick_npcs_eventually_change_direction() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+
+        // Run enough ticks that the NPC should change direction at least once
+        // Direction changes every 3 seconds (60 ticks at 20Hz)
+        let mut velocities = Vec::new();
+        for _ in 0..80 {
+            simulate_tick(&mut w);
+            velocities.push(w.entities[&id].velocity);
+        }
+
+        // Velocity should have changed at some point (NPC gets a random direction)
+        // Since the phase depends on UUID, we can't predict when, but after 80 ticks
+        // covering more than one full NPC_DIRECTION_CHANGE_INTERVAL, at least one change
+        let first_nonzero = velocities.iter().find(|v| v.length() > 0.01);
+        assert!(first_nonzero.is_some(), "NPC should have gained velocity after direction change");
+    }
+
+    #[test]
+    fn simulate_tick_empty_world() {
+        let mut w = make_world(1);
+        simulate_tick(&mut w); // should not panic
+        assert_eq!(w.tick, 1);
+    }
+}
+

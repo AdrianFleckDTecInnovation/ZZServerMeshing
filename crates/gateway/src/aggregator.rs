@@ -334,6 +334,32 @@ impl Aggregator {
     }
 }
 
+/// Parse a full snapshot frame back into (tick, entities).
+/// Used for testing binary protocol correctness.
+#[cfg(test)]
+pub fn parse_full_snapshot(buf: &[u8]) -> (u64, Vec<(uuid::Uuid, [f32; 3], [f32; 3], u8, u16)>) {
+    assert_eq!(buf[0], FRAME_FULL_SNAPSHOT);
+    let tick = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+    let entity_count = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
+    // Skip 14 bytes of metrics header (4+4+4+2 = snapshots_per_sec + bandwidth + rebalance + server_count)
+    let header_end = 1 + 8 + 4 + 14;
+    let mut entities = Vec::with_capacity(entity_count);
+    for i in 0..entity_count {
+        let offset = header_end + i * 43;
+        let uuid = uuid::Uuid::from_bytes(buf[offset..offset + 16].try_into().unwrap());
+        let px = f32::from_le_bytes(buf[offset + 16..offset + 20].try_into().unwrap());
+        let py = f32::from_le_bytes(buf[offset + 20..offset + 24].try_into().unwrap());
+        let pz = f32::from_le_bytes(buf[offset + 24..offset + 28].try_into().unwrap());
+        let vx = f32::from_le_bytes(buf[offset + 28..offset + 32].try_into().unwrap());
+        let vy = f32::from_le_bytes(buf[offset + 32..offset + 36].try_into().unwrap());
+        let vz = f32::from_le_bytes(buf[offset + 36..offset + 40].try_into().unwrap());
+        let etype = buf[offset + 40];
+        let auth = u16::from_le_bytes(buf[offset + 41..offset + 43].try_into().unwrap());
+        entities.push((uuid, [px, py, pz], [vx, vy, vz], etype, auth));
+    }
+    (tick, entities)
+}
+
 fn write_entity(buf: &mut Vec<u8>, e: &EntityState) {
     buf.extend_from_slice(e.id.0.as_bytes());
     buf.extend_from_slice(&e.position.x.to_le_bytes());
@@ -347,4 +373,384 @@ fn write_entity(buf: &mut Vec<u8>, e: &EntityState) {
         shared::entity::EntityType::Player => 1,
     });
     buf.extend_from_slice(&e.authority_server.0.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::entity::{EntityId, EntityState, EntityType, ServerId};
+    use shared::protocol::ServerMessage;
+    use glam::Vec3;
+
+    fn default_metrics() -> GatewayMetrics {
+        GatewayMetrics {
+            snapshots_per_sec: 20,
+            bandwidth_kbps: 100,
+            rebalance_events: 0,
+            server_count: 2,
+            aggregate_us: 0,
+            broadcast_us: 0,
+            total_entities: 0,
+        }
+    }
+
+    fn make_entity(pos: Vec3, server_id: u16) -> EntityState {
+        EntityState::new_npc(pos, ServerId(server_id))
+    }
+
+    fn make_snapshot(tick: u64, entities: Vec<EntityState>) -> ServerMessage {
+        ServerMessage::WorldSnapshot { tick, entities }
+    }
+
+    #[test]
+    fn new_aggregator_is_empty() {
+        let agg = Aggregator::new();
+        assert_eq!(agg.last_tick, 0);
+        assert!(agg.server_snapshots.is_empty());
+    }
+
+    #[test]
+    fn on_server_snapshot_stores_entities() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(1.0, 0.0, 2.0), 1);
+        let msg = make_snapshot(10, vec![e]);
+        agg.on_server_snapshot(1, msg, 100);
+
+        assert_eq!(agg.last_tick, 10);
+        assert_eq!(agg.server_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn get_authority_server_finds_entity() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 3);
+        let id_str = e.id.to_string();
+        agg.on_server_snapshot(3, make_snapshot(1, vec![e]), 50);
+
+        assert_eq!(agg.get_authority_server(&id_str), Some(3));
+    }
+
+    #[test]
+    fn get_authority_server_missing_entity() {
+        let agg = Aggregator::new();
+        assert_eq!(agg.get_authority_server("nonexistent"), None);
+    }
+
+    #[test]
+    fn get_least_loaded_server_empty() {
+        let agg = Aggregator::new();
+        // No snapshots — all have 0 entities, should return first
+        assert_eq!(agg.get_least_loaded_server(&[1, 2, 3]), 1);
+    }
+
+    #[test]
+    fn get_least_loaded_server_picks_lowest() {
+        let mut agg = Aggregator::new();
+
+        // Server 1 has 5 entities
+        let entities1: Vec<EntityState> = (0..5).map(|_| make_entity(Vec3::ZERO, 1)).collect();
+        agg.on_server_snapshot(1, make_snapshot(1, entities1), 500);
+
+        // Server 2 has 2 entities
+        let entities2: Vec<EntityState> = (0..2).map(|_| make_entity(Vec3::ZERO, 2)).collect();
+        agg.on_server_snapshot(2, make_snapshot(1, entities2), 200);
+
+        // Server 3 has 0 entities (not in snapshots)
+        assert_eq!(agg.get_least_loaded_server(&[1, 2, 3]), 3);
+    }
+
+    #[test]
+    fn remove_server_clears_snapshots() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e]), 50);
+        assert_eq!(agg.server_snapshots.len(), 1);
+
+        agg.remove_server(1);
+        assert_eq!(agg.server_snapshots.len(), 0);
+    }
+
+    #[test]
+    fn full_snapshot_binary_frame_roundtrip() {
+        let mut agg = Aggregator::new();
+        let e1 = make_entity(Vec3::new(10.0, 0.0, -20.0), 1);
+        let e2 = EntityState::new_player(Vec3::new(5.0, 0.0, 5.0), ServerId(1));
+        let e1_id = e1.id.0;
+        let e2_id = e2.id.0;
+
+        agg.on_server_snapshot(1, make_snapshot(42, vec![e1, e2]), 200);
+
+        let metrics = default_metrics();
+        let (frame, count) = agg.get_broadcast_frame(&metrics).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(frame[0], FRAME_FULL_SNAPSHOT);
+
+        // Parse it back
+        let (tick, entities) = parse_full_snapshot(&frame);
+        assert_eq!(tick, 42);
+        assert_eq!(entities.len(), 2);
+
+        // Verify entity data is correct
+        let ids: Vec<uuid::Uuid> = entities.iter().map(|(id, _, _, _, _)| *id).collect();
+        assert!(ids.contains(&e1_id));
+        assert!(ids.contains(&e2_id));
+
+        // Check one entity's position
+        let ent1 = entities.iter().find(|(id, _, _, _, _)| *id == e1_id).unwrap();
+        assert!((ent1.1[0] - 10.0).abs() < 0.01);
+        assert!((ent1.1[2] - (-20.0)).abs() < 0.01);
+        assert_eq!(ent1.3, 0); // NPC type
+        assert_eq!(ent1.4, 1); // authority server 1
+
+        let ent2 = entities.iter().find(|(id, _, _, _, _)| *id == e2_id).unwrap();
+        assert_eq!(ent2.3, 1); // Player type
+    }
+
+    #[test]
+    fn full_snapshot_entity_size_is_43_bytes() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e]), 50);
+
+        let metrics = default_metrics();
+        let (frame, _) = agg.get_broadcast_frame(&metrics).unwrap();
+        // Header: 1 (type) + 8 (tick) + 4 (count) + 14 (metrics) = 27
+        // 1 entity × 43 = 43
+        assert_eq!(frame.len(), 27 + 43);
+    }
+
+    #[test]
+    fn empty_snapshot_returns_none() {
+        let mut agg = Aggregator::new();
+        let metrics = default_metrics();
+        assert!(agg.get_broadcast_frame(&metrics).is_none());
+    }
+
+    #[test]
+    fn dedup_prefers_authority_server_match() {
+        let mut agg = Aggregator::new();
+
+        // Same entity reported by two servers during authority transfer
+        let e1 = EntityState {
+            id: EntityId(uuid::Uuid::new_v4()),
+            position: Vec3::new(1.0, 0.0, 1.0),
+            velocity: Vec3::ZERO,
+            entity_type: EntityType::Npc,
+            authority_server: ServerId(2), // claims authority is server 2
+        };
+        let eid = e1.id;
+
+        let e2 = EntityState {
+            id: eid,
+            position: Vec3::new(2.0, 0.0, 2.0),
+            velocity: Vec3::ZERO,
+            entity_type: EntityType::Npc,
+            authority_server: ServerId(2), // also claims authority is server 2
+        };
+
+        // Server 1 reports it (not the authority)
+        agg.on_server_snapshot(1, make_snapshot(10, vec![e1]), 50);
+        // Server 2 reports it (IS the authority)
+        agg.on_server_snapshot(2, make_snapshot(10, vec![e2]), 50);
+
+        let metrics = default_metrics();
+        let (frame, count) = agg.get_broadcast_frame(&metrics).unwrap();
+        assert_eq!(count, 1); // deduplicated
+
+        let (_, entities) = parse_full_snapshot(&frame);
+        assert_eq!(entities.len(), 1);
+        // Should prefer server 2's version since authority matches
+        assert!((entities[0].1[0] - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn detect_rebalances_counts_authority_changes() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        let _eid = e.id;
+
+        // First broadcast — establishes baseline
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e.clone()]), 50);
+        let metrics = default_metrics();
+        agg.get_broadcast_frame(&metrics);
+
+        // Entity authority changes to server 2
+        let mut e2 = e.clone();
+        e2.authority_server = ServerId(2);
+        agg.on_server_snapshot(2, make_snapshot(2, vec![e2]), 50);
+        agg.server_snapshots.remove(&1); // server 1 no longer reports it
+
+        agg.get_broadcast_frame(&metrics);
+        assert!(agg.rebalance_events > 0);
+    }
+
+    #[test]
+    fn multiple_servers_merged_correctly() {
+        let mut agg = Aggregator::new();
+
+        let e1 = make_entity(Vec3::new(10.0, 0.0, 10.0), 1);
+        let e2 = make_entity(Vec3::new(20.0, 0.0, 20.0), 2);
+        let e3 = make_entity(Vec3::new(30.0, 0.0, 30.0), 2);
+
+        agg.on_server_snapshot(1, make_snapshot(5, vec![e1]), 50);
+        agg.on_server_snapshot(2, make_snapshot(5, vec![e2, e3]), 100);
+
+        let metrics = default_metrics();
+        let (_, count) = agg.get_broadcast_frame(&metrics).unwrap();
+        assert_eq!(count, 3); // all 3 entities from 2 servers
+    }
+
+    #[test]
+    fn entity_43_bytes_encoding() {
+        // Verify the binary encoding of a single entity
+        let e = EntityState {
+            id: EntityId(uuid::Uuid::nil()),
+            position: Vec3::new(1.0, 2.0, 3.0),
+            velocity: Vec3::new(4.0, 5.0, 6.0),
+            entity_type: EntityType::Player,
+            authority_server: ServerId(7),
+        };
+        let mut buf = Vec::new();
+        write_entity(&mut buf, &e);
+        assert_eq!(buf.len(), 43);
+        // UUID (16) + pos (12) + vel (12) + type (1) + auth (2) = 43
+
+        // Verify UUID bytes
+        assert_eq!(&buf[0..16], uuid::Uuid::nil().as_bytes());
+        // Verify position
+        assert_eq!(f32::from_le_bytes(buf[16..20].try_into().unwrap()), 1.0);
+        assert_eq!(f32::from_le_bytes(buf[20..24].try_into().unwrap()), 2.0);
+        assert_eq!(f32::from_le_bytes(buf[24..28].try_into().unwrap()), 3.0);
+        // Verify velocity
+        assert_eq!(f32::from_le_bytes(buf[28..32].try_into().unwrap()), 4.0);
+        // Verify entity type (Player = 1)
+        assert_eq!(buf[40], 1);
+        // Verify authority server
+        assert_eq!(u16::from_le_bytes(buf[41..43].try_into().unwrap()), 7);
+    }
+
+    #[test]
+    fn entity_changed_new_entity() {
+        let agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        // Not in last_broadcast → changed
+        assert!(agg.entity_changed(&e.id.to_string(), &e));
+    }
+
+    #[test]
+    fn entity_changed_same_position_not_changed() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(10.0, 0.0, 20.0), 1);
+        let id_str = e.id.to_string();
+        // Populate last_broadcast
+        agg.last_broadcast.insert(id_str.clone(), BroadcastState {
+            position: [10.0, 0.0, 20.0],
+            velocity: [0.0, 0.0, 0.0],
+            authority_server: 1,
+            entity_type: 0,
+        });
+        assert!(!agg.entity_changed(&id_str, &e));
+    }
+
+    #[test]
+    fn entity_changed_position_moved() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(10.5, 0.0, 20.0), 1);
+        let id_str = e.id.to_string();
+        agg.last_broadcast.insert(id_str.clone(), BroadcastState {
+            position: [10.0, 0.0, 20.0],
+            velocity: [0.0, 0.0, 0.0],
+            authority_server: 1,
+            entity_type: 0,
+        });
+        // Position changed by 0.5 (> 0.01 threshold)
+        assert!(agg.entity_changed(&id_str, &e));
+    }
+
+    #[test]
+    fn entity_changed_authority_changed() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(10.0, 0.0, 20.0), 2); // authority = 2
+        let id_str = e.id.to_string();
+        agg.last_broadcast.insert(id_str.clone(), BroadcastState {
+            position: [10.0, 0.0, 20.0],
+            velocity: [0.0, 0.0, 0.0],
+            authority_server: 1, // was 1
+            entity_type: 0,
+        });
+        assert!(agg.entity_changed(&id_str, &e));
+    }
+
+    #[test]
+    fn entity_changed_tiny_position_change_below_threshold() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(10.005, 0.0, 20.0), 1);
+        let id_str = e.id.to_string();
+        agg.last_broadcast.insert(id_str.clone(), BroadcastState {
+            position: [10.0, 0.0, 20.0],
+            velocity: [0.0, 0.0, 0.0],
+            authority_server: 1,
+            entity_type: 0,
+        });
+        // 0.005 < 0.01 threshold
+        assert!(!agg.entity_changed(&id_str, &e));
+    }
+
+    #[test]
+    fn broadcast_tick_increments() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e]), 50);
+        let metrics = default_metrics();
+
+        assert_eq!(agg.broadcast_tick, 0);
+        agg.get_broadcast_frame(&metrics);
+        assert_eq!(agg.broadcast_tick, 1);
+        agg.get_broadcast_frame(&metrics);
+        assert_eq!(agg.broadcast_tick, 2);
+    }
+
+    #[test]
+    fn last_broadcast_populated_after_frame() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::new(5.0, 0.0, 10.0), 1);
+        let id_str = e.id.to_string();
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e]), 50);
+        let metrics = default_metrics();
+
+        assert!(agg.last_broadcast.is_empty());
+        agg.get_broadcast_frame(&metrics);
+        assert!(agg.last_broadcast.contains_key(&id_str));
+        let state = &agg.last_broadcast[&id_str];
+        assert!((state.position[0] - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn snapshot_count_tracked() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e.clone()]), 100);
+        agg.on_server_snapshot(1, make_snapshot(2, vec![e.clone()]), 100);
+        agg.on_server_snapshot(1, make_snapshot(3, vec![e]), 100);
+        assert_eq!(agg.snapshot_count, 3);
+    }
+
+    #[test]
+    fn bandwidth_tracked() {
+        let mut agg = Aggregator::new();
+        let e = make_entity(Vec3::ZERO, 1);
+        agg.on_server_snapshot(1, make_snapshot(1, vec![e]), 500);
+        assert_eq!(agg.total_bandwidth_bytes, 500);
+    }
+
+    #[test]
+    fn metrics_update_returns_current_state() {
+        let mut agg = Aggregator::new();
+        let entities: Vec<EntityState> = (0..10).map(|_| make_entity(Vec3::ZERO, 1)).collect();
+        agg.on_server_snapshot(1, make_snapshot(1, entities), 1000);
+
+        let m = agg.update_metrics();
+        assert_eq!(m.total_entities, 10);
+        assert_eq!(m.server_count, 1);
+    }
 }

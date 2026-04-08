@@ -115,3 +115,225 @@ pub struct PeerInfo {
     pub udp_addr: String,
     pub ws_addr: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::{EntityState, ServerId};
+    use glam::Vec3;
+
+    #[test]
+    fn server_message_world_snapshot_json_roundtrip() {
+        let e = EntityState::new_npc(Vec3::new(1.0, 0.0, 2.0), ServerId(1));
+        let msg = ServerMessage::WorldSnapshot {
+            tick: 42,
+            entities: vec![e],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"WorldSnapshot\""));
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ServerMessage::WorldSnapshot { tick, entities } => {
+                assert_eq!(tick, 42);
+                assert_eq!(entities.len(), 1);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_entity_delta_roundtrip() {
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let msg = ServerMessage::EntityDelta {
+            tick: 100,
+            updates: vec![e.clone()],
+            removals: vec![e.id],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ServerMessage::EntityDelta { tick, updates, removals } => {
+                assert_eq!(tick, 100);
+                assert_eq!(updates.len(), 1);
+                assert_eq!(removals.len(), 1);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_spawn_entity_roundtrip() {
+        let msg = ClientMessage::SpawnEntity {
+            position: [10.0, 0.0, -5.0],
+            entity_type: "npc".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"SpawnEntity\""));
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::SpawnEntity { position, entity_type } => {
+                assert_eq!(position, [10.0, 0.0, -5.0]);
+                assert_eq!(entity_type, "npc");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_move_input_roundtrip() {
+        let msg = ClientMessage::MoveInput {
+            entity_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            direction: [1.0, 0.0, 0.0],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::MoveInput { entity_id, direction } => {
+                assert_eq!(entity_id, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(direction, [1.0, 0.0, 0.0]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_request_snapshot() {
+        let msg = ClientMessage::RequestSnapshot;
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, ClientMessage::RequestSnapshot));
+    }
+
+    #[test]
+    fn peer_message_bincode_roundtrip() {
+        let e = EntityState::new_npc(Vec3::new(50.0, 0.0, -50.0), ServerId(1));
+        let msg = PeerMessage::EntityStateUpdate {
+            tick: 200,
+            server_id: ServerId(1),
+            entities: vec![e],
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::EntityStateUpdate { tick, server_id, entities } => {
+                assert_eq!(tick, 200);
+                assert_eq!(server_id, ServerId(1));
+                assert_eq!(entities.len(), 1);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn peer_message_authority_transfer_bincode_roundtrip() {
+        let e = EntityState::new_player(Vec3::new(10.0, 0.0, 20.0), ServerId(1));
+        let eid = e.id;
+        let msg = PeerMessage::AuthorityTransfer {
+            tick: 300,
+            entity_id: eid,
+            from_server: ServerId(1),
+            to_server: ServerId(2),
+            full_state: e,
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::AuthorityTransfer { tick, entity_id, from_server, to_server, full_state } => {
+                assert_eq!(tick, 300);
+                assert_eq!(entity_id, eid);
+                assert_eq!(from_server, ServerId(1));
+                assert_eq!(to_server, ServerId(2));
+                assert_eq!(full_state.entity_type, crate::entity::EntityType::Player);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_client_msg_register_roundtrip() {
+        let msg = CoordClientMsg::Register {
+            server_id: 1,
+            udp_port: 9101,
+            ws_port: 7878,
+            host: Some("10.0.0.1".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"Register\""));
+        let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
+        match decoded {
+            CoordClientMsg::Register { server_id, udp_port, ws_port, host } => {
+                assert_eq!(server_id, 1);
+                assert_eq!(udp_port, 9101);
+                assert_eq!(ws_port, 7878);
+                assert_eq!(host, Some("10.0.0.1".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_client_msg_register_host_optional() {
+        // host field should be omitted when None
+        let msg = CoordClientMsg::Register {
+            server_id: 2,
+            udp_port: 9102,
+            ws_port: 7879,
+            host: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("host"));
+        // Deserialize without host field
+        let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
+        match decoded {
+            CoordClientMsg::Register { host, .. } => assert_eq!(host, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_server_msg_peer_list_roundtrip() {
+        let msg = CoordServerMsg::PeerList {
+            peers: vec![
+                PeerInfo { server_id: 1, udp_addr: "127.0.0.1:9101".into(), ws_addr: "127.0.0.1:7878".into() },
+                PeerInfo { server_id: 2, udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
+            ],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: CoordServerMsg = serde_json::from_str(&json).unwrap();
+        match decoded {
+            CoordServerMsg::PeerList { peers } => assert_eq!(peers.len(), 2),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_server_msg_recover_entities_survivors_default() {
+        // survivors should default to empty vec when not present in JSON
+        let json = r#"{"type":"RecoverEntities","dead_server_id":3}"#;
+        let decoded: CoordServerMsg = serde_json::from_str(json).unwrap();
+        match decoded {
+            CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
+                assert_eq!(dead_server_id, 3);
+                assert!(survivors.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn empty_world_snapshot() {
+        let msg = ServerMessage::WorldSnapshot {
+            tick: 0,
+            entities: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ServerMessage::WorldSnapshot { tick, entities } => {
+                assert_eq!(tick, 0);
+                assert!(entities.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}

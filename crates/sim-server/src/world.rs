@@ -137,6 +137,18 @@ impl World {
         }
     }
 
+    /// Returns the count of authoritative entities.
+    #[cfg(test)]
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
+    }
+
+    /// Returns the count of shadow entities.
+    #[cfg(test)]
+    pub fn shadow_count(&self) -> usize {
+        self.shadow_entities.len()
+    }
+
     /// Recover orphaned entities from a dead server by promoting shadows to authoritative.
     /// Recover entities from a dead server.
     /// `survivor_ids` is the sorted list of all surviving server IDs.
@@ -173,6 +185,286 @@ impl World {
 
         if adopted > 0 {
             tracing::info!("Recovered {} entities from dead S{}", adopted, dead_server_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::entity::{EntityState, EntityType, ServerId};
+
+    fn make_world(server_id: u16) -> World {
+        World::new(ServerId(server_id))
+    }
+
+    #[test]
+    fn spawn_entity_adds_to_entities() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::new(10.0, 0.0, 20.0), EntityType::Npc);
+        assert_eq!(w.entity_count(), 1);
+        assert!(w.entities.contains_key(&id));
+        assert_eq!(w.entities[&id].authority_server, ServerId(1));
+    }
+
+    #[test]
+    fn spawn_player_with_id_uses_given_uuid() {
+        let mut w = make_world(2);
+        let uuid = uuid::Uuid::new_v4();
+        let id = w.spawn_player_with_id(uuid, Vec3::ZERO);
+        assert_eq!(id.0, uuid);
+        assert_eq!(w.entities[&id].entity_type, EntityType::Player);
+        assert_eq!(w.entities[&id].authority_server, ServerId(2));
+    }
+
+    #[test]
+    fn remove_entity_removes() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        assert_eq!(w.entity_count(), 1);
+        w.remove_entity(&id);
+        assert_eq!(w.entity_count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_entity_is_noop() {
+        let mut w = make_world(1);
+        let fake_id = EntityId::new();
+        w.remove_entity(&fake_id); // should not panic
+        assert_eq!(w.entity_count(), 0);
+    }
+
+    #[test]
+    fn apply_move_input_sets_velocity() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        w.apply_move_input(&id, Vec3::new(1.0, 0.0, 0.0));
+        let vel = w.entities[&id].velocity;
+        assert!((vel.x - 5.0).abs() < 0.01); // player speed = 5.0
+        assert_eq!(vel.z, 0.0);
+    }
+
+    #[test]
+    fn apply_move_input_npc_speed() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        w.apply_move_input(&id, Vec3::new(0.0, 0.0, 1.0));
+        let vel = w.entities[&id].velocity;
+        assert!((vel.z - 2.0).abs() < 0.01); // npc speed = 2.0
+    }
+
+    #[test]
+    fn apply_move_input_zero_direction() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        w.apply_move_input(&id, Vec3::ZERO);
+        assert_eq!(w.entities[&id].velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn apply_move_input_nonexistent_entity_is_noop() {
+        let mut w = make_world(1);
+        let fake_id = EntityId::new();
+        w.apply_move_input(&fake_id, Vec3::X); // should not panic
+    }
+
+    #[test]
+    fn get_snapshot_returns_only_authoritative() {
+        let mut w = make_world(1);
+        w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        w.spawn_entity(Vec3::X, EntityType::Npc);
+
+        // Add a shadow entity
+        let shadow = EntityState::new_npc(Vec3::Z, ServerId(2));
+        w.shadow_entities.insert(shadow.id, shadow);
+
+        let snap = w.get_snapshot();
+        assert_eq!(snap.len(), 2); // only auth entities, not the shadow
+    }
+
+    #[test]
+    fn apply_peer_update_adds_shadows() {
+        let mut w = make_world(1);
+        let e = EntityState::new_npc(Vec3::new(100.0, 0.0, 100.0), ServerId(2));
+        let eid = e.id;
+        w.apply_peer_update(10, vec![e]);
+        assert_eq!(w.shadow_count(), 1);
+        assert!(w.shadow_entities.contains_key(&eid));
+    }
+
+    #[test]
+    fn apply_peer_update_does_not_overwrite_authoritative() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+
+        // Peer sends an update for the same entity ID
+        let mut shadow = EntityState::new_npc(Vec3::new(999.0, 0.0, 999.0), ServerId(2));
+        shadow.id = id; // same ID as our auth entity
+        w.apply_peer_update(10, vec![shadow]);
+
+        // Auth entity should be unchanged
+        assert_eq!(w.entities[&id].position, Vec3::ZERO);
+        assert_eq!(w.shadow_count(), 0); // not added as shadow either
+    }
+
+    #[test]
+    fn apply_peer_update_discards_stale_tick() {
+        let mut w = make_world(1);
+        let e1 = EntityState::new_npc(Vec3::new(1.0, 0.0, 1.0), ServerId(2));
+        let eid = e1.id;
+
+        // Apply tick 20
+        w.apply_peer_update(20, vec![e1]);
+        assert_eq!(w.shadow_entities[&eid].position.x, 1.0);
+
+        // Apply tick 15 (stale) — should be discarded
+        let mut e2 = EntityState::new_npc(Vec3::new(99.0, 0.0, 99.0), ServerId(2));
+        e2.id = eid;
+        w.apply_peer_update(15, vec![e2]);
+        assert_eq!(w.shadow_entities[&eid].position.x, 1.0); // unchanged
+    }
+
+    #[test]
+    fn apply_peer_update_accepts_newer_tick() {
+        let mut w = make_world(1);
+        let e1 = EntityState::new_npc(Vec3::new(1.0, 0.0, 1.0), ServerId(2));
+        let eid = e1.id;
+        w.apply_peer_update(10, vec![e1]);
+
+        let mut e2 = EntityState::new_npc(Vec3::new(50.0, 0.0, 50.0), ServerId(2));
+        e2.id = eid;
+        w.apply_peer_update(20, vec![e2]);
+        assert_eq!(w.shadow_entities[&eid].position.x, 50.0);
+    }
+
+    #[test]
+    fn cleanup_shadows_removes_stale() {
+        let mut w = make_world(1);
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = e.id;
+        w.apply_peer_update(1, vec![e]);
+        assert_eq!(w.shadow_count(), 1);
+
+        // Advance tick well past stale threshold (5s = 100 ticks at 20Hz)
+        w.tick = 200;
+        w.cleanup_shadows();
+        assert_eq!(w.shadow_count(), 0);
+        assert!(!w.shadow_last_seen.contains_key(&eid));
+    }
+
+    #[test]
+    fn cleanup_shadows_keeps_fresh() {
+        let mut w = make_world(1);
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        w.apply_peer_update(50, vec![e]);
+        w.tick = 60; // only 10 ticks old — well within threshold
+        w.cleanup_shadows();
+        assert_eq!(w.shadow_count(), 1);
+    }
+
+    #[test]
+    fn clamp_all_positions_enforces_bounds() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::new(9999.0, 0.0, -9999.0), EntityType::Npc);
+        w.clamp_all_positions();
+        assert_eq!(w.entities[&id].position.x, WORLD_EXTENT);
+        assert_eq!(w.entities[&id].position.z, -WORLD_EXTENT);
+    }
+
+    #[test]
+    fn recover_from_dead_server_adopts_correct_subset() {
+        let mut w = make_world(1);
+        // Add shadows from dead server 3
+        let mut adopted_count = 0;
+        for _ in 0..20 {
+            let e = EntityState::new_npc(Vec3::ZERO, ServerId(3));
+            let eid = e.id;
+            w.shadow_entities.insert(eid, e);
+            w.shadow_last_seen.insert(eid, 10);
+            // Count how many this server would adopt with survivors [1, 2]
+            if (eid.0.as_u128() as usize) % 2 == 0 {
+                adopted_count += 1;
+            }
+        }
+
+        let initial_shadows = w.shadow_count();
+        w.recover_from_dead_server(3, &[1, 2]);
+
+        // Server 1 (index 0) adopts entities where uuid_hash % 2 == 0
+        assert_eq!(w.entity_count(), adopted_count);
+        assert_eq!(w.shadow_count(), initial_shadows - adopted_count);
+
+        // All adopted entities should now have authority_server = 1
+        for e in w.entities.values() {
+            assert_eq!(e.authority_server, ServerId(1));
+        }
+    }
+
+    #[test]
+    fn recover_from_dead_server_no_duplicates_across_survivors() {
+        // Create two worlds simulating two survivors
+        let mut w1 = make_world(1);
+        let mut w2 = make_world(2);
+
+        // Both have the same shadow entities from dead server 3
+        let mut shadow_ids = Vec::new();
+        for _ in 0..50 {
+            let e = EntityState::new_npc(Vec3::ZERO, ServerId(3));
+            let eid = e.id;
+            shadow_ids.push(eid);
+            w1.shadow_entities.insert(eid, e.clone());
+            w1.shadow_last_seen.insert(eid, 10);
+            w2.shadow_entities.insert(eid, e);
+            w2.shadow_last_seen.insert(eid, 10);
+        }
+
+        let survivors = vec![1, 2];
+        w1.recover_from_dead_server(3, &survivors);
+        w2.recover_from_dead_server(3, &survivors);
+
+        // No entity should be adopted by both
+        for id in &shadow_ids {
+            let in_w1 = w1.entities.contains_key(id);
+            let in_w2 = w2.entities.contains_key(id);
+            assert!(!(in_w1 && in_w2), "Entity {} adopted by both survivors", id);
+        }
+
+        // All entities should be adopted by exactly one survivor
+        let total_adopted = w1.entity_count() + w2.entity_count();
+        assert_eq!(total_adopted, 50);
+    }
+
+    #[test]
+    fn recover_ignores_shadows_from_other_servers() {
+        let mut w = make_world(1);
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        w.shadow_entities.insert(e.id, e);
+        w.shadow_last_seen.insert(EntityId::new(), 10);
+
+        w.recover_from_dead_server(3, &[1]); // dead server is 3, shadow is from 2
+        assert_eq!(w.entity_count(), 0); // nothing adopted
+    }
+
+    #[test]
+    fn recover_when_not_in_survivor_list() {
+        let mut w = make_world(1);
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(3));
+        w.shadow_entities.insert(e.id, e);
+        w.recover_from_dead_server(3, &[2, 4]); // server 1 not in list
+        assert_eq!(w.entity_count(), 0);
+    }
+
+    #[test]
+    fn spawn_initial_npcs() {
+        let mut w = make_world(1);
+        w.spawn_initial_npcs(10);
+        assert_eq!(w.entity_count(), 10);
+        for e in w.entities.values() {
+            assert_eq!(e.entity_type, EntityType::Npc);
+            assert_eq!(e.authority_server, ServerId(1));
+            // Positions should be within 80% of world extent
+            assert!(e.position.x.abs() <= WORLD_EXTENT * 0.8 + 0.01);
+            assert!(e.position.z.abs() <= WORLD_EXTENT * 0.8 + 0.01);
         }
     }
 }

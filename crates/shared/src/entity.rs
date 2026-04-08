@@ -62,3 +62,84 @@ impl EntityState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_id_uniqueness() {
+        let a = EntityId::new();
+        let b = EntityId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn entity_id_display() {
+        let id = EntityId::new();
+        let s = format!("{}", id);
+        assert_eq!(s.len(), 36); // UUID string length
+    }
+
+    #[test]
+    fn server_id_display() {
+        let s = ServerId(3);
+        assert_eq!(format!("{}", s), "S3");
+    }
+
+    #[test]
+    fn new_npc_defaults() {
+        let pos = Vec3::new(10.0, 0.0, -20.0);
+        let npc = EntityState::new_npc(pos, ServerId(1));
+        assert_eq!(npc.position, pos);
+        assert_eq!(npc.velocity, Vec3::ZERO);
+        assert_eq!(npc.entity_type, EntityType::Npc);
+        assert_eq!(npc.authority_server, ServerId(1));
+    }
+
+    #[test]
+    fn new_player_defaults() {
+        let pos = Vec3::new(0.0, 0.0, 0.0);
+        let player = EntityState::new_player(pos, ServerId(2));
+        assert_eq!(player.entity_type, EntityType::Player);
+        assert_eq!(player.authority_server, ServerId(2));
+    }
+
+    #[test]
+    fn entity_state_json_roundtrip() {
+        let e = EntityState::new_npc(Vec3::new(1.5, 0.0, -3.5), ServerId(1));
+        let json = serde_json::to_string(&e).unwrap();
+        let decoded: EntityState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id, e.id);
+        assert_eq!(decoded.position, e.position);
+        assert_eq!(decoded.authority_server, e.authority_server);
+    }
+
+    #[test]
+    fn entity_state_bincode_roundtrip() {
+        let e = EntityState::new_player(Vec3::new(-100.0, 0.0, 250.0), ServerId(5));
+        let bytes = bincode::serialize(&e).unwrap();
+        let decoded: EntityState = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.id, e.id);
+        assert_eq!(decoded.position, e.position);
+        assert_eq!(decoded.entity_type, EntityType::Player);
+    }
+
+    #[test]
+    fn entity_id_serde_transparent() {
+        let id = EntityId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        assert!(json.starts_with('"'));
+        let decoded: EntityId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn server_id_serde_transparent() {
+        let sid = ServerId(42);
+        let json = serde_json::to_string(&sid).unwrap();
+        assert_eq!(json, "42");
+        let decoded: ServerId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, sid);
+    }
+}
