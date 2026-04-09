@@ -84,6 +84,39 @@ docker compose -f docker-compose.test.yml up --build   # start constrained clust
 docker compose -f docker-compose.test.yml down          # stop
 ```
 
+## Agents
+
+### @codebase-oracle
+Read-only agent that answers questions about how the codebase works. Treats code and tests as the ultimate source of truth — reads actual implementations before answering, cites `file:line`, and flags doc/code discrepancies. Use it for:
+- "How does authority transfer work?"
+- "What happens when a sim-server crashes?"
+- "Where is entity replication implemented?"
+- "What does the rebalance algorithm actually do?"
+
+Defined in `.claude/agents/codebase-oracle.md`.
+
+### MCP Oracle Server
+Exposes the codebase-oracle as an MCP tool (`ask_server_meshing`) that other Claude Code instances can call to ask questions about this codebase.
+
+**Build:**
+```sh
+cd mcp-oracle && npm install && npm run build
+```
+
+**Add to another project's `.mcp.json`:**
+```json
+{
+  "mcpServers": {
+    "server-meshing-oracle": {
+      "command": "node",
+      "args": ["/Users/dz/sources/ZZServerMeshing/mcp-oracle/dist/server.js"]
+    }
+  }
+}
+```
+
+Then use `mcp__server-meshing-oracle__ask_server_meshing` from that project, or just ask about server meshing and Claude will route to it.
+
 ## Conventions
 - Rust: standard formatting (`cargo fmt`), no unsafe unless justified
 - TypeScript: strict mode, ES2022 target
