@@ -18,6 +18,7 @@ function askClaude(question: string): Promise<string> {
         "-p",
         "--output-format",
         "text",
+        "--dangerously-skip-permissions",
         "--allowedTools",
         "Read,Glob,Grep",
         "--append-system-prompt",
