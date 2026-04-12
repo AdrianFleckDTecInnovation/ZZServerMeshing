@@ -42,4 +42,14 @@ pub async fn replicate_to_peers(
             tracing::warn!("Failed to send to peer {peer_addr}: {e}");
         }
     }
+
+    if world.tick % 100 == 0 {
+        tracing::debug!(
+            tick = world.tick,
+            entities = world.entities.len(),
+            peers = world.peer_addrs.len(),
+            bytes = bytes.len(),
+            "Replication stats"
+        );
+    }
 }

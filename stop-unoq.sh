@@ -3,7 +3,7 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE="$DIR/.pids-unoq"
 
-# Kill remote sim-servers
+# Kill remote sim-servers (dashboard stays running as a persistent service)
 echo "Stopping sim-servers on boards..."
 ssh unoq 'pkill -f sim-server' 2>/dev/null || true
 ssh unoq2 'pkill -f sim-server' 2>/dev/null || true

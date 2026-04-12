@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+
+{% block title %}{{ hostname }} — Dashboard{% endblock %}
+{% block nav_title %}{{ hostname }}{% endblock %}
+
+{% block content %}
+<h1>System Dashboard</h1>
+<div class="grid">
+    <article>
+        <header>Hostname</header>
+        <p>{{ hostname }}</p>
+    </article>
+    <article>
+        <header>Uptime</header>
+        <p id="uptime">{{ uptime }}</p>
+    </article>
+    <article>
+        <header>Free Memory</header>
+        <p id="mem-free">{{ mem.available_mb }} MB</p>
+    </article>
+    <article>
+        <header>CPU Temp</header>
+        <p id="cpu-temp">{{ cpu_temp }}</p>
+    </article>
+</div>
+
+<h2>Live Graphs</h2>
+<div class="chart-grid">
+    <article>
+        <div class="chart-label">
+            <span>CPU Usage</span>
+            <span class="live-value" id="cpu-val">—</span>
+        </div>
+        <canvas id="cpu-chart" class="chart"></canvas>
+    </article>
+    <article>
+        <div class="chart-label">
+            <span>Memory</span>
+            <span class="live-value" id="mem-val">—</span>
+        </div>
+        <canvas id="mem-chart" class="chart"></canvas>
+    </article>
+    <article>
+        <div class="chart-label">
+            <span>CPU Temperature</span>
+            <span class="live-value" id="temp-val">—</span>
+        </div>
+        <canvas id="temp-chart" class="chart"></canvas>
+    </article>
+    <article>
+        <div class="chart-label">
+            <span>Network I/O</span>
+            <span class="live-value" id="net-val">—</span>
+        </div>
+        <canvas id="net-chart" class="chart"></canvas>
+    </article>
+</div>
+
+<h2>Memory Breakdown</h2>
+<table id="mem-table">
+    <thead>
+        <tr>
+            <th>Category</th>
+            <th>MB</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>Used</td>
+            <td class="mem-used">{{ mem.used_mb }}</td>
+            <td><progress class="mem-used-bar" value="{{ mem.used_mb }}" max="{{ mem.total_mb }}"></progress></td>
+        </tr>
+        <tr>
+            <td>Buffers</td>
+            <td class="mem-buffers">{{ mem.buffers_mb }}</td>
+            <td><progress class="mem-buffers-bar" value="{{ mem.buffers_mb }}" max="{{ mem.total_mb }}"></progress></td>
+        </tr>
+        <tr>
+            <td>Cached</td>
+            <td class="mem-cached">{{ mem.cached_mb }}</td>
+            <td><progress class="mem-cached-bar" value="{{ mem.cached_mb }}" max="{{ mem.total_mb }}"></progress></td>
+        </tr>
+        <tr>
+            <td>Free</td>
+            <td class="mem-free-row">{{ mem.free_mb }}</td>
+            <td><progress class="mem-free-bar" value="{{ mem.free_mb }}" max="{{ mem.total_mb }}"></progress></td>
+        </tr>
+        <tr>
+            <td>Available</td>
+            <td class="mem-avail">{{ mem.available_mb }}</td>
+            <td><progress class="mem-avail-bar" value="{{ mem.available_mb }}" max="{{ mem.total_mb }}"></progress></td>
+        </tr>
+        <tr>
+            <td><strong>Total</strong></td>
+            <td><strong>{{ mem.total_mb }}</strong></td>
+            <td></td>
+        </tr>
+        {% if mem.swap_total_mb > 0 %}
+        <tr>
+            <td>Swap Used</td>
+            <td class="mem-swap">{{ mem.swap_used_mb }}</td>
+            <td><progress class="mem-swap-bar" value="{{ mem.swap_used_mb }}" max="{{ mem.swap_total_mb }}"></progress></td>
+        </tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<h2>Mesh Server</h2>
+<article>
+<div id="mesh-widget" hx-get="/api/mesh/widget" hx-trigger="load, every 2s" hx-swap="innerHTML">
+    <p style="opacity:0.5">Loading...</p>
+</div>
+</article>
+
+<h2>Disk Usage</h2>
+<table>
+    <thead><tr><th>Mount</th><th>Size</th><th>Used</th><th>Avail</th><th>Use%</th></tr></thead>
+    <tbody>
+        {% for d in disks %}
+        <tr>
+            <td>{{ d.mount }}</td>
+            <td>{{ d.size }}</td>
+            <td>{{ d.used }}</td>
+            <td>{{ d.avail }}</td>
+            <td>{{ d.pct }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<h2>Services</h2>
+<div hx-get="/api/services" hx-trigger="every 10s" hx-swap="innerHTML">
+<table>
+    <thead><tr><th></th><th>Service</th><th>Status</th></tr></thead>
+    <tbody>
+        {% for s in services %}
+        <tr>
+            <td><span class="svc-dot {% if s.active %}active{% else %}inactive{% endif %}"></span></td>
+            <td>{{ s.name }}</td>
+            <td>{{ s.status }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+<h2>Docker Containers</h2>
+<div hx-get="/api/docker" hx-trigger="every 10s" hx-swap="innerHTML">
+<table>
+    <thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th></tr></thead>
+    <tbody>
+        {% if containers.is_empty() %}
+        <tr><td colspan="4" style="opacity:0.5">No running containers</td></tr>
+        {% else %}
+        {% for c in containers %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td><code>{{ c.image }}</code></td>
+            <td>{{ c.status }}</td>
+            <td>{{ c.ports }}</td>
+        </tr>
+        {% endfor %}
+        {% endif %}
+    </tbody>
+</table>
+</div>
+
+<h2>Processes (by memory)</h2>
+<div hx-get="/api/processes" hx-trigger="every 5s" hx-swap="innerHTML">
+<table>
+    <thead>
+        <tr>
+            <th>PID</th>
+            <th>User</th>
+            <th>RSS (MB)</th>
+            <th>MEM%</th>
+            <th>CPU%</th>
+            <th>Command</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for p in processes %}
+        <tr>
+            <td>{{ p.pid }}</td>
+            <td>{{ p.user }}</td>
+            <td>{{ p.rss_mb|fmt("{:.1}") }}</td>
+            <td>{{ p.mem_pct }}%</td>
+            <td>{{ p.cpu_pct }}%</td>
+            <td><code>{{ p.name }}</code></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/smoothie.min.js"></script>
+<script>
+(function() {
+    const POLL_MS = 2000;
+
+    const chartOpts = {
+        millisPerPixel: 50,
+        grid: {
+            fillStyle: 'transparent',
+            strokeStyle: 'rgba(255,255,255,0.1)',
+            verticalSections: 4,
+            borderVisible: false,
+        },
+        labels: { fillStyle: '#999', fontSize: 11 },
+        responsive: true,
+        interpolation: 'bezier',
+    };
+
+    function makeChart(canvasId, opts) {
+        const chart = new SmoothieChart({ ...chartOpts, ...opts });
+        chart.streamTo(document.getElementById(canvasId), POLL_MS);
+        return chart;
+    }
+
+    const cpuLine = new TimeSeries();
+    const cpuChart = makeChart('cpu-chart', {
+        minValue: 0, maxValue: 100,
+        yRangeFunction: () => ({ min: 0, max: 100 }),
+    });
+    cpuChart.addTimeSeries(cpuLine, {
+        strokeStyle: '#4dabf7', fillStyle: 'rgba(77,171,247,0.15)', lineWidth: 2,
+    });
+
+    const memUsedLine = new TimeSeries();
+    const memCachedLine = new TimeSeries();
+    const memChart = makeChart('mem-chart', { minValue: 0 });
+    memChart.addTimeSeries(memUsedLine, {
+        strokeStyle: '#ff6b6b', fillStyle: 'rgba(255,107,107,0.15)', lineWidth: 2,
+    });
+    memChart.addTimeSeries(memCachedLine, {
+        strokeStyle: '#ffa94d', fillStyle: 'rgba(255,169,77,0.1)', lineWidth: 1,
+    });
+
+    const tempLine = new TimeSeries();
+    const tempChart = makeChart('temp-chart', { minValue: 30, maxValue: 80 });
+    tempChart.addTimeSeries(tempLine, {
+        strokeStyle: '#ffa94d', fillStyle: 'rgba(255,169,77,0.15)', lineWidth: 2,
+    });
+
+    const rxLine = new TimeSeries();
+    const txLine = new TimeSeries();
+    const netChart = makeChart('net-chart', { minValue: 0 });
+    netChart.addTimeSeries(rxLine, {
+        strokeStyle: '#69db7c', fillStyle: 'rgba(105,219,124,0.15)', lineWidth: 2,
+    });
+    netChart.addTimeSeries(txLine, {
+        strokeStyle: '#da77f2', fillStyle: 'rgba(218,119,242,0.1)', lineWidth: 1,
+    });
+
+    let prevCpu = null;
+    let prevNet = null;
+    let prevTime = null;
+
+    function calcCpuPct(prev, curr) {
+        let totalPrev = 0, totalCurr = 0, idlePrev = 0, idleCurr = 0;
+        for (const c of prev) { totalPrev += c.user + c.nice + c.system + c.idle + c.iowait; idlePrev += c.idle + c.iowait; }
+        for (const c of curr) { totalCurr += c.user + c.nice + c.system + c.idle + c.iowait; idleCurr += c.idle + c.iowait; }
+        const totalD = totalCurr - totalPrev;
+        const idleD = idleCurr - idlePrev;
+        return totalD > 0 ? ((totalD - idleD) / totalD) * 100 : 0;
+    }
+
+    function fmtBytes(b) {
+        if (b < 1024) return b.toFixed(0) + ' B/s';
+        if (b < 1048576) return (b / 1024).toFixed(1) + ' KB/s';
+        return (b / 1048576).toFixed(1) + ' MB/s';
+    }
+
+    async function poll() {
+        try {
+            const res = await fetch('/api/stats');
+            const s = await res.json();
+            const now = Date.now();
+
+            if (prevCpu && prevCpu.length === s.cpu.cores.length) {
+                const pct = calcCpuPct(prevCpu, s.cpu.cores);
+                cpuLine.append(now, pct);
+                document.getElementById('cpu-val').textContent = pct.toFixed(1) + '%';
+            }
+            prevCpu = s.cpu.cores;
+
+            memUsedLine.append(now, s.mem.used_mb);
+            memCachedLine.append(now, s.mem.cached_mb);
+            document.getElementById('mem-val').textContent = s.mem.used_mb + ' / ' + s.mem.total_mb + ' MB';
+            document.getElementById('mem-free').textContent = s.mem.available_mb + ' MB';
+
+            const q = (sel, val) => { const el = document.querySelector(sel); if (el) el.textContent = val; };
+            const qb = (sel, val) => { const el = document.querySelector(sel); if (el) el.value = val; };
+            q('.mem-used', s.mem.used_mb); qb('.mem-used-bar', s.mem.used_mb);
+            q('.mem-buffers', s.mem.buffers_mb); qb('.mem-buffers-bar', s.mem.buffers_mb);
+            q('.mem-cached', s.mem.cached_mb); qb('.mem-cached-bar', s.mem.cached_mb);
+            q('.mem-free-row', s.mem.free_mb); qb('.mem-free-bar', s.mem.free_mb);
+            q('.mem-avail', s.mem.available_mb); qb('.mem-avail-bar', s.mem.available_mb);
+            q('.mem-swap', s.mem.swap_used_mb); qb('.mem-swap-bar', s.mem.swap_used_mb);
+
+            tempLine.append(now, s.temp);
+            document.getElementById('temp-val').textContent = s.temp.toFixed(1) + '°C';
+            document.getElementById('cpu-temp').textContent = s.temp.toFixed(1) + '°C';
+
+            if (prevNet && prevTime) {
+                const dt = (now - prevTime) / 1000;
+                let totalRx = 0, totalTx = 0;
+                for (const iface of s.net) {
+                    const prev = prevNet.find(p => p.name === iface.name);
+                    if (prev && dt > 0) {
+                        totalRx += (iface.rx_bytes - prev.rx_bytes) / dt;
+                        totalTx += (iface.tx_bytes - prev.tx_bytes) / dt;
+                    }
+                }
+                rxLine.append(now, totalRx);
+                txLine.append(now, totalTx);
+                document.getElementById('net-val').textContent =
+                    'rx ' + fmtBytes(totalRx) + ' / tx ' + fmtBytes(totalTx);
+            }
+            prevNet = s.net;
+            prevTime = now;
+
+            const h = Math.floor(s.uptime_secs / 3600);
+            const m = Math.floor((s.uptime_secs % 3600) / 60);
+            document.getElementById('uptime').textContent = h + 'h ' + m + 'm';
+        } catch (e) {
+            console.error('Poll failed:', e);
+        }
+    }
+
+    poll();
+    setInterval(poll, POLL_MS);
+})();
+</script>
+{% endblock %}

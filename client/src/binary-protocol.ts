@@ -14,15 +14,15 @@
  *   [updated entities × N: 43 bytes each]
  *   [removed UUIDs × M: 16 bytes each]
  *
- * Entity (43 bytes):
- *   [uuid:16][pos:3×f32][vel:3×f32][type:u8][authority:u16]
+ * Entity (47 bytes):
+ *   [uuid:16][pos:3×f32][vel:3×f32][type:u8][authority:u16][last_input_seq:u32]
  */
 
 import type { WorldSnapshot, RawEntity, GatewayMetrics } from './world-view';
 
 const FRAME_FULL = 0x01;
 const FRAME_DELTA = 0x02;
-const ENTITY_SIZE = 43;
+const ENTITY_SIZE = 47;
 
 // Pre-allocated hex lookup table
 const HEX: string[] = [];
@@ -58,6 +58,7 @@ function readEntity(view: DataView, bytes: Uint8Array, offset: number): RawEntit
     ],
     entity_type: bytes[offset + 40] === 1 ? 'Player' : 'Npc',
     authority_server: view.getUint16(offset + 41, true),
+    last_input_seq: view.getUint32(offset + 43, true),
   };
 }
 

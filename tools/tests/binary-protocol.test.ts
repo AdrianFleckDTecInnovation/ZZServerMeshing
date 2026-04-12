@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 const FRAME_FULL = 0x01;
 const FRAME_DELTA = 0x02;
-const ENTITY_SIZE = 43;
+const ENTITY_SIZE = 47;
 
 const HEX: string[] = [];
 for (let i = 0; i < 256; i++) {
@@ -36,6 +36,7 @@ interface RawEntity {
   velocity: [number, number, number];
   entity_type: 'Player' | 'Npc';
   authority_server: number;
+  last_input_seq: number;
 }
 
 interface GatewayMetrics {
@@ -68,6 +69,7 @@ function readEntity(view: DataView, bytes: Uint8Array, offset: number): RawEntit
     ],
     entity_type: bytes[offset + 40] === 1 ? 'Player' : 'Npc',
     authority_server: view.getUint16(offset + 41, true),
+    last_input_seq: view.getUint32(offset + 43, true),
   };
 }
 
@@ -139,6 +141,7 @@ function writeEntity(buf: Buffer, offset: number, e: {
   vx: number; vy: number; vz: number;
   entityType: number; // 0=Npc, 1=Player
   authority: number;  // u16
+  lastInputSeq?: number; // u32, default 0
 }): void {
   e.uuid.copy(buf, offset);
   buf.writeFloatLE(e.px, offset + 16);
@@ -149,6 +152,7 @@ function writeEntity(buf: Buffer, offset: number, e: {
   buf.writeFloatLE(e.vz, offset + 36);
   buf[offset + 40] = e.entityType;
   buf.writeUInt16LE(e.authority, offset + 41);
+  buf.writeUInt32LE(e.lastInputSeq ?? 0, offset + 43);
 }
 
 function writeMetrics(buf: Buffer, offset: number, m: GatewayMetrics): void {
@@ -313,13 +317,13 @@ test('full snapshot: multiple entities', () => {
   assert.equal(decoded!.entities[1].id, '660e8400-e29b-41d4-a716-446655440000');
 });
 
-test('full snapshot: frame size matches expected (header + N*43)', () => {
+test('full snapshot: frame size matches expected (header + N*47)', () => {
   const entity = {
     uuid: TEST_UUID, px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0, entityType: 0, authority: 1,
   };
   const frame = buildFullSnapshot(1, [entity, entity], defaultMetrics);
-  // Header: 1 + 8 + 4 + 14 = 27, entities: 2 * 43 = 86
-  assert.equal(frame.byteLength, 27 + 86);
+  // Header: 1 + 8 + 4 + 14 = 27, entities: 2 * 47 = 94
+  assert.equal(frame.byteLength, 27 + 94);
 });
 
 test('delta frame: decode type and tick', () => {
@@ -386,6 +390,73 @@ test('uuid all ones', () => {
   const ones = Buffer.alloc(16, 0xFF);
   const uuid = uuidFromBytes(ones, 0);
   assert.equal(uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff');
+});
+
+// -- last_input_seq tests --
+
+test('full snapshot: last_input_seq decoded for player', () => {
+  const entity = {
+    uuid: TEST_UUID, px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0,
+    entityType: 1, authority: 1, lastInputSeq: 42,
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.equal(decoded!.entities[0].last_input_seq, 42);
+});
+
+test('full snapshot: last_input_seq zero for NPC', () => {
+  const entity = {
+    uuid: TEST_UUID, px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0,
+    entityType: 0, authority: 1,
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.equal(decoded!.entities[0].last_input_seq, 0);
+});
+
+test('full snapshot: last_input_seq defaults to zero when omitted', () => {
+  const entity = {
+    uuid: TEST_UUID, px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0,
+    entityType: 0, authority: 1,
+    // no lastInputSeq
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.equal(decoded!.entities[0].last_input_seq, 0);
+});
+
+test('delta frame: last_input_seq in updates', () => {
+  const entity = {
+    uuid: TEST_UUID, px: 5.0, py: 0, pz: 10.0, vx: 0, vy: 0, vz: 0,
+    entityType: 1, authority: 1, lastInputSeq: 99,
+  };
+  const frame = buildDeltaFrame(50, [entity], [], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.equal(decoded!.entities[0].last_input_seq, 99);
+});
+
+test('entity layout: 47-byte structure [uuid:16+pos:12+vel:12+type:1+auth:2+seq:4]', () => {
+  const entity = {
+    uuid: TEST_UUID,
+    px: 1.5, py: 2.5, pz: 3.5,
+    vx: 4.5, vy: 5.5, vz: 6.5,
+    entityType: 1,
+    authority: 7,
+    lastInputSeq: 12345,
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  const e = decoded!.entities[0];
+  assert.equal(e.id, TEST_UUID_STR);
+  assert.ok(Math.abs(e.position[0] - 1.5) < 0.001);
+  assert.ok(Math.abs(e.position[1] - 2.5) < 0.001);
+  assert.ok(Math.abs(e.position[2] - 3.5) < 0.001);
+  assert.ok(Math.abs(e.velocity[0] - 4.5) < 0.001);
+  assert.ok(Math.abs(e.velocity[1] - 5.5) < 0.001);
+  assert.ok(Math.abs(e.velocity[2] - 6.5) < 0.001);
+  assert.equal(e.entity_type, 'Player');
+  assert.equal(e.authority_server, 7);
+  assert.equal(e.last_input_seq, 12345);
 });
 
 // ── Summary ──

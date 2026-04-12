@@ -49,6 +49,7 @@ pub async fn run_game_loop(
                     let msg = PeerMessage::ForwardedInput {
                         entity_id: fwd.entity_id,
                         direction: fwd.direction,
+                        seq: fwd.seq,
                     };
                     if let Ok(bytes) = bincode::serialize(&msg) {
                         if let Err(e) = udp_socket.send_to(&bytes, peer_addr).await {
@@ -117,6 +118,7 @@ pub struct PendingForward {
     pub entity_id: EntityId,
     pub direction: [f32; 3],
     pub target_server: u16,
+    pub seq: u32,
 }
 
 fn process_input(world: &mut World, input: ClientMessage) -> Option<PendingForward> {
@@ -139,7 +141,7 @@ fn process_input(world: &mut World, input: ClientMessage) -> Option<PendingForwa
             }
             None
         }
-        ClientMessage::MoveInput { entity_id, direction } => {
+        ClientMessage::MoveInput { entity_id, direction, seq } => {
             if let Ok(uuid) = Uuid::parse_str(&entity_id) {
                 let eid = EntityId(uuid);
                 let dir = Vec3::new(direction[0], direction[1], direction[2]);
@@ -147,15 +149,30 @@ fn process_input(world: &mut World, input: ClientMessage) -> Option<PendingForwa
                 // Authoritative — process locally
                 if world.entities.contains_key(&eid) {
                     world.apply_move_input(&eid, dir);
+                    if let Some(entity) = world.entities.get_mut(&eid) {
+                        entity.last_input_seq = seq;
+                    }
+                    tracing::debug!(
+                        entity = %eid,
+                        seq = seq,
+                        "MoveInput processed"
+                    );
                     return None;
                 }
 
                 // Shadow — forward to the authority peer
                 if let Some(shadow) = world.shadow_entities.get(&eid) {
+                    tracing::debug!(
+                        entity = %eid,
+                        target = shadow.authority_server.0,
+                        seq = seq,
+                        "Forwarding input to authority"
+                    );
                     return Some(PendingForward {
                         entity_id: eid,
                         direction,
                         target_server: shadow.authority_server.0,
+                        seq,
                     });
                 }
 
@@ -400,6 +417,7 @@ mod tests {
         process_input(&mut w, ClientMessage::MoveInput {
             entity_id: id.0.to_string(),
             direction: [1.0, 0.0, 0.0],
+            seq: 0,
         });
         let e = &w.entities[&id];
         assert!(e.velocity.x > 0.0);
@@ -411,6 +429,7 @@ mod tests {
         process_input(&mut w, ClientMessage::MoveInput {
             entity_id: "bad".to_string(),
             direction: [1.0, 0.0, 0.0],
+            seq: 0,
         });
         // No panic
     }
@@ -452,6 +471,7 @@ mod tests {
         let fwd = process_input(&mut w, ClientMessage::MoveInput {
             entity_id: id.0.to_string(),
             direction: [1.0, 0.0, 0.0],
+            seq: 0,
         });
         assert!(fwd.is_none()); // processed locally, not forwarded
         assert!(w.entities[&id].velocity.x > 0.0);
@@ -468,6 +488,7 @@ mod tests {
         let fwd = process_input(&mut w, ClientMessage::MoveInput {
             entity_id: shadow_id.0.to_string(),
             direction: [0.0, 0.0, 1.0],
+            seq: 0,
         });
 
         let fwd = fwd.expect("should return a forward");
@@ -483,6 +504,7 @@ mod tests {
         let fwd = process_input(&mut w, ClientMessage::MoveInput {
             entity_id: w_id.0.to_string(),
             direction: [1.0, 0.0, 0.0],
+            seq: 0,
         });
         assert!(fwd.is_none());
     }
@@ -546,6 +568,72 @@ mod tests {
         // covering more than one full NPC_DIRECTION_CHANGE_INTERVAL, at least one change
         let first_nonzero = velocities.iter().find(|v| v.length() > 0.01);
         assert!(first_nonzero.is_some(), "NPC should have gained velocity after direction change");
+    }
+
+    // -- last_input_seq tests --
+
+    #[test]
+    fn process_input_move_sets_last_input_seq() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        assert_eq!(w.entities[&id].last_input_seq, 0);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+            seq: 42,
+        });
+        assert_eq!(w.entities[&id].last_input_seq, 42);
+    }
+
+    #[test]
+    fn process_input_seq_updates_on_each_input() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+            seq: 1,
+        });
+        assert_eq!(w.entities[&id].last_input_seq, 1);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [-1.0, 0.0, 0.0],
+            seq: 5,
+        });
+        assert_eq!(w.entities[&id].last_input_seq, 5);
+    }
+
+    #[test]
+    fn process_input_seq_persists_across_ticks() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+            seq: 10,
+        });
+        simulate_tick(&mut w);
+        simulate_tick(&mut w);
+        simulate_tick(&mut w);
+        assert_eq!(w.entities[&id].last_input_seq, 10);
+    }
+
+    #[test]
+    fn shadow_forward_carries_seq() {
+        use shared::entity::EntityState;
+        let mut w = make_world(1);
+        let shadow = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let shadow_id = shadow.id;
+        w.shadow_entities.insert(shadow_id, shadow);
+
+        let fwd = process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: shadow_id.0.to_string(),
+            direction: [0.0, 0.0, 1.0],
+            seq: 7,
+        });
+        let fwd = fwd.expect("should return a forward");
+        assert_eq!(fwd.seq, 7);
+        assert_eq!(fwd.target_server, 2);
     }
 
     #[test]

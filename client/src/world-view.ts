@@ -9,6 +9,7 @@ export interface EntityData {
   entityType: 'Player' | 'Npc';
   authorityServer: number;
   hasSecondSnapshot: boolean;      // false until we have two positions to lerp between
+  lastInputSeq: number;            // last acknowledged input sequence (players only)
 }
 
 export interface WorldSnapshot {
@@ -33,6 +34,7 @@ export interface RawEntity {
   velocity: Vec3Like;
   entity_type: 'Player' | 'Npc';
   authority_server: number;
+  last_input_seq: number;
 }
 
 function toVec3(v: Vec3Like): THREE.Vector3 {
@@ -131,8 +133,17 @@ export class WorldView {
       const vel = toVec3(raw.velocity);
 
       const existing = this.entities.get(id);
+      const isLocalPlayer = id === this.localPlayerId;
       if (existing) {
-        if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
+        existing.lastInputSeq = raw.last_input_seq ?? 0;
+        if (isLocalPlayer) {
+          // Local player: update server state but don't touch rendered position
+          // (prediction manager handles position via reconciliation)
+          existing.currentPosition.copy(pos);
+          existing.velocity.copy(vel);
+          existing.entityType = raw.entity_type;
+          existing.authorityServer = serverId;
+        } else if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
           // During warmup: snap everything, no interpolation
           existing.position.copy(pos);
           existing.previousPosition.copy(pos);
@@ -160,6 +171,7 @@ export class WorldView {
           entityType: raw.entity_type,
           authorityServer: serverId,
           hasSecondSnapshot: false,
+          lastInputSeq: raw.last_input_seq ?? 0,
         });
       }
     }
@@ -198,16 +210,25 @@ export class WorldView {
       const serverId = raw.authority_server;
       const pos = toVec3(raw.position);
       const vel = toVec3(raw.velocity);
+      const isLocalPlayer = id === this.localPlayerId;
 
       const existing = this.entities.get(id);
       if (existing) {
-        // Snap previousPosition to current rendered position for smooth transition
-        existing.previousPosition.copy(existing.position);
-        existing.currentPosition.copy(pos);
-        existing.velocity.copy(vel);
-        existing.entityType = raw.entity_type;
-        existing.authorityServer = serverId;
-        existing.hasSecondSnapshot = true;
+        existing.lastInputSeq = raw.last_input_seq ?? 0;
+        if (isLocalPlayer) {
+          existing.currentPosition.copy(pos);
+          existing.velocity.copy(vel);
+          existing.entityType = raw.entity_type;
+          existing.authorityServer = serverId;
+        } else {
+          // Snap previousPosition to current rendered position for smooth transition
+          existing.previousPosition.copy(existing.position);
+          existing.currentPosition.copy(pos);
+          existing.velocity.copy(vel);
+          existing.entityType = raw.entity_type;
+          existing.authorityServer = serverId;
+          existing.hasSecondSnapshot = true;
+        }
       } else {
         this.entities.set(id, {
           id,
@@ -218,6 +239,7 @@ export class WorldView {
           entityType: raw.entity_type,
           authorityServer: serverId,
           hasSecondSnapshot: false,
+          lastInputSeq: raw.last_input_seq ?? 0,
         });
       }
     }
@@ -244,6 +266,8 @@ export class WorldView {
     const alpha = Math.min(timeSinceSnapshot / this.measuredIntervalMs, 1.2);
 
     for (const entity of this.entities.values()) {
+      // Local player position is managed by the prediction system
+      if (entity.id === this.localPlayerId) continue;
       if (!entity.hasSecondSnapshot) {
         entity.position.copy(entity.currentPosition);
         continue;

@@ -49,6 +49,27 @@ cd client && npm run dev
 - Inputs for non-local entities are forwarded between peers via UDP
 - Entities color-coded by authority server in the client
 
+## Testing Workflow
+
+Two-stage verification for all changes:
+1. **Local cluster first** — quick smoke test on the dev Mac (`./start.sh` + `./test.sh`)
+2. **UNO Q cluster second** — real deployment to the two Arduino UNO Q boards (`./start-unoq.sh`)
+
+The UNO Q boards are the primary testing ground for the mesh. They run the sim-servers on real separate hardware (unoq.local = S1, unoq2.local = S2) with the coordinator on the Mac.
+
+```sh
+# Stage 1: Local verification
+./start.sh                             # 3 local sim-servers
+./test.sh                              # run test suite
+./stop.sh
+
+# Stage 2: UNO Q verification
+./start-unoq.sh                       # cross-compile, deploy, start on boards
+# Open http://unoq.local:8101/ and http://unoq2.local:8102/ for dashboards
+# Open http://localhost:7871/ for coordinator overview
+./stop-unoq.sh
+```
+
 ## Test Suite
 
 Single-command test runner that starts the cluster, runs scenarios, and reports results.
@@ -57,7 +78,7 @@ Single-command test runner that starts the cluster, runs scenarios, and reports 
 ./test.sh                              # all scenarios, local cluster
 ./test.sh --json                       # JSON output (for automated parsing)
 ./test.sh --json spawn-burst           # single scenario with JSON
-./test.sh --docker                     # run in Docker with Pi Zero W2 resource limits
+./test.sh --docker                     # run in Docker with resource limits
 ./test.sh --no-start                   # use already-running cluster
 ./test.sh spawn-burst,steady-scale     # run specific scenarios only
 ```

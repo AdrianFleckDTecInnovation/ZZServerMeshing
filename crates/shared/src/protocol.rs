@@ -42,6 +42,8 @@ pub enum ClientMessage {
     MoveInput {
         entity_id: String,
         direction: [f32; 3],
+        #[serde(default)]
+        seq: u32,
     },
     /// Gateway requests removal of a player entity on disconnect.
     RemoveEntity {
@@ -71,6 +73,7 @@ pub enum PeerMessage {
     ForwardedInput {
         entity_id: EntityId,
         direction: [f32; 3],
+        seq: u32,
     },
 }
 
@@ -198,13 +201,15 @@ mod tests {
         let msg = ClientMessage::MoveInput {
             entity_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             direction: [1.0, 0.0, 0.0],
+            seq: 42,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::MoveInput { entity_id, direction } => {
+            ClientMessage::MoveInput { entity_id, direction, seq } => {
                 assert_eq!(entity_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(direction, [1.0, 0.0, 0.0]);
+                assert_eq!(seq, 42);
             }
             _ => panic!("wrong variant"),
         }
@@ -269,13 +274,15 @@ mod tests {
         let msg = PeerMessage::ForwardedInput {
             entity_id: eid,
             direction: [1.0, 0.0, -0.5],
+            seq: 7,
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::ForwardedInput { entity_id, direction } => {
+            PeerMessage::ForwardedInput { entity_id, direction, seq } => {
                 assert_eq!(entity_id, eid);
                 assert_eq!(direction, [1.0, 0.0, -0.5]);
+                assert_eq!(seq, 7);
             }
             _ => panic!("wrong variant"),
         }
@@ -365,6 +372,51 @@ mod tests {
                 assert_eq!(tick, 0);
                 assert!(entities.is_empty());
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // -- seq field tests --
+
+    #[test]
+    fn move_input_seq_defaults_to_zero() {
+        // Old-format JSON without seq field
+        let json = r#"{"type":"MoveInput","entity_id":"550e8400-e29b-41d4-a716-446655440000","direction":[1.0,0.0,0.0]}"#;
+        let decoded: ClientMessage = serde_json::from_str(json).unwrap();
+        match decoded {
+            ClientMessage::MoveInput { seq, .. } => assert_eq!(seq, 0),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn move_input_seq_preserved() {
+        let msg = ClientMessage::MoveInput {
+            entity_id: "test".to_string(),
+            direction: [1.0, 0.0, 0.0],
+            seq: 999,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("999"));
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::MoveInput { seq, .. } => assert_eq!(seq, 999),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn forwarded_input_seq_bincode_roundtrip() {
+        let eid = crate::entity::EntityId::new();
+        let msg = PeerMessage::ForwardedInput {
+            entity_id: eid,
+            direction: [1.0, 0.0, -0.5],
+            seq: 42,
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::ForwardedInput { seq, .. } => assert_eq!(seq, 42),
             _ => panic!("wrong variant"),
         }
     }

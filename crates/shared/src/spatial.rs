@@ -24,6 +24,17 @@ pub fn cell_and_neighbors(cell: (i32, i32)) -> Vec<(i32, i32)> {
     result
 }
 
+/// Get all cells within a given radius (in cells) from a center cell.
+pub fn cells_within_radius(center: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
+    let mut cells = Vec::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            cells.push((center.0 + dx, center.1 + dz));
+        }
+    }
+    cells
+}
+
 /// Clamp a position to the world bounds.
 pub fn clamp_to_world(pos: Vec3) -> Vec3 {
     Vec3::new(
@@ -78,6 +89,28 @@ mod tests {
                 assert!(cells.contains(&(dx, dz)));
             }
         }
+    }
+
+    #[test]
+    fn cells_within_radius_zero() {
+        let cells = cells_within_radius((0, 0), 0);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0], (0, 0));
+    }
+
+    #[test]
+    fn cells_within_radius_one_equals_nine() {
+        let cells = cells_within_radius((5, 5), 1);
+        assert_eq!(cells.len(), 9);
+        assert!(cells.contains(&(5, 5)));
+        assert!(cells.contains(&(4, 4)));
+        assert!(cells.contains(&(6, 6)));
+    }
+
+    #[test]
+    fn cells_within_radius_two() {
+        let cells = cells_within_radius((0, 0), 2);
+        assert_eq!(cells.len(), 25); // 5x5
     }
 
     #[test]

@@ -17,6 +17,10 @@ import { rebalanceStorm } from './scenarios/rebalance-storm.js';
 import { spatialHotspot } from './scenarios/spatial-hotspot.js';
 import { inputLatency } from './scenarios/input-latency.js';
 import { smoothness } from './scenarios/smoothness.js';
+import { meshVerify } from './scenarios/mesh-verify.js';
+import { inputSeqEcho } from './scenarios/input-seq-echo.js';
+import { peerReplication } from './scenarios/peer-replication.js';
+import { forwardedInput } from './scenarios/forwarded-input.js';
 
 const ALL_SCENARIOS: Scenario[] = [
   spawnBurst,
@@ -26,6 +30,10 @@ const ALL_SCENARIOS: Scenario[] = [
   spatialHotspot,
   inputLatency,
   smoothness,
+  meshVerify,
+  inputSeqEcho,
+  peerReplication,
+  forwardedInput,
 ];
 
 // ── CLI ──
@@ -100,7 +108,7 @@ async function fetchMetrics(serverId: number, basePort: number): Promise<ServerM
 // ── Context factory ──
 
 // Binary protocol decoder (matches gateway binary protocol)
-const ENTITY_SIZE = 43;
+const ENTITY_SIZE = 47;
 const FRAME_FULL = 0x01;
 const FRAME_DELTA = 0x02;
 const HEX: string[] = [];
@@ -119,7 +127,7 @@ function uuidFromBytes(buf: Buffer, offset: number): string {
   );
 }
 
-interface BinEntity { id: string; position: [number,number,number]; velocity: [number,number,number]; entity_type: string; authority_server: number; }
+interface BinEntity { id: string; position: [number,number,number]; velocity: [number,number,number]; entity_type: string; authority_server: number; last_input_seq: number; }
 
 function readEntity(data: Buffer, offset: number): BinEntity {
   return {
@@ -128,6 +136,7 @@ function readEntity(data: Buffer, offset: number): BinEntity {
     velocity: [data.readFloatLE(offset+28), data.readFloatLE(offset+32), data.readFloatLE(offset+36)],
     entity_type: data[offset+40] === 1 ? 'Player' : 'Npc',
     authority_server: data.readUInt16LE(offset+41),
+    last_input_seq: data.readUInt32LE(offset+43),
   };
 }
 

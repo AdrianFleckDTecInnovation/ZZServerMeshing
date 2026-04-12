@@ -35,6 +35,7 @@ export interface EntityState {
   velocity: [number, number, number];
   entity_type: string;
   authority_server: number;
+  last_input_seq: number;
 }
 
 export interface WorldSnapshot {

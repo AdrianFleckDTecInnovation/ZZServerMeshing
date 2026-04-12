@@ -1,13 +1,30 @@
 import { WorldView, WorldSnapshot } from './world-view';
 import { decodeBinaryFrame } from './binary-protocol';
+import { PredictionManager } from './prediction';
 
 // Exposed to window for Playwright test access
+interface FrameRecord {
+  tick: number;
+  type: 'full' | 'delta';
+  entities: number;
+  updates: number;
+  removals: number;
+  servers: Record<number, number>;
+  jumps: number;
+  flickerIn: number;
+  flickerOut: number;
+}
+
 interface ClientDiag {
   frames: number;
   applied: number;
   dropped: number;
   dupes: number;
   textFrames: number;
+  fullFrames: number;
+  deltaFrames: number;
+  totalUpdates: number;
+  totalRemovals: number;
   entityCountSwings: number;
   entityFlickerIn: number;
   entityFlickerOut: number;
@@ -17,12 +34,13 @@ interface ClientDiag {
   errors: string[];
   prevEntityIds: Set<string>;
   prevPositions: Map<string, [number, number, number]>;
-  perFrame: Array<{ tick: number; entities: number; servers: Record<number, number>; jumps: number; flickerIn: number; flickerOut: number }>;
+  perFrame: FrameRecord[];
 }
 
 function initDiag(): ClientDiag {
   const diag: ClientDiag = {
     frames: 0, applied: 0, dropped: 0, dupes: 0, textFrames: 0,
+    fullFrames: 0, deltaFrames: 0, totalUpdates: 0, totalRemovals: 0,
     entityCountSwings: 0, entityFlickerIn: 0, entityFlickerOut: 0,
     positionJumps: 0, positionChecks: 0, worstJump: 0,
     errors: [],
@@ -34,6 +52,30 @@ function initDiag(): ClientDiag {
   return diag;
 }
 
+/** Print a compact data flow summary to console. Call from browser: __diagReport() */
+function installDiagReport(diag: ClientDiag): void {
+  (window as any).__diagReport = () => {
+    const recent = diag.perFrame.slice(-20);
+    console.table(recent.map(f => ({
+      tick: f.tick,
+      type: f.type,
+      entities: f.entities,
+      upd: f.updates,
+      rem: f.removals,
+      flickIn: f.flickerIn,
+      flickOut: f.flickerOut,
+      jumps: f.jumps,
+      servers: Object.entries(f.servers).map(([k,v]) => `S${k}:${v}`).join(' '),
+    })));
+    console.log(
+      `Totals: ${diag.frames} frames (${diag.fullFrames} full, ${diag.deltaFrames} delta) | ` +
+      `${diag.totalUpdates} updates, ${diag.totalRemovals} removals | ` +
+      `flicker: +${diag.entityFlickerIn}/-${diag.entityFlickerOut} | ` +
+      `jumps: ${diag.positionJumps}/${diag.positionChecks} (worst: ${diag.worstJump.toFixed(1)})`
+    );
+  };
+}
+
 export class NetworkClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -42,10 +84,12 @@ export class NetworkClient {
   private maxReconnectDelay = 10000;
   private connected = false;
   playerId: string | null = null;
+  prediction: PredictionManager;
 
   constructor(url: string, worldView: WorldView) {
     this.url = url;
     this.worldView = worldView;
+    this.prediction = new PredictionManager();
     this.connect();
   }
 
@@ -54,6 +98,8 @@ export class NetworkClient {
     this.ws = new WebSocket(this.url);
     const diag = initDiag();
     let lastTick = 0;
+
+    installDiagReport(diag);
 
     this.ws.onopen = () => {
       console.log('Connected to server');
@@ -80,8 +126,14 @@ export class NetworkClient {
           }
           lastTick = frame.tick;
 
+          // Track frame type stats
+          let frameUpdates = 0;
+          let frameRemovals = 0;
+
           // Apply to world view
           if (frame.type === 'full') {
+            diag.fullFrames++;
+            frameUpdates = frame.entities.length;
             this.worldView.applySnapshot({
               type: 'WorldSnapshot',
               tick: frame.tick,
@@ -89,9 +141,25 @@ export class NetworkClient {
               _metrics: frame.metrics,
             });
           } else {
+            diag.deltaFrames++;
+            frameUpdates = frame.entities.length;
+            frameRemovals = frame.removals.length;
+            diag.totalUpdates += frameUpdates;
+            diag.totalRemovals += frameRemovals;
+            if (frameRemovals > 0) {
+              console.warn(`[DELTA] tick=${frame.tick} +${frameUpdates} -${frameRemovals} removals: ${frame.removals.slice(0, 3).map(id => id.substring(0, 8)).join(', ')}${frameRemovals > 3 ? '...' : ''}`);
+            }
             this.worldView.applyDelta(frame.tick, frame.entities, frame.removals, frame.metrics);
           }
           diag.applied++;
+
+          // Reconcile local player prediction with server state
+          if (this.playerId) {
+            const player = this.worldView.entities.get(this.playerId);
+            if (player) {
+              this.prediction.reconcile(player, player.lastInputSeq);
+            }
+          }
 
           // --- Post-apply diagnostics: check what the WorldView actually contains ---
           const currentIds = new Set<string>();
@@ -142,13 +210,26 @@ export class NetworkClient {
           // Keep last 200 frame records
           diag.perFrame.push({
             tick: frame.tick,
+            type: frame.type,
             entities: this.worldView.entities.size,
+            updates: frameUpdates,
+            removals: frameRemovals,
             servers: serverCounts,
             jumps: frameJumps,
             flickerIn: frameFlickerIn,
             flickerOut: frameFlickerOut,
           });
           if (diag.perFrame.length > 200) diag.perFrame.shift();
+
+          // Periodic summary every 5 seconds (100 ticks at 20Hz)
+          if (frame.tick % 100 === 0) {
+            console.log(
+              `[NET] tick=${frame.tick} entities=${this.worldView.entities.size} ` +
+              `frames=${diag.fullFrames}f+${diag.deltaFrames}d ` +
+              `flicker=+${diag.entityFlickerIn}/-${diag.entityFlickerOut} ` +
+              `jumps=${diag.positionJumps}`
+            );
+          }
 
         } else {
           diag.textFrames++;
@@ -204,8 +285,8 @@ export class NetworkClient {
     this.send({ type: 'SpawnEntity', position: [x, y, z], entity_type: entityType });
   }
 
-  moveInput(entityId: string, dx: number, dy: number, dz: number): void {
-    this.send({ type: 'MoveInput', entity_id: entityId, direction: [dx, dy, dz] });
+  moveInput(entityId: string, dx: number, dy: number, dz: number, seq: number): void {
+    this.send({ type: 'MoveInput', entity_id: entityId, direction: [dx, dy, dz], seq });
   }
 
   isConnected(): boolean {

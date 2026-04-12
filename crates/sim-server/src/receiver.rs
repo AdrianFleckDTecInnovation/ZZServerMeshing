@@ -65,16 +65,30 @@ pub async fn run_udp_receiver(
                 w.shadow_entities.remove(&entity_id);
                 w.shadow_last_seen.remove(&entity_id);
                 w.entities.insert(entity_id, full_state);
-                tracing::info!("Accepted entity {} from {}", entity_id, from_server);
+                tracing::info!(
+                    entity = %entity_id,
+                    from = from_server.0,
+                    to = to_server.0,
+                    "Accepted authority transfer"
+                );
             }
             PeerMessage::ForwardedInput {
                 entity_id,
                 direction,
+                seq,
             } => {
                 let mut w = world.write().await;
                 if w.entities.contains_key(&entity_id) {
                     let dir = glam::Vec3::new(direction[0], direction[1], direction[2]);
                     w.apply_move_input(&entity_id, dir);
+                    if let Some(entity) = w.entities.get_mut(&entity_id) {
+                        entity.last_input_seq = seq;
+                    }
+                    tracing::debug!(
+                        entity = %entity_id,
+                        seq = seq,
+                        "Applied forwarded input"
+                    );
                 } else {
                     tracing::debug!(
                         "Received forwarded input for {} but not authoritative",

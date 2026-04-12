@@ -39,6 +39,9 @@ pub struct EntityState {
     pub velocity: Vec3,
     pub entity_type: EntityType,
     pub authority_server: ServerId,
+    /// Last acknowledged input sequence number (only meaningful for players, 0 for NPCs).
+    #[serde(default)]
+    pub last_input_seq: u32,
 }
 
 impl EntityState {
@@ -49,6 +52,7 @@ impl EntityState {
             velocity: Vec3::ZERO,
             entity_type: EntityType::Npc,
             authority_server,
+            last_input_seq: 0,
         }
     }
 
@@ -59,6 +63,7 @@ impl EntityState {
             velocity: Vec3::ZERO,
             entity_type: EntityType::Player,
             authority_server,
+            last_input_seq: 0,
         }
     }
 }
@@ -141,5 +146,46 @@ mod tests {
         assert_eq!(json, "42");
         let decoded: ServerId = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, sid);
+    }
+
+    // -- last_input_seq tests --
+
+    #[test]
+    fn last_input_seq_defaults_to_zero_json() {
+        // Simulate old-format JSON without last_input_seq
+        let json = r#"{"id":"550e8400-e29b-41d4-a716-446655440000","position":[1.0,0.0,2.0],"velocity":[0.0,0.0,0.0],"entity_type":"Npc","authority_server":1}"#;
+        let decoded: EntityState = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.last_input_seq, 0);
+    }
+
+    #[test]
+    fn last_input_seq_roundtrip_json() {
+        let mut e = EntityState::new_player(Vec3::ZERO, ServerId(1));
+        e.last_input_seq = 999;
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("999"));
+        let decoded: EntityState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.last_input_seq, 999);
+    }
+
+    #[test]
+    fn last_input_seq_roundtrip_bincode() {
+        let mut e = EntityState::new_player(Vec3::ZERO, ServerId(1));
+        e.last_input_seq = 12345;
+        let bytes = bincode::serialize(&e).unwrap();
+        let decoded: EntityState = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.last_input_seq, 12345);
+    }
+
+    #[test]
+    fn new_npc_has_zero_last_input_seq() {
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        assert_eq!(e.last_input_seq, 0);
+    }
+
+    #[test]
+    fn new_player_has_zero_last_input_seq() {
+        let e = EntityState::new_player(Vec3::ZERO, ServerId(1));
+        assert_eq!(e.last_input_seq, 0);
     }
 }

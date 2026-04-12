@@ -73,6 +73,7 @@ impl World {
             velocity: Vec3::ZERO,
             entity_type: EntityType::Player,
             authority_server: self.server_id,
+            last_input_seq: 0,
         };
         self.entities.insert(id, entity);
         id
@@ -506,5 +507,55 @@ mod tests {
             assert!(e.position.x.abs() <= WORLD_EXTENT * 0.8 + 0.01);
             assert!(e.position.z.abs() <= WORLD_EXTENT * 0.8 + 0.01);
         }
+    }
+
+    // -- last_input_seq tests --
+
+    #[test]
+    fn spawn_entity_has_zero_last_input_seq() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        assert_eq!(w.entities[&id].last_input_seq, 0);
+    }
+
+    #[test]
+    fn spawn_player_with_id_has_zero_last_input_seq() {
+        let mut w = make_world(1);
+        let uuid = uuid::Uuid::new_v4();
+        let id = w.spawn_player_with_id(uuid, Vec3::ZERO);
+        assert_eq!(w.entities[&id].last_input_seq, 0);
+    }
+
+    #[test]
+    fn apply_move_input_preserves_last_input_seq() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        w.entities.get_mut(&id).unwrap().last_input_seq = 42;
+        w.apply_move_input(&id, Vec3::X);
+        // apply_move_input changes velocity, not last_input_seq
+        assert_eq!(w.entities[&id].last_input_seq, 42);
+    }
+
+    #[test]
+    fn get_client_snapshot_includes_last_input_seq() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        w.entities.get_mut(&id).unwrap().last_input_seq = 99;
+        let snap = w.get_client_snapshot();
+        let e = snap.iter().find(|e| e.id == id).unwrap();
+        assert_eq!(e.last_input_seq, 99);
+    }
+
+    #[test]
+    fn recover_from_dead_server_preserves_last_input_seq() {
+        let mut w = make_world(1);
+        let mut shadow = EntityState::new_player(Vec3::ZERO, ServerId(3));
+        shadow.last_input_seq = 55;
+        let eid = shadow.id;
+        w.shadow_entities.insert(eid, shadow);
+        w.shadow_last_seen.insert(eid, 10);
+
+        w.recover_from_dead_server(3, &[1]);
+        assert_eq!(w.entities[&eid].last_input_seq, 55);
     }
 }

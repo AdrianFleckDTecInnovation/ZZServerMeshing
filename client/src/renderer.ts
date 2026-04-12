@@ -151,7 +151,7 @@ export class Renderer {
     const dt = (now - this.lastTime) / 1000;
     this.lastTime = now;
 
-    this.handleKeyboardInput();
+    this.handleKeyboardInput(dt);
     this.worldView.interpolate(dt);
     this.syncMeshes();
 
@@ -169,7 +169,7 @@ export class Renderer {
     this.onRenderFrame?.();
   }
 
-  private handleKeyboardInput(): void {
+  private handleKeyboardInput(dt: number): void {
     if (!this.network.playerId) return;
     let dx = 0, dz = 0;
     if (this.keys.has('w') || this.keys.has('arrowup')) dz = -1;
@@ -177,7 +177,11 @@ export class Renderer {
     if (this.keys.has('a') || this.keys.has('arrowleft')) dx = -1;
     if (this.keys.has('d') || this.keys.has('arrowright')) dx = 1;
     if (dx !== 0 || dz !== 0) {
-      this.network.moveInput(this.network.playerId, dx, 0, dz);
+      const player = this.worldView.entities.get(this.network.playerId);
+      if (player) {
+        const seq = this.network.prediction.pushInput([dx, 0, dz], player, dt);
+        this.network.moveInput(this.network.playerId, dx, 0, dz, seq);
+      }
     }
   }
 
