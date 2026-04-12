@@ -55,22 +55,22 @@ fi
 
 echo ""
 echo "=== Waiting for cluster to be ready ==="
-GATEWAY_URL="ws://localhost:4322"
 READY=false
 
 for i in $(seq 1 30); do
-  # Check if gateway is accepting connections
-  if node -e "
-    const ws = require('ws');
-    const w = new ws.WebSocket('$GATEWAY_URL');
-    w.on('open', () => { w.close(); process.exit(0); });
-    w.on('error', () => process.exit(1));
-    setTimeout(() => process.exit(1), 1000);
-  " 2>/dev/null; then
-    # Check if metrics endpoint is up
+  # Check if coordinator assignment endpoint is up
+  if curl -sf http://localhost:7871/assign > /dev/null 2>&1; then
+    # Check if at least one sim-server metrics endpoint is up
     if curl -sf http://localhost:8101/metrics > /dev/null 2>&1; then
-      READY=true
-      break
+      # Get assigned server URL and check WebSocket connectivity
+      SERVER_URL=$(curl -sf http://localhost:7871/assign | node -e "
+        let d=''; process.stdin.on('data',c=>d+=c);
+        process.stdin.on('end',()=>{ try{console.log(JSON.parse(d).ws_url)}catch{process.exit(1)} })
+      " 2>/dev/null)
+      if [ -n "$SERVER_URL" ]; then
+        READY=true
+        break
+      fi
     fi
   fi
   echo "  waiting... (${i}/30)"
@@ -79,11 +79,11 @@ done
 
 if [ "$READY" = false ]; then
   echo "ERROR: Cluster failed to start within 30 seconds"
-  echo "Check logs: .coordinator.log .sim-server-*.log .gateway.log"
+  echo "Check logs: .coordinator.log .sim-server-*.log"
   exit 1
 fi
 
-echo "  Cluster ready!"
+echo "  Cluster ready! (assigned: $SERVER_URL)"
 echo ""
 
 # ── Run test suite ──
@@ -91,7 +91,7 @@ echo ""
 echo "=== Running test suite ==="
 cd "$DIR/tools"
 
-ARGS="$GATEWAY_URL 8101 $NUM_SERVERS"
+ARGS="$SERVER_URL 8101 $NUM_SERVERS"
 if [ -n "$SCENARIOS" ]; then
   ARGS="$ARGS $SCENARIOS"
 fi

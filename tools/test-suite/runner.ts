@@ -35,7 +35,7 @@ function parseArgs() {
   const flags = {
     json: false,
     noColor: false,
-    gatewayUrl: 'ws://localhost:4322',
+    serverUrl: 'ws://localhost:7878',
     metricsBasePort: 8101,
     serverCount: 3,
     scenarios: undefined as string[] | undefined,
@@ -48,7 +48,7 @@ function parseArgs() {
     else positional.push(arg);
   }
 
-  if (positional[0]) flags.gatewayUrl = positional[0];
+  if (positional[0]) flags.serverUrl = positional[0];
   if (positional[1]) flags.metricsBasePort = parseInt(positional[1]);
   if (positional[2]) flags.serverCount = parseInt(positional[2]);
   if (positional[3]) flags.scenarios = positional[3].split(',');
@@ -61,7 +61,7 @@ const JSON_OUTPUT = cliFlags.json;
 const NO_COLOR = cliFlags.noColor || JSON_OUTPUT;
 
 const config: RunnerConfig = {
-  gatewayUrl: cliFlags.gatewayUrl,
+  serverUrl: cliFlags.serverUrl,
   metricsBasePort: cliFlags.metricsBasePort,
   serverCount: cliFlags.serverCount,
   scenarios: cliFlags.scenarios,
@@ -226,8 +226,8 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
   });
 
   return {
-    gateway: ws,
-    gatewayUrl: config.gatewayUrl,
+    server: ws,
+    serverUrl: config.serverUrl,
     metricsBasePort: config.metricsBasePort,
     serverCount: config.serverCount,
 
@@ -283,7 +283,7 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
 
 // ── Main runner ──
 
-async function connectGateway(url: string): Promise<WebSocket> {
+async function connectServer(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     ws.on('open', () => resolve(ws));
@@ -292,7 +292,7 @@ async function connectGateway(url: string): Promise<WebSocket> {
 }
 
 async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<ScenarioResult> {
-  const ws = await connectGateway(config.gatewayUrl);
+  const ws = await connectServer(config.serverUrl);
   const ctx = createContext(ws, scenario.name, config);
 
   // Wait for first snapshot to establish baseline
@@ -320,16 +320,16 @@ async function main() {
   console.log(color.bold('\n╔══════════════════════════════════════════╗'));
   console.log(color.bold('║    Server Meshing Test Suite              ║'));
   console.log(color.bold('╚══════════════════════════════════════════╝'));
-  console.log(`  Gateway:  ${config.gatewayUrl}`);
+  console.log(`  Server:  ${config.serverUrl}`);
   console.log(`  Metrics:  ports ${config.metricsBasePort}-${config.metricsBasePort + config.serverCount - 1}`);
   console.log(`  Servers:  ${config.serverCount}\n`);
 
   // Verify connectivity
   try {
-    const ws = await connectGateway(config.gatewayUrl);
+    const ws = await connectServer(config.serverUrl);
     ws.close();
   } catch {
-    console.error(color.red('Failed to connect to gateway. Is the cluster running? (./start.sh)'));
+    console.error(color.red('Failed to connect to sim-server. Is the cluster running? (./start.sh)'));
     process.exit(1);
   }
 
@@ -399,7 +399,7 @@ async function main() {
     const jsonReport = {
       timestamp: new Date().toISOString(),
       config: {
-        gatewayUrl: config.gatewayUrl,
+        serverUrl: config.serverUrl,
         serverCount: config.serverCount,
         metricsBasePort: config.metricsBasePort,
       },

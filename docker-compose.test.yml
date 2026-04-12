@@ -17,9 +17,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.rust
     entrypoint: ["coordinator"]
-    command: ["--port", "7870"]
+    command: ["--port", "7870", "--http-port", "7871"]
     ports:
       - "7870:7870"
+      - "7871:7871"
     cpus: 0.25
     mem_limit: 512m
     networks:
@@ -97,29 +98,6 @@ services:
     mem_limit: 512m
     depends_on:
       - coordinator
-    networks:
-      - mesh
-
-  gateway:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.rust
-    entrypoint: ["gateway"]
-    command: [
-      "--port", "4322",
-      "--coordinator", "coordinator:7870",
-      "--metrics-port", "8200"
-    ]
-    ports:
-      - "4322:4322"
-      - "8200:8200"
-    cpus: 0.25
-    mem_limit: 512m
-    depends_on:
-      - coordinator
-      - sim-server-1
-      - sim-server-2
-      - sim-server-3
     networks:
       - mesh
 

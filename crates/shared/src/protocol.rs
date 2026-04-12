@@ -15,6 +15,14 @@ pub enum ServerMessage {
         updates: Vec<EntityState>,
         removals: Vec<EntityId>,
     },
+    /// Sent to a client on connect to assign their player entity.
+    PlayerAssigned {
+        player_id: String,
+    },
+    /// Instruct the client to reconnect to a different sim-server.
+    Reconnect {
+        url: String,
+    },
 }
 
 // ── Browser Client / Gateway → Server (JSON over WebSocket) ──
@@ -57,6 +65,12 @@ pub enum PeerMessage {
         from_server: ServerId,
         to_server: ServerId,
         full_state: EntityState,
+    },
+    /// Forward a client input to the authority peer when a sim-server
+    /// receives a MoveInput for an entity it doesn't own.
+    ForwardedInput {
+        entity_id: EntityId,
+        direction: [f32; 3],
     },
 }
 
@@ -244,6 +258,24 @@ mod tests {
                 assert_eq!(from_server, ServerId(1));
                 assert_eq!(to_server, ServerId(2));
                 assert_eq!(full_state.entity_type, crate::entity::EntityType::Player);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn peer_message_forwarded_input_bincode_roundtrip() {
+        let eid = crate::entity::EntityId::new();
+        let msg = PeerMessage::ForwardedInput {
+            entity_id: eid,
+            direction: [1.0, 0.0, -0.5],
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::ForwardedInput { entity_id, direction } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(direction, [1.0, 0.0, -0.5]);
             }
             _ => panic!("wrong variant"),
         }

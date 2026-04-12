@@ -1,4 +1,5 @@
 use crate::world::World;
+use shared::entity::EntityId;
 use shared::protocol::{ClientMessage, ServerMessage};
 use shared::tick::TICK_DURATION_MS;
 use futures_util::{SinkExt, StreamExt};
@@ -35,7 +36,7 @@ pub async fn run_websocket_server(
             let w = bcast_world.read().await;
             let snapshot = ServerMessage::WorldSnapshot {
                 tick: w.tick,
-                entities: w.get_snapshot(),
+                entities: w.get_client_snapshot(),
             };
             drop(w);
 
@@ -68,9 +69,35 @@ pub async fn run_websocket_server(
 
         let input_tx = input_tx.clone();
         let mut broadcast_rx = broadcast_tx.subscribe();
+        let world_clone = Arc::clone(&world);
 
         tokio::spawn(async move {
             let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+            // Spawn a player entity for this client
+            let player_uuid = uuid::Uuid::new_v4();
+            {
+                let mut w = world_clone.write().await;
+                w.spawn_player_with_id(player_uuid, glam::Vec3::ZERO);
+            }
+
+            // Send PlayerAssigned to the client
+            let assign_msg = ServerMessage::PlayerAssigned {
+                player_id: player_uuid.to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&assign_msg) {
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    // Client disconnected immediately — clean up
+                    let mut w = world_clone.write().await;
+                    w.remove_entity(&EntityId(player_uuid));
+                    return;
+                }
+            }
+
+            tracing::info!(
+                "Assigned player {} to client {addr}",
+                &player_uuid.to_string()[..8]
+            );
 
             loop {
                 tokio::select! {
@@ -110,6 +137,14 @@ pub async fn run_websocket_server(
                     }
                 }
             }
+
+            // Client disconnected — remove their player entity
+            let mut w = world_clone.write().await;
+            w.remove_entity(&EntityId(player_uuid));
+            tracing::info!(
+                "Removed player {} on disconnect",
+                &player_uuid.to_string()[..8]
+            );
         });
     }
 }

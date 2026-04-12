@@ -32,7 +32,7 @@ export const rebalanceStorm: Scenario = {
 
     ctx.log(`Dumping ${DUMP_COUNT} entities on S${targetServer} (ws://localhost:${targetWsPort})...`);
 
-    // Connect directly to the sim-server to bypass gateway round-robin
+    // Connect directly to the sim-server to bypass server round-robin
     const directWs = await new Promise<WebSocket>((resolve, reject) => {
       const ws = new WebSocket(`ws://localhost:${targetWsPort}`);
       ws.on('open', () => resolve(ws));

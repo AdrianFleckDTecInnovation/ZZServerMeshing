@@ -34,9 +34,29 @@ pub async fn run_game_loop(
 
         // Phase 1: Drain all pending inputs
         let t0 = Instant::now();
+        let mut forwards: Vec<PendingForward> = Vec::new();
         while let Ok(input) = input_rx.try_recv() {
             let mut w = world.write().await;
-            process_input(&mut w, input);
+            if let Some(fwd) = process_input(&mut w, input) {
+                forwards.push(fwd);
+            }
+        }
+        // Forward inputs destined for peer servers via UDP
+        if !forwards.is_empty() {
+            let w = world.read().await;
+            for fwd in &forwards {
+                if let Some(&peer_addr) = w.peer_addrs.get(&fwd.target_server) {
+                    let msg = PeerMessage::ForwardedInput {
+                        entity_id: fwd.entity_id,
+                        direction: fwd.direction,
+                    };
+                    if let Ok(bytes) = bincode::serialize(&msg) {
+                        if let Err(e) = udp_socket.send_to(&bytes, peer_addr).await {
+                            tracing::warn!("Failed to forward input to S{}: {e}", fwd.target_server);
+                        }
+                    }
+                }
+            }
         }
         let input_drain_dur = t0.elapsed();
 
@@ -92,7 +112,14 @@ pub async fn run_game_loop(
     }
 }
 
-fn process_input(world: &mut World, input: ClientMessage) {
+/// An input that needs to be forwarded to a peer server via UDP.
+pub struct PendingForward {
+    pub entity_id: EntityId,
+    pub direction: [f32; 3],
+    pub target_server: u16,
+}
+
+fn process_input(world: &mut World, input: ClientMessage) -> Option<PendingForward> {
     match input {
         ClientMessage::SpawnEntity { position, entity_type } => {
             let pos = Vec3::new(position[0], position[1], position[2]);
@@ -102,6 +129,7 @@ fn process_input(world: &mut World, input: ClientMessage) {
             };
             let id = world.spawn_entity(pos, etype);
             tracing::debug!("Spawned {:?} entity {}", etype, id);
+            None
         }
         ClientMessage::SpawnPlayer { player_id, position } => {
             if let Ok(uuid) = Uuid::parse_str(&player_id) {
@@ -109,13 +137,31 @@ fn process_input(world: &mut World, input: ClientMessage) {
                 let id = world.spawn_player_with_id(uuid, pos);
                 tracing::info!("Spawned player {}", id);
             }
+            None
         }
         ClientMessage::MoveInput { entity_id, direction } => {
             if let Ok(uuid) = Uuid::parse_str(&entity_id) {
                 let eid = EntityId(uuid);
                 let dir = Vec3::new(direction[0], direction[1], direction[2]);
-                world.apply_move_input(&eid, dir);
+
+                // Authoritative — process locally
+                if world.entities.contains_key(&eid) {
+                    world.apply_move_input(&eid, dir);
+                    return None;
+                }
+
+                // Shadow — forward to the authority peer
+                if let Some(shadow) = world.shadow_entities.get(&eid) {
+                    return Some(PendingForward {
+                        entity_id: eid,
+                        direction,
+                        target_server: shadow.authority_server.0,
+                    });
+                }
+
+                tracing::debug!("MoveInput for unknown entity {}", eid);
             }
+            None
         }
         ClientMessage::RemoveEntity { entity_id } => {
             if let Ok(uuid) = Uuid::parse_str(&entity_id) {
@@ -123,8 +169,9 @@ fn process_input(world: &mut World, input: ClientMessage) {
                 world.remove_entity(&eid);
                 tracing::info!("Removed entity {}", eid);
             }
+            None
         }
-        ClientMessage::RequestSnapshot => {}
+        ClientMessage::RequestSnapshot => None,
     }
 }
 
@@ -391,8 +438,53 @@ mod tests {
     #[test]
     fn process_input_request_snapshot_is_noop() {
         let mut w = make_world(1);
-        process_input(&mut w, ClientMessage::RequestSnapshot);
+        let fwd = process_input(&mut w, ClientMessage::RequestSnapshot);
+        assert!(fwd.is_none());
         assert_eq!(w.entities.len(), 0);
+    }
+
+    // -- input forwarding tests --
+
+    #[test]
+    fn move_input_for_authoritative_entity_processes_locally() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Player);
+        let fwd = process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+        });
+        assert!(fwd.is_none()); // processed locally, not forwarded
+        assert!(w.entities[&id].velocity.x > 0.0);
+    }
+
+    #[test]
+    fn move_input_for_shadow_entity_returns_forward() {
+        use shared::entity::EntityState;
+        let mut w = make_world(1);
+        let shadow = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let shadow_id = shadow.id;
+        w.shadow_entities.insert(shadow_id, shadow);
+
+        let fwd = process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: shadow_id.0.to_string(),
+            direction: [0.0, 0.0, 1.0],
+        });
+
+        let fwd = fwd.expect("should return a forward");
+        assert_eq!(fwd.entity_id, shadow_id);
+        assert_eq!(fwd.target_server, 2);
+        assert_eq!(fwd.direction, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn move_input_for_unknown_entity_returns_none() {
+        let w_id = EntityId::new();
+        let mut w = make_world(1);
+        let fwd = process_input(&mut w, ClientMessage::MoveInput {
+            entity_id: w_id.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+        });
+        assert!(fwd.is_none());
     }
 
     // -- simulate_tick tests --

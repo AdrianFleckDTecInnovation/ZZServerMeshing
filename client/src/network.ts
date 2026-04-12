@@ -159,6 +159,12 @@ export class NetworkClient {
             this.playerId = msg.player_id;
             this.worldView.localPlayerId = msg.player_id;
             console.log('Assigned player:', msg.player_id);
+          } else if (msg.type === 'Reconnect') {
+            console.log('Server requesting reconnection to:', msg.url);
+            this.url = msg.url;
+            if (this.ws) {
+              this.ws.close(); // triggers reconnect to new URL via onclose
+            }
           }
         }
       } catch (e: any) {
@@ -204,5 +210,9 @@ export class NetworkClient {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  getServerUrl(): string {
+    return this.url;
   }
 }

@@ -11,7 +11,7 @@ export const inputLatency: Scenario = {
 
     // Spawn a player entity to test with
     ctx.log('Spawning test player...');
-    ctx.gateway.send(JSON.stringify({
+    ctx.server.send(JSON.stringify({
       type: 'SpawnEntity',
       position: [0, 0, 0],
       entity_type: 'player',
@@ -58,7 +58,7 @@ export const inputLatency: Scenario = {
       const dir = i % 2 === 0 ? [1, 0, 0] : [-1, 0, 0];
       const sendTime = Date.now();
 
-      ctx.gateway.send(JSON.stringify({
+      ctx.server.send(JSON.stringify({
         type: 'MoveInput',
         entity_id: player.id,
         direction: dir,
@@ -127,7 +127,7 @@ export const inputLatency: Scenario = {
     details.push(`  max:  ${max}ms`);
     details.push(`  avg:  ${avg.toFixed(0)}ms`);
 
-    // Theoretical minimum: 1 tick (50ms) gateway→server + 1 tick server→gateway = ~100ms
+    // Theoretical minimum: 1 tick (50ms) client→server + 1 tick server→client = ~100ms
     const theoreticalMin = 100;
     details.push(`Theoretical min: ~${theoreticalMin}ms (2 tick round-trip at 20Hz)`);
 

@@ -21,7 +21,7 @@ export const spatialHotspot: Scenario = {
     for (let i = 0; i < ENTITY_COUNT; i++) {
       const x = HOTSPOT_CENTER.x + (Math.random() - 0.5) * HOTSPOT_SIZE;
       const z = HOTSPOT_CENTER.z + (Math.random() - 0.5) * HOTSPOT_SIZE;
-      ctx.gateway.send(JSON.stringify({
+      ctx.server.send(JSON.stringify({
         type: 'SpawnEntity',
         position: [x, 0, z],
         entity_type: 'npc',

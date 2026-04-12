@@ -92,9 +92,25 @@ impl World {
         }
     }
 
-    /// Returns only authoritative entities (for WebSocket broadcast).
+    /// Returns only authoritative entities.
+    #[cfg(test)]
     pub fn get_snapshot(&self) -> Vec<EntityState> {
         self.entities.values().cloned().collect()
+    }
+
+    /// Returns authoritative + shadow entities (for client-facing WebSocket broadcast).
+    /// Authoritative entities take precedence over shadows with the same ID.
+    pub fn get_client_snapshot(&self) -> Vec<EntityState> {
+        let mut snapshot = Vec::with_capacity(self.entities.len() + self.shadow_entities.len());
+        for entity in self.entities.values() {
+            snapshot.push(entity.clone());
+        }
+        for (id, entity) in &self.shadow_entities {
+            if !self.entities.contains_key(id) {
+                snapshot.push(entity.clone());
+            }
+        }
+        snapshot
     }
 
     /// Apply incoming shadow entity data from a peer server.
@@ -266,6 +282,30 @@ mod tests {
         let mut w = make_world(1);
         let fake_id = EntityId::new();
         w.apply_move_input(&fake_id, Vec3::X); // should not panic
+    }
+
+    #[test]
+    fn get_client_snapshot_merges_auth_and_shadow() {
+        let mut w = make_world(1);
+        w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        w.spawn_entity(Vec3::X, EntityType::Npc);
+        let shadow = EntityState::new_npc(Vec3::Z, ServerId(2));
+        w.shadow_entities.insert(shadow.id, shadow);
+        let snap = w.get_client_snapshot();
+        assert_eq!(snap.len(), 3); // 2 auth + 1 shadow
+    }
+
+    #[test]
+    fn get_client_snapshot_auth_takes_precedence() {
+        let mut w = make_world(1);
+        let id = w.spawn_entity(Vec3::ZERO, EntityType::Npc);
+        // Insert a shadow with the same ID (shouldn't happen in practice but guard against it)
+        let mut shadow = EntityState::new_npc(Vec3::new(99.0, 0.0, 99.0), ServerId(2));
+        shadow.id = id;
+        w.shadow_entities.insert(id, shadow);
+        let snap = w.get_client_snapshot();
+        assert_eq!(snap.len(), 1); // no duplicate
+        assert_eq!(snap[0].position, Vec3::ZERO); // auth version, not shadow
     }
 
     #[test]

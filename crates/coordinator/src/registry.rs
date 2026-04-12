@@ -35,6 +35,10 @@ impl Registry {
         host: Option<String>,
         reply_tx: mpsc::UnboundedSender<String>,
     ) {
+        if self.servers.contains_key(&server_id) {
+            tracing::warn!("S{server_id} already registered — ignoring duplicate");
+            return;
+        }
         self.servers.insert(
             server_id,
             ServerEntry {
@@ -170,6 +174,46 @@ impl Registry {
         }
 
         true
+    }
+
+    /// Returns the WebSocket URL for the least-loaded sim-server, or None.
+    /// When the server's registered host is `127.0.0.1` (local dev), `client_host`
+    /// overrides it so the browser can reach it. When the server advertises a
+    /// real IP (e.g. Pi deployment), we use that directly.
+    pub fn get_least_loaded_ws_addr(&self, client_host: Option<&str>) -> Option<String> {
+        self.servers
+            .values()
+            .filter(|s| s.server_id > 0)
+            .min_by_key(|s| s.entity_count)
+            .map(|s| {
+                let host = if s.host == "127.0.0.1" {
+                    client_host.unwrap_or(&s.host)
+                } else {
+                    &s.host
+                };
+                format!("ws://{}:{}", host, s.ws_port)
+            })
+    }
+
+    /// Returns a JSON-serializable list of all registered sim-servers.
+    pub fn get_server_list(&self) -> Vec<serde_json::Value> {
+        let mut list: Vec<serde_json::Value> = self
+            .servers
+            .values()
+            .filter(|s| s.server_id > 0)
+            .map(|s| {
+                serde_json::json!({
+                    "server_id": s.server_id,
+                    "host": s.host,
+                    "ws_port": s.ws_port,
+                    "udp_port": s.udp_port,
+                    "metrics_port": 8100 + s.server_id,
+                    "entity_count": s.entity_count,
+                })
+            })
+            .collect();
+        list.sort_by_key(|s| s["server_id"].as_u64().unwrap_or(0));
+        list
     }
 
     /// Returns sorted list of sim-server IDs (excluding gateway).

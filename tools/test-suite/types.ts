@@ -59,10 +59,10 @@ export interface SpawnOptions {
 }
 
 export interface TestContext {
-  /** WebSocket connection to the gateway */
-  gateway: WebSocket;
+  /** WebSocket connection to the server */
+  server: WebSocket;
   /** Gateway URL for creating additional connections */
-  gatewayUrl: string;
+  serverUrl: string;
   /** Base metrics URL (e.g., http://localhost:8101) — use getMetrics() instead */
   metricsBasePort: number;
   /** Number of sim-servers in the cluster */
@@ -72,11 +72,11 @@ export interface TestContext {
   getMetrics(serverId: number): Promise<ServerMetrics>;
   /** Fetch metrics from all servers */
   getAllMetrics(): Promise<ServerMetrics[]>;
-  /** Wait for N ticks to pass (observes via gateway snapshots) */
+  /** Wait for N ticks to pass (observes via server snapshots) */
   waitForTicks(count: number): Promise<void>;
   /** Wait for a duration in milliseconds */
   sleep(ms: number): Promise<void>;
-  /** Spawn entities via the gateway */
+  /** Spawn entities via the server */
   spawn(count: number, options?: SpawnOptions): Promise<void>;
   /** Get the latest snapshot */
   getLatestSnapshot(): WorldSnapshot | null;
@@ -105,7 +105,7 @@ export interface Scenario {
 // ── Runner config ──
 
 export interface RunnerConfig {
-  gatewayUrl: string;
+  serverUrl: string;
   metricsBasePort: number;
   serverCount: number;
   scenarios?: string[];  // filter by name

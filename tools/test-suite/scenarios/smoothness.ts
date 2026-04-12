@@ -2,7 +2,7 @@ import type { Scenario, ScenarioResult, TestContext } from '../types.js';
 
 /**
  * Headless smoothness validator.
- * Connects to the gateway, collects consecutive snapshots, and checks:
+ * Connects to the server, collects consecutive snapshots, and checks:
  * 1. Entity positions change smoothly (no teleportation > threshold per tick)
  * 2. Entity count is stable (no entities vanishing/reappearing)
  * 3. All servers maintain entities (no server draining to 0 unexpectedly)

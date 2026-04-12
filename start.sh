@@ -14,8 +14,8 @@ echo "=== Building Rust ==="
 cargo build --manifest-path "$DIR/Cargo.toml" 2>&1
 
 echo ""
-echo "=== Starting coordinator on port 7870 ==="
-cargo run --manifest-path "$DIR/Cargo.toml" -p coordinator -- --port 7870 \
+echo "=== Starting coordinator on port 7870 (HTTP assignment: 7871) ==="
+cargo run --manifest-path "$DIR/Cargo.toml" -p coordinator -- --port 7870 --http-port 7871 \
   > "$DIR/.coordinator.log" 2>&1 &
 echo "$!" > "$PIDFILE"
 sleep 1
@@ -31,18 +31,11 @@ for i in $(seq 1 "$NUM_SERVERS"); do
   cargo run --manifest-path "$DIR/Cargo.toml" -p sim-server -- \
     --server-id "$i" --port "$WS_PORT" --udp-port "$UDP_PORT" \
     --metrics-port "$METRICS_PORT" \
-    --coordinator "127.0.0.1:7870" --initial-npcs "$NPC_COUNT" \
+    --coordinator "127.0.0.1:7870" --advertise-host "127.0.0.1" --initial-npcs "$NPC_COUNT" \
     > "$DIR/.sim-server-${i}.log" 2>&1 &
   echo "$!" >> "$PIDFILE"
 done
 sleep 1
-
-echo ""
-echo "=== Starting gateway on port 4322 ==="
-cargo run --manifest-path "$DIR/Cargo.toml" -p gateway -- \
-  --port 4322 --coordinator "127.0.0.1:7870" --metrics-port 8200 \
-  > "$DIR/.gateway.log" 2>&1 &
-echo "$!" >> "$PIDFILE"
 
 echo ""
 echo "=== Starting client dev server on port 4321 ==="
@@ -53,18 +46,17 @@ cd "$DIR"
 
 echo ""
 echo "================================================"
-echo "  Coordinator:  port 7870"
+echo "  Coordinator:  port 7870 (ws) / 7871 (http)"
 for i in $(seq 1 "$NUM_SERVERS"); do
   WS_PORT=$((7877 + i))
   echo "  Sim-server $i: ws=$WS_PORT udp=$((9100 + i)) metrics=$((8100 + i))"
 done
-echo "  Gateway:      ws://localhost:4322 (metrics: 8200)"
 echo "  Client:       http://localhost:4321"
 echo ""
+echo "  Assignment:   curl localhost:7871/assign"
 echo "  Metrics:      curl localhost:8101/metrics  (sim-server 1)"
-echo "  Gateway:      curl localhost:8200/metrics  (gateway)"
 echo "  Test suite:   cd tools && npx tsx test-suite/runner.ts"
 echo "================================================"
 echo ""
-echo "Logs: .coordinator.log .sim-server-*.log .gateway.log .client.log"
+echo "Logs: .coordinator.log .sim-server-*.log .client.log"
 echo "Stop: ./stop.sh"

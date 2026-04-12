@@ -8,6 +8,7 @@ export class DebugOverlay {
   private lastFpsTime = performance.now();
   private connected = false;
   private followMode = true;
+  private serverUrl = '';
 
   constructor(worldView: WorldView) {
     this.el = document.getElementById('debug-overlay')!;
@@ -16,6 +17,7 @@ export class DebugOverlay {
 
   setConnected(connected: boolean): void { this.connected = connected; }
   setFollowMode(follow: boolean): void { this.followMode = follow; }
+  setServerUrl(url: string): void { this.serverUrl = url; }
 
   /** Call from the render loop (requestAnimationFrame) to count actual render FPS */
   tick(): void {
@@ -32,7 +34,7 @@ export class DebugOverlay {
 
     const wv = this.worldView;
     const totalEntities = wv.entities.size;
-    const connStatus = this.connected ? 'Connected' : 'Disconnected';
+    const connStatus = this.connected ? `Connected to ${this.serverUrl}` : 'Disconnected';
 
     // Per-server bars
     let serverLines = '';
