@@ -50,4 +50,4 @@ See [UNO Q Deployment](uno-q-deployment.md) for details.
 
 ## Bandwidth Considerations
 
-Each sim-server sends the entire world (own + shadows) to each client. With 3 servers and 500 entities at 47 bytes each, that's ~23KB per tick per client at 20Hz (~460 KB/s). This is acceptable for the prototype but would need interest management (distance-based filtering) to scale beyond ~1000 entities.
+Peer replication is efficient — each server only sends its own authoritative entities to peers via UDP (e.g., ~167 entities each in a 3-server, 500-entity mesh). However, each sim-server sends the *full world* (own auth + shadows from all peers) to its connected *browser clients* so they can render everything. With 500 entities at 47 bytes each, that's ~23KB per tick per client at 20Hz (~460 KB/s). This is acceptable for the prototype but client-facing bandwidth would need interest management (distance-based filtering) to scale beyond ~1000 entities.
