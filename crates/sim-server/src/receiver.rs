@@ -1,13 +1,13 @@
-use crate::world::World;
+use crate::game_loop::SharedInbound;
+use crate::resources::{ForwardedInput, ForwardedRemove, InboundTransfer, PeerUpdate};
 use shared::protocol::PeerMessage;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::RwLock;
 
-/// Listen for incoming UDP packets from peer servers and update shadow entities.
+/// Listen for incoming UDP packets from peer servers and push events to the shared inbound queue.
 pub async fn run_udp_receiver(
     udp_socket: Arc<UdpSocket>,
-    world: Arc<RwLock<World>>,
+    inbound: Arc<SharedInbound>,
 ) {
     let mut buf = vec![0u8; 65536];
 
@@ -31,45 +31,36 @@ pub async fn run_udp_receiver(
         match msg {
             PeerMessage::EntityStateUpdate {
                 tick,
-                server_id: _,
+                server_id,
                 entities,
             } => {
-                let mut w = world.write().await;
-                w.apply_peer_update(tick, entities);
+                let mut q = inbound.queue.lock().await;
+                q.peer_updates.push(PeerUpdate {
+                    tick,
+                    server_id,
+                    entities,
+                });
             }
             PeerMessage::AuthorityTransfer {
-                tick: _,
+                tick,
                 entity_id,
                 from_server,
                 to_server,
                 full_state,
             } => {
-                let mut w = world.write().await;
-                // Validate: only accept if targeted at us
-                if to_server != w.server_id {
-                    tracing::warn!(
-                        "Ignoring transfer for {} targeted at {}, we are {}",
-                        entity_id, to_server, w.server_id
-                    );
-                    continue;
-                }
-                // Reject if already authoritative (duplicate transfer)
-                if w.entities.contains_key(&entity_id) {
-                    tracing::warn!(
-                        "Ignoring duplicate transfer for {} from {}",
-                        entity_id, from_server
-                    );
-                    continue;
-                }
-                // Accept: promote from shadow to authoritative
-                w.shadow_entities.remove(&entity_id);
-                w.shadow_last_seen.remove(&entity_id);
-                w.entities.insert(entity_id, full_state);
+                let mut q = inbound.queue.lock().await;
+                q.authority_transfers.push(InboundTransfer {
+                    tick,
+                    entity_id,
+                    from_server,
+                    to_server,
+                    full_state,
+                });
                 tracing::info!(
                     entity = %entity_id,
                     from = from_server.0,
                     to = to_server.0,
-                    "Accepted authority transfer"
+                    "Queued authority transfer"
                 );
             }
             PeerMessage::ForwardedInput {
@@ -77,24 +68,20 @@ pub async fn run_udp_receiver(
                 direction,
                 seq,
             } => {
-                let mut w = world.write().await;
-                if w.entities.contains_key(&entity_id) {
-                    let dir = glam::Vec3::new(direction[0], direction[1], direction[2]);
-                    w.apply_move_input(&entity_id, dir);
-                    if let Some(entity) = w.entities.get_mut(&entity_id) {
-                        entity.last_input_seq = seq;
-                    }
-                    tracing::debug!(
-                        entity = %entity_id,
-                        seq = seq,
-                        "Applied forwarded input"
-                    );
-                } else {
-                    tracing::debug!(
-                        "Received forwarded input for {} but not authoritative",
-                        entity_id
-                    );
-                }
+                let mut q = inbound.queue.lock().await;
+                q.forwarded_inputs.push(ForwardedInput {
+                    entity_id,
+                    direction,
+                    seq,
+                });
+            }
+            PeerMessage::ForwardedRemove { entity_id } => {
+                let mut q = inbound.queue.lock().await;
+                q.forwarded_removes.push(ForwardedRemove { entity_id });
+                tracing::info!(
+                    entity = %entity_id,
+                    "Queued forwarded remove"
+                );
             }
         }
     }

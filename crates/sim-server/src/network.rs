@@ -1,117 +1,21 @@
-use crate::world::World;
-use shared::entity::{EntityId, EntityState, EntityType};
+use crate::game_loop::SharedInbound;
 use shared::protocol::{ClientMessage, ServerMessage};
-use shared::tick::TICK_DURATION_MS;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
-
-const HEADER_SIZE: usize = 27; // 1 + 8 + 4 + 14
-const DELTA_HEADER_SIZE: usize = 31; // 1 + 8 + 4 + 4 + 14
-const ENTITY_SIZE: usize = 47; // 16 + 12 + 12 + 1 + 2 + 4
-
-/// Encode a single entity into the binary format (47 bytes).
-fn encode_entity(buf: &mut Vec<u8>, e: &EntityState) {
-    // UUID (16 bytes)
-    buf.extend_from_slice(e.id.0.as_bytes());
-    // Position (3 × f32 LE)
-    buf.extend_from_slice(&e.position.x.to_le_bytes());
-    buf.extend_from_slice(&e.position.y.to_le_bytes());
-    buf.extend_from_slice(&e.position.z.to_le_bytes());
-    // Velocity (3 × f32 LE)
-    buf.extend_from_slice(&e.velocity.x.to_le_bytes());
-    buf.extend_from_slice(&e.velocity.y.to_le_bytes());
-    buf.extend_from_slice(&e.velocity.z.to_le_bytes());
-    // Entity type (u8: 0 = Npc, 1 = Player)
-    buf.push(match e.entity_type {
-        EntityType::Player => 1,
-        EntityType::Npc => 0,
-    });
-    // Authority server (u16 LE)
-    buf.extend_from_slice(&e.authority_server.0.to_le_bytes());
-    // Last input seq (u32 LE)
-    buf.extend_from_slice(&e.last_input_seq.to_le_bytes());
-}
-
-/// Encode a full snapshot into the binary frame format expected by the client.
-///
-/// Format: [type:u8=0x01][tick:u64 LE][count:u32 LE][metrics:14 bytes]
-///         [entity × N: 47 bytes each]
-fn encode_binary_snapshot(tick: u64, entities: &[EntityState]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(HEADER_SIZE + entities.len() * ENTITY_SIZE);
-
-    buf.push(0x01);
-    buf.extend_from_slice(&tick.to_le_bytes());
-    buf.extend_from_slice(&(entities.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&[0u8; 14]); // metrics placeholder
-
-    for e in entities {
-        encode_entity(&mut buf, e);
-    }
-
-    buf
-}
-
-/// Encode a delta frame: only changed/new entities + removed entity IDs.
-///
-/// Format: [type:u8=0x02][tick:u64 LE][update_count:u32 LE][removal_count:u32 LE][metrics:14 bytes]
-///         [updated entities × N: 47 bytes each]
-///         [removed UUIDs × M: 16 bytes each]
-fn encode_binary_delta(tick: u64, updates: &[EntityState], removals: &[EntityId]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        DELTA_HEADER_SIZE + updates.len() * ENTITY_SIZE + removals.len() * 16,
-    );
-
-    buf.push(0x02);
-    buf.extend_from_slice(&tick.to_le_bytes());
-    buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(removals.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&[0u8; 14]); // metrics placeholder
-
-    for e in updates {
-        encode_entity(&mut buf, e);
-    }
-    for id in removals {
-        buf.extend_from_slice(id.0.as_bytes());
-    }
-
-    buf
-}
 
 pub async fn run_websocket_server(
     port: u16,
-    world: Arc<RwLock<World>>,
-    input_tx: mpsc::UnboundedSender<ClientMessage>,
+    inbound: Arc<SharedInbound>,
+    broadcast_tx: broadcast::Sender<Vec<u8>>,
 ) {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("Failed to bind WebSocket port");
 
     tracing::info!("WebSocket server listening on port {port}");
-
-    // Broadcast channel: one snapshot encoded per tick, all clients receive it
-    let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
-
-    // Broadcast ticker: encodes world state as binary, sends to all clients
-    let bcast_tx = broadcast_tx.clone();
-    let bcast_world = Arc::clone(&world);
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(TICK_DURATION_MS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-
-            let w = bcast_world.read().await;
-            let frame = encode_binary_snapshot(w.tick, &w.get_client_snapshot());
-            drop(w);
-
-            let _ = bcast_tx.send(frame);
-        }
-    });
 
     // Accept client connections
     loop {
@@ -133,18 +37,21 @@ pub async fn run_websocket_server(
             }
         };
 
-        let input_tx = input_tx.clone();
+        let inbound = Arc::clone(&inbound);
         let mut broadcast_rx = broadcast_tx.subscribe();
-        let world_clone = Arc::clone(&world);
 
         tokio::spawn(async move {
             let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-            // Spawn a player entity for this client
+            // Generate player UUID and push SpawnPlayer to the inbound queue.
+            // The player entity is created on the next game loop tick.
             let player_uuid = uuid::Uuid::new_v4();
             {
-                let mut w = world_clone.write().await;
-                w.spawn_player_with_id(player_uuid, glam::Vec3::ZERO);
+                let mut q = inbound.queue.lock().await;
+                q.client_inputs.push(ClientMessage::SpawnPlayer {
+                    player_id: player_uuid.to_string(),
+                    position: [0.0, 0.0, 0.0],
+                });
             }
 
             // Send PlayerAssigned as JSON text frame
@@ -153,8 +60,11 @@ pub async fn run_websocket_server(
             };
             if let Ok(json) = serde_json::to_string(&assign_msg) {
                 if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                    let mut w = world_clone.write().await;
-                    w.remove_entity(&EntityId(player_uuid));
+                    // Client disconnected during assignment -- remove the player
+                    let mut q = inbound.queue.lock().await;
+                    q.client_inputs.push(ClientMessage::RemoveEntity {
+                        entity_id: player_uuid.to_string(),
+                    });
                     return;
                 }
             }
@@ -166,7 +76,7 @@ pub async fn run_websocket_server(
 
             loop {
                 tokio::select! {
-                    // Forward binary snapshot frames to this client
+                    // Forward binary snapshot frames to this client (produced by game loop)
                     msg = broadcast_rx.recv() => {
                         match msg {
                             Ok(frame) => {
@@ -186,7 +96,8 @@ pub async fn run_websocket_server(
                             Some(Ok(Message::Text(text))) => {
                                 match serde_json::from_str::<ClientMessage>(&text) {
                                     Ok(input) => {
-                                        let _ = input_tx.send(input);
+                                        let mut q = inbound.queue.lock().await;
+                                        q.client_inputs.push(input);
                                     }
                                     Err(e) => {
                                         tracing::warn!("Invalid client message: {e}");
@@ -203,9 +114,13 @@ pub async fn run_websocket_server(
                 }
             }
 
-            // Client disconnected — remove their player entity
-            let mut w = world_clone.write().await;
-            w.remove_entity(&EntityId(player_uuid));
+            // Client disconnected -- push RemoveEntity to the inbound queue
+            {
+                let mut q = inbound.queue.lock().await;
+                q.client_inputs.push(ClientMessage::RemoveEntity {
+                    entity_id: player_uuid.to_string(),
+                });
+            }
             tracing::info!(
                 "Removed player {} on disconnect",
                 &player_uuid.to_string()[..8]
@@ -214,10 +129,30 @@ pub async fn run_websocket_server(
     }
 }
 
+// Encoding is now in encoding.rs; test-only delegates below.
+
+#[cfg(test)]
+use shared::entity::EntityState;
+
+#[cfg(test)]
+fn encode_entity(buf: &mut Vec<u8>, e: &EntityState) {
+    crate::encoding::encode_entity(buf, e);
+}
+
+#[cfg(test)]
+fn encode_binary_snapshot(tick: u64, entities: &[EntityState]) -> Vec<u8> {
+    crate::encoding::encode_binary_snapshot(tick, entities)
+}
+
+#[cfg(test)]
+fn encode_binary_delta(tick: u64, updates: &[EntityState], removals: &[shared::entity::EntityId]) -> Vec<u8> {
+    crate::encoding::encode_binary_delta(tick, updates, removals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::entity::{EntityState, ServerId};
+    use shared::entity::{EntityId, EntityState, ServerId};
     use glam::Vec3;
 
     #[test]
@@ -344,7 +279,7 @@ mod tests {
 
     #[test]
     fn encode_entity_max_authority() {
-        let mut e = EntityState::new_npc(Vec3::ZERO, ServerId(u16::MAX));
+        let e = EntityState::new_npc(Vec3::ZERO, ServerId(u16::MAX));
         let mut buf = Vec::new();
         encode_entity(&mut buf, &e);
         let auth = u16::from_le_bytes(buf[41..43].try_into().unwrap());

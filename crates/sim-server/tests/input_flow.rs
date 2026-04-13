@@ -1,7 +1,7 @@
 //! Integration tests for the input → entity → snapshot pipeline.
 //! Tests cross-module flows without spawning real network listeners.
 
-use shared::entity::{EntityId, EntityState, EntityType, ServerId};
+use shared::entity::{EntityId, EntityState, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
 use glam::Vec3;
 

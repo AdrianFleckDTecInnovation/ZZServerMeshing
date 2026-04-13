@@ -1,17 +1,23 @@
-mod world;
-mod simulation;
 mod network;
-mod replication;
 mod receiver;
 mod coordinator_client;
 mod metrics;
 mod metrics_server;
+mod components;
+mod resources;
+mod conversion;
+#[allow(dead_code)]
+mod encoding;
+mod systems;
+mod schedule;
+mod game_loop;
 
 use clap::Parser;
 use shared::entity::ServerId;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(name = "sim-server", about = "Game simulation server")]
@@ -57,12 +63,19 @@ async fn main() {
         server_id, args.port, args.udp_port, metrics_port
     );
 
-    // Create the world
-    let mut world = world::World::new(server_id);
-    world.spawn_initial_npcs(args.initial_npcs);
-    tracing::info!("Spawned {} initial NPCs", args.initial_npcs);
+    // Create shared async-to-ECS buffers
+    let shared_inbound = Arc::new(game_loop::SharedInbound {
+        queue: tokio::sync::Mutex::new(resources::InboundQueue::default()),
+    });
+    let shared_coord_events = Arc::new(game_loop::SharedCoordEvents {
+        queue: tokio::sync::Mutex::new(resources::CoordEventQueue::default()),
+    });
 
-    let world = Arc::new(RwLock::new(world));
+    // Broadcast channel: game loop sends encoded binary frames, WebSocket server forwards to clients
+    let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
+
+    // Shared entity count for coordinator heartbeats
+    let entity_count_atomic = Arc::new(AtomicU32::new(0));
 
     // Create metrics collector
     let metrics_collector = Arc::new(Mutex::new(metrics::MetricsCollector::new(args.server_id)));
@@ -75,46 +88,46 @@ async fn main() {
     );
     tracing::info!("UDP bound on port {}", args.udp_port);
 
-    // Channel for client inputs -> game loop
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
-
     // Start metrics HTTP server
     let metrics_handle = tokio::spawn(metrics_server::run_metrics_server(
         metrics_port,
         Arc::clone(&metrics_collector),
     ));
 
-    // Start WebSocket server for clients/gateway
-    let ws_world = Arc::clone(&world);
+    // Start WebSocket server for clients
     let ws_handle = tokio::spawn(network::run_websocket_server(
         args.port,
-        ws_world,
-        input_tx,
+        Arc::clone(&shared_inbound),
+        broadcast_tx.clone(),
     ));
 
     // Start UDP receiver (incoming peer entity states)
-    let recv_world = Arc::clone(&world);
-    let recv_socket = Arc::clone(&udp_socket);
-    let recv_handle = tokio::spawn(receiver::run_udp_receiver(recv_socket, recv_world));
+    let recv_handle = tokio::spawn(receiver::run_udp_receiver(
+        Arc::clone(&udp_socket),
+        Arc::clone(&shared_inbound),
+    ));
 
     // Connect to coordinator
-    let coord_world = Arc::clone(&world);
     let coord_handle = tokio::spawn(coordinator_client::run_coordinator_client(
         args.coordinator,
         args.server_id,
         args.udp_port,
         args.port,
-        coord_world,
+        Arc::clone(&shared_coord_events),
         args.advertise_host,
+        Arc::clone(&entity_count_atomic),
     ));
 
-    // Run the game loop (includes replication)
-    let sim_world = Arc::clone(&world);
-    let sim_handle = tokio::spawn(simulation::run_game_loop(
-        sim_world,
-        input_rx,
-        udp_socket,
+    // Run the ECS game loop
+    let sim_handle = tokio::spawn(game_loop::run_game_loop_ecs(
+        server_id,
+        args.initial_npcs,
+        Arc::clone(&shared_inbound),
+        Arc::clone(&shared_coord_events),
+        Arc::clone(&udp_socket),
+        broadcast_tx,
         Arc::clone(&metrics_collector),
+        Arc::clone(&entity_count_atomic),
     ));
 
     tokio::select! {
@@ -124,21 +137,17 @@ async fn main() {
         r = coord_handle => { if let Err(e) = r { tracing::error!("Coordinator client error: {e}"); } }
         r = sim_handle => { if let Err(e) = r { tracing::error!("Game loop error: {e}"); } }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Received shutdown signal — initiating graceful drain");
-            // Tell the world to drain, the game loop will handle it
-            let mut w = world.write().await;
-            w.draining = true;
-            // Drain targets = all peers
-            let targets: Vec<u16> = w.peer_addrs.keys().copied().collect();
-            if targets.is_empty() {
-                tracing::info!("No peers to drain to — shutting down immediately");
-            } else {
-                w.drain_targets = Some(targets);
-                drop(w);
-                // Give the game loop time to drain entities
-                tracing::info!("Draining entities to peers...");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            }
+            tracing::info!("Received shutdown signal -- initiating graceful drain");
+            // Push drain event through the coordinator event queue
+            let mut q = shared_coord_events.queue.lock().await;
+            // Drain targets: we need the peer addresses, but we don't have direct access
+            // to the ECS world. Instead, push an empty drain directive -- the game loop
+            // will use whatever peers it knows about.
+            q.drain_directives.push(vec![]);
+            drop(q);
+            // Give the game loop time to drain entities
+            tracing::info!("Draining entities to peers...");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             tracing::info!("Shutdown complete");
         }
     }

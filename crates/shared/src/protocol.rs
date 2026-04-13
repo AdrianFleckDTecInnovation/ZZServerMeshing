@@ -75,6 +75,11 @@ pub enum PeerMessage {
         direction: [f32; 3],
         seq: u32,
     },
+    /// Forward a remove request to the authority peer when a client
+    /// disconnects but their player entity was transferred to another server.
+    ForwardedRemove {
+        entity_id: EntityId,
+    },
 }
 
 // ── Sim-Server → Coordinator (JSON over WebSocket) ──
@@ -417,6 +422,20 @@ mod tests {
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
             PeerMessage::ForwardedInput { seq, .. } => assert_eq!(seq, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn peer_message_forwarded_remove_bincode_roundtrip() {
+        let eid = crate::entity::EntityId::new();
+        let msg = PeerMessage::ForwardedRemove { entity_id: eid };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::ForwardedRemove { entity_id } => {
+                assert_eq!(entity_id, eid);
+            }
             _ => panic!("wrong variant"),
         }
     }
