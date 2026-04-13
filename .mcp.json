@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "local-rag": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-local-rag"],
+      "env": {
+        "BASE_DIR": "/Users/dz/sources/ZZServerMeshing",
+        "DB_PATH": "/Users/dz/.local/share/mcp-local-rag/lancedb",
+        "CACHE_DIR": "/Users/dz/.local/share/mcp-local-rag/models"
+      }
+    }
+  }
+}
