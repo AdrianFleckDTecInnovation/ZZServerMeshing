@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
 
@@ -35,7 +35,6 @@ pub async fn run_game_loop_ecs(
     inbound: Arc<SharedInbound>,
     coord_events: Arc<SharedCoordEvents>,
     udp_socket: Arc<UdpSocket>,
-    broadcast_tx: broadcast::Sender<Vec<u8>>,
     metrics: Arc<Mutex<MetricsCollector>>,
     entity_count_atomic: Arc<AtomicU32>,
 ) {
@@ -57,6 +56,7 @@ pub async fn run_game_loop_ecs(
     world.init_resource::<DrainState>();
     world.init_resource::<ShutdownRequested>();
     world.init_resource::<TimingAccumulator>();
+    world.init_resource::<ClientRegistry>();
 
     // Spawn initial NPCs
     {
@@ -97,6 +97,10 @@ pub async fn run_game_loop_ecs(
             let forwarded_inputs = std::mem::take(&mut iq.forwarded_inputs);
             let client_inputs = std::mem::take(&mut iq.client_inputs);
             let forwarded_removes = std::mem::take(&mut iq.forwarded_removes);
+            let register_clients = std::mem::take(&mut iq.register_clients);
+            let unregister_clients = std::mem::take(&mut iq.unregister_clients);
+            let client_player_assignments = std::mem::take(&mut iq.client_player_assignments);
+            let force_full_snapshot_clients = std::mem::take(&mut iq.force_full_snapshot_clients);
             drop(ecs_queue);
 
             let mut ecs_queue = world.resource_mut::<InboundQueue>();
@@ -105,6 +109,10 @@ pub async fn run_game_loop_ecs(
             ecs_queue.forwarded_inputs = forwarded_inputs;
             ecs_queue.client_inputs = client_inputs;
             ecs_queue.forwarded_removes = forwarded_removes;
+            ecs_queue.register_clients = register_clients;
+            ecs_queue.unregister_clients = unregister_clients;
+            ecs_queue.client_player_assignments = client_player_assignments;
+            ecs_queue.force_full_snapshot_clients = force_full_snapshot_clients;
         }
         {
             let mut cq = coord_events.queue.lock().await;
@@ -130,7 +138,6 @@ pub async fn run_game_loop_ecs(
         // -- Phase 3: Extract outbound data --
         let repl_data = world.resource_mut::<OutboundReplication>().snapshot.take();
         let repl_tick = world.resource::<OutboundReplication>().tick;
-        let client_frame = world.resource_mut::<ClientSnapshot>().frame.take();
         let transfers = std::mem::take(&mut world.resource_mut::<OutboundTransfers>().messages);
         let forwards = std::mem::take(&mut world.resource_mut::<OutboundForwards>().messages);
 
@@ -144,6 +151,7 @@ pub async fn run_game_loop_ecs(
             .iter(&world)
             .count();
         let peer_count = world.resource::<PeerAddresses>().0.len();
+        let client_count = world.resource::<ClientRegistry>().clients.len();
         entity_count_atomic.store(auth_count as u32, Ordering::Relaxed);
 
         // -- Phase 4: Send UDP replication to peers --
@@ -197,11 +205,9 @@ pub async fn run_game_loop_ecs(
         }
         let transfer_dur = t2.elapsed();
 
-        // -- Phase 5: Broadcast client frame --
+        // -- Phase 5: Per-client frames are sent by prepare_client_snapshot --
+        // (frames are pushed directly into per-client mpsc channels during the schedule run)
         let t3 = Instant::now();
-        if let Some(frame) = client_frame {
-            let _ = broadcast_tx.send(frame);
-        }
         let repl_dur = t3.elapsed();
 
         // -- Phase 6: Record metrics --
@@ -212,6 +218,7 @@ pub async fn run_game_loop_ecs(
             m.entity_count = auth_count;
             m.shadow_count = shadow_count;
             m.peer_count = peer_count;
+            m.connected_clients = client_count;
             m.record(TickTimings {
                 input_drain: input_drain_dur,
                 simulation: sim_dur,
@@ -231,11 +238,12 @@ pub async fn run_game_loop_ecs(
         // Debug logging every 5 seconds
         if tick_val % (shared::tick::TICK_RATE as u64 * 5) == 0 {
             tracing::debug!(
-                "Tick {} | auth:{} shadow:{} peers:{}",
+                "Tick {} | auth:{} shadow:{} peers:{} clients:{}",
                 tick_val,
                 auth_count,
                 shadow_count,
                 peer_count,
+                client_count,
             );
         }
     }

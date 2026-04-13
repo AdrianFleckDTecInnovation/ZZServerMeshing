@@ -248,6 +248,18 @@ Use it for:
 
 Defined in `.claude/agents/mesh-auditor.md`. Writes to `docs/mesh-auditor/`.
 
+### @cluster-ops
+Manages the Pi/UNO Q hardware cluster. SSHs into boards, monitors CPU/memory/network/temperature, deploys binaries, checks logs, diagnoses issues, and verifies fixes on live hardware. Knows all board IPs, systemd services, and deployment layout.
+
+Use it for:
+- "Deploy to the boards"
+- "Check if the boards are running"
+- "What's the CPU usage on unoq?"
+- "Why is S2 lagging?"
+- "Monitor the cluster while I test"
+
+Defined in `.claude/agents/cluster-ops.md`. Writes worklogs to `worklogs/cluster-ops/`.
+
 ### @codebase-oracle
 Read-only agent that answers questions about how the codebase works. Treats code and tests as the ultimate source of truth — reads actual implementations before answering, cites `file:line`, and flags doc/code discrepancies. Use it for:
 - "How does authority transfer work?"

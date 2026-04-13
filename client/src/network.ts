@@ -31,6 +31,9 @@ interface ClientDiag {
   positionJumps: number;
   positionChecks: number;
   worstJump: number;
+  bytesReceived: number;
+  fullFrameBytes: number;
+  deltaFrameBytes: number;
   errors: string[];
   prevEntityIds: Set<string>;
   prevPositions: Map<string, [number, number, number]>;
@@ -43,6 +46,7 @@ function initDiag(): ClientDiag {
     fullFrames: 0, deltaFrames: 0, totalUpdates: 0, totalRemovals: 0,
     entityCountSwings: 0, entityFlickerIn: 0, entityFlickerOut: 0,
     positionJumps: 0, positionChecks: 0, worstJump: 0,
+    bytesReceived: 0, fullFrameBytes: 0, deltaFrameBytes: 0,
     errors: [],
     prevEntityIds: new Set(),
     prevPositions: new Map(),
@@ -113,6 +117,7 @@ export class NetworkClient {
       try {
         if (event.data instanceof ArrayBuffer) {
           diag.frames++;
+          diag.bytesReceived += event.data.byteLength;
           this.worldView.countFrame();
           const frame = decodeBinaryFrame(event.data);
           if (!frame) {
@@ -133,6 +138,7 @@ export class NetworkClient {
           // Apply to world view
           if (frame.type === 'full') {
             diag.fullFrames++;
+            diag.fullFrameBytes += event.data.byteLength;
             frameUpdates = frame.entities.length;
             this.worldView.applySnapshot({
               type: 'WorldSnapshot',
@@ -142,6 +148,7 @@ export class NetworkClient {
             });
           } else {
             diag.deltaFrames++;
+            diag.deltaFrameBytes += event.data.byteLength;
             frameUpdates = frame.entities.length;
             frameRemovals = frame.removals.length;
             diag.totalUpdates += frameUpdates;
@@ -152,6 +159,16 @@ export class NetworkClient {
             this.worldView.applyDelta(frame.tick, frame.entities, frame.removals, frame.metrics);
           }
           diag.applied++;
+
+          // Send tick ACK (0x03) back to server for delta baseline tracking
+          if (this.ws && this.connected) {
+            const ackBuf = new ArrayBuffer(9);
+            const ackView = new DataView(ackBuf);
+            ackView.setUint8(0, 0x03);
+            ackView.setUint32(1, frame.tick & 0xFFFFFFFF, true);
+            ackView.setUint32(5, Math.floor(frame.tick / 0x100000000), true);
+            this.ws.send(ackBuf);
+          }
 
           // Reconcile local player prediction with server state
           if (this.playerId) {
@@ -223,9 +240,22 @@ export class NetworkClient {
 
           // Periodic summary every 5 seconds (100 ticks at 20Hz)
           if (frame.tick % 100 === 0) {
+            const totalFrames = diag.fullFrames + diag.deltaFrames;
+            const deltaRatio = totalFrames > 0
+              ? ((diag.deltaFrames / totalFrames) * 100).toFixed(1)
+              : '0.0';
+            const avgFullSize = diag.fullFrames > 0
+              ? Math.round(diag.fullFrameBytes / diag.fullFrames)
+              : 0;
+            const avgDeltaSize = diag.deltaFrames > 0
+              ? Math.round(diag.deltaFrameBytes / diag.deltaFrames)
+              : 0;
             console.log(
               `[NET] tick=${frame.tick} entities=${this.worldView.entities.size} ` +
               `frames=${diag.fullFrames}f+${diag.deltaFrames}d ` +
+              `delta_ratio=${deltaRatio}% ` +
+              `avg_full=${avgFullSize}B avg_delta=${avgDeltaSize}B ` +
+              `total=${(diag.bytesReceived / 1024).toFixed(1)}KB ` +
               `flicker=+${diag.entityFlickerIn}/-${diag.entityFlickerOut} ` +
               `jumps=${diag.positionJumps}`
             );

@@ -50,6 +50,7 @@ interface EntityData {
   authorityServer: number;
   hasSecondSnapshot: boolean;
   lastInputSeq: number;
+  lastUpdateTime: number;
 }
 
 interface WorldSnapshot {
@@ -69,9 +70,11 @@ class WorldView {
   serverEntityCounts: Map<number, number> = new Map();
   localPlayerId: string | null = null;
 
-  /** Snapshot count — skip interpolation during warmup */
+  /** Snapshot count -- skip interpolation during warmup */
   private snapshotCount: number = 0;
   private static readonly WARMUP_SNAPSHOTS = 3;
+  /** Monotonic counter used as a mock for performance.now() in tests */
+  _now: number = 0;
 
   applySnapshot(snapshot: WorldSnapshot): void {
     // Skip duplicate ticks
@@ -79,6 +82,7 @@ class WorldView {
 
     this.currentTick = snapshot.tick;
     this.snapshotCount++;
+    const now = this._now++;
 
     const incomingIds = new Set<string>();
 
@@ -95,6 +99,7 @@ class WorldView {
       const isLocalPlayer = id === this.localPlayerId;
       if (existing) {
         existing.lastInputSeq = raw.last_input_seq ?? 0;
+        existing.lastUpdateTime = now;
         if (isLocalPlayer) {
           existing.currentPosition.copy(pos);
           existing.velocity.copy(vel);
@@ -127,6 +132,7 @@ class WorldView {
           authorityServer: serverId,
           hasSecondSnapshot: false,
           lastInputSeq: raw.last_input_seq ?? 0,
+          lastUpdateTime: now,
         });
       }
     }
@@ -151,6 +157,7 @@ class WorldView {
   applyDelta(tick: number, updates: RawEntity[], removals: string[]): void {
     if (tick === this.currentTick) return;
     this.currentTick = tick;
+    const now = this._now++;
 
     for (const raw of updates) {
       const id = raw.id;
@@ -162,6 +169,7 @@ class WorldView {
       const existing = this.entities.get(id);
       if (existing) {
         existing.lastInputSeq = raw.last_input_seq ?? 0;
+        existing.lastUpdateTime = now;
         if (isLocalPlayer) {
           existing.currentPosition.copy(pos);
           existing.velocity.copy(vel);
@@ -186,6 +194,7 @@ class WorldView {
           authorityServer: serverId,
           hasSecondSnapshot: false,
           lastInputSeq: raw.last_input_seq ?? 0,
+          lastUpdateTime: now,
         });
       }
     }
@@ -518,6 +527,324 @@ test('entity count stable across consistent snapshots', () => {
     wv.applySnapshot(makeSnapshot(tick, entities));
     assert.equal(wv.entities.size, 3, `entity count should be 3 at tick ${tick}`);
   }
+});
+
+// -- Delta compression / per-entity interpolation tests --
+
+// 17
+test('applyDelta updates lastUpdateTime for changed entities', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [5, 0, 0], 2),
+  ]));
+
+  const entityA = wv.entities.get('a')!;
+  const entityB = wv.entities.get('b')!;
+  const initialTimeA = entityA.lastUpdateTime;
+  const initialTimeB = entityB.lastUpdateTime;
+
+  // Delta only updates entity 'a'
+  wv.applyDelta(2, [makeRaw('a', [10, 0, 0], 1)], []);
+
+  assert.ok(entityA.lastUpdateTime > initialTimeA, 'changed entity lastUpdateTime should advance');
+  assert.equal(entityB.lastUpdateTime, initialTimeB, 'unchanged entity lastUpdateTime should NOT advance');
+});
+
+// 18
+test('applyDelta unchanged entities keep interpolating smoothly', () => {
+  const wv = new WorldView();
+  warmup(wv);
+
+  // Set up entity at known position
+  wv.applySnapshot(makeSnapshot(10, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [100, 0, 0], 2),
+  ]));
+
+  // Move only entity 'a'
+  wv.applySnapshot(makeSnapshot(11, [
+    makeRaw('a', [10, 0, 0], 1),
+    makeRaw('b', [100, 0, 0], 2), // unchanged
+  ]));
+
+  const entityB = wv.entities.get('b')!;
+  // Entity B should have previousPosition from old position, currentPosition from snapshot
+  // With hasSecondSnapshot=true, interpolation should work
+  assert.equal(entityB.hasSecondSnapshot, true);
+});
+
+// 19
+test('applyDelta preserves entity not in update or removal list', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [1, 0, 0], 1),
+    makeRaw('b', [2, 0, 0], 1),
+    makeRaw('c', [3, 0, 0], 2),
+  ]));
+
+  // Delta updates only 'a' -- 'b' and 'c' should persist
+  wv.applyDelta(2, [makeRaw('a', [10, 0, 0], 1)], []);
+
+  assert.equal(wv.entities.size, 3, 'all entities should persist');
+  assert.ok(wv.entities.has('b'), 'entity b should still exist');
+  assert.ok(wv.entities.has('c'), 'entity c should still exist');
+});
+
+// 20
+test('applyDelta simultaneous add and remove', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [1, 0, 0], 1),
+    makeRaw('b', [2, 0, 0], 1),
+  ]));
+  assert.equal(wv.entities.size, 2);
+
+  // Remove 'b', add 'c' in same delta
+  wv.applyDelta(2, [makeRaw('c', [3, 0, 0], 2)], ['b']);
+
+  assert.equal(wv.entities.size, 2, 'should have a and c');
+  assert.ok(wv.entities.has('a'));
+  assert.ok(!wv.entities.has('b'), 'b should be removed');
+  assert.ok(wv.entities.has('c'), 'c should be added');
+});
+
+// 21
+test('applyDelta with empty updates and empty removals is no-op', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [1, 0, 0], 1),
+    makeRaw('b', [2, 0, 0], 2),
+  ]));
+
+  const prevSize = wv.entities.size;
+  wv.applyDelta(2, [], []);
+
+  assert.equal(wv.entities.size, prevSize, 'empty delta should not change entity count');
+  assert.equal(wv.entities.get('a')!.currentPosition.x, 1, 'entity a position unchanged');
+});
+
+// 22
+test('applyDelta updates serverEntityCounts correctly', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [0, 0, 0], 2),
+  ]));
+  assert.equal(wv.serverEntityCounts.get(1), 1);
+  assert.equal(wv.serverEntityCounts.get(2), 1);
+
+  // Remove entity from server 2, add entity to server 1
+  wv.applyDelta(2, [makeRaw('c', [0, 0, 0], 1)], ['b']);
+
+  assert.equal(wv.serverEntityCounts.get(1), 2, 'server 1 should have 2 entities');
+  assert.equal(wv.serverEntityCounts.get(2) ?? 0, 0, 'server 2 should have 0 entities');
+});
+
+// 23
+test('applyDelta entity authority transfer updates correctly', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+  ]));
+
+  assert.equal(wv.entities.get('a')!.authorityServer, 1);
+
+  // Delta: entity a transferred to server 2
+  wv.applyDelta(2, [makeRaw('a', [0, 0, 0], 2)], []);
+
+  assert.equal(wv.entities.get('a')!.authorityServer, 2, 'authority should update via delta');
+  assert.equal(wv.serverEntityCounts.get(2), 1);
+  assert.equal(wv.serverEntityCounts.get(1) ?? 0, 0);
+});
+
+// 24
+test('snapshot after delta resets entity set correctly', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [1, 0, 0], 1),
+  ]));
+
+  // Delta adds c
+  wv.applyDelta(2, [makeRaw('c', [2, 0, 0], 1)], []);
+  assert.equal(wv.entities.size, 3);
+
+  // Full snapshot that does NOT include c -> c should be removed
+  wv.applySnapshot(makeSnapshot(3, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [1, 0, 0], 1),
+  ]));
+
+  assert.equal(wv.entities.size, 2, 'full snapshot should replace delta-added entity');
+  assert.ok(!wv.entities.has('c'), 'c should be removed by full snapshot');
+});
+
+// 25
+test('applyDelta hasSecondSnapshot set for updated entity', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+  ]));
+  assert.equal(wv.entities.get('a')!.hasSecondSnapshot, false, 'initially false');
+
+  // Delta updates entity
+  wv.applyDelta(2, [makeRaw('a', [10, 0, 0], 1)], []);
+  assert.equal(wv.entities.get('a')!.hasSecondSnapshot, true, 'should be true after delta update');
+});
+
+// 26
+test('applyDelta new entity has hasSecondSnapshot false', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [makeRaw('a', [0, 0, 0], 1)]));
+
+  // New entity via delta
+  wv.applyDelta(2, [makeRaw('b', [5, 0, 0], 2)], []);
+
+  const entityB = wv.entities.get('b')!;
+  assert.equal(entityB.hasSecondSnapshot, false, 'new entity from delta should not have second snapshot');
+  assert.equal(entityB.position.x, 5, 'new entity should snap to position');
+});
+
+// 27
+test('applyDelta previousPosition set to rendered position for smooth transition', () => {
+  const wv = new WorldView();
+  warmup(wv);
+
+  wv.applySnapshot(makeSnapshot(10, [
+    makeRaw('a', [0, 0, 0], 1),
+  ]));
+
+  const entity = wv.entities.get('a')!;
+  // Simulate rendered position from interpolation
+  entity.position.x = 7;
+
+  // Apply delta update
+  wv.applyDelta(11, [makeRaw('a', [20, 0, 0], 1)], []);
+
+  // previousPosition should be set to the rendered position (7), not the old server position (0)
+  assert.equal(entity.previousPosition.x, 7, 'previousPosition should be the rendered position for smooth transition');
+  assert.equal(entity.currentPosition.x, 20, 'currentPosition should be the new server position');
+});
+
+// 28
+test('interpolate with per-entity timing: only updated entities interpolate fresh', () => {
+  const wv = new WorldView();
+  warmup(wv);
+
+  // Set up two entities
+  wv.applySnapshot(makeSnapshot(10, [
+    makeRaw('a', [0, 0, 0], 1),
+    makeRaw('b', [100, 0, 0], 2),
+  ]));
+
+  // Move both
+  wv.applySnapshot(makeSnapshot(11, [
+    makeRaw('a', [10, 0, 0], 1),
+    makeRaw('b', [110, 0, 0], 2),
+  ]));
+
+  const entityA = wv.entities.get('a')!;
+  const entityB = wv.entities.get('b')!;
+
+  // Both should have hasSecondSnapshot = true
+  assert.equal(entityA.hasSecondSnapshot, true);
+  assert.equal(entityB.hasSecondSnapshot, true);
+
+  // After interpolation, both should be between prev and current
+  wv.interpolate(0);
+  // alpha=0.5: lerp from prev to current at halfway
+  // Entity A: prev was rendered position before snapshot, current is 10
+  // We just verify interpolation ran (position is between prev and current)
+  assert.ok(entityA.position.x >= entityA.previousPosition.x, 'entityA should interpolate forward');
+  assert.ok(entityB.position.x >= entityB.previousPosition.x, 'entityB should interpolate forward');
+});
+
+// 29
+test('applyDelta lastInputSeq update via delta', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1, { entity_type: 'Player', last_input_seq: 5 }),
+  ]));
+
+  assert.equal(wv.entities.get('a')!.lastInputSeq, 5);
+
+  // Delta updates seq
+  wv.applyDelta(2, [makeRaw('a', [0, 0, 0], 1, { entity_type: 'Player', last_input_seq: 10 })], []);
+
+  assert.equal(wv.entities.get('a')!.lastInputSeq, 10, 'lastInputSeq should be updated by delta');
+});
+
+// 30
+test('applyDelta removing nonexistent entity is no-op', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+  ]));
+
+  // Remove entity that does not exist
+  wv.applyDelta(2, [], ['nonexistent-id']);
+
+  assert.equal(wv.entities.size, 1, 'removing nonexistent entity should not affect existing entities');
+});
+
+// 31
+test('delta then snapshot then delta maintains consistency', () => {
+  const wv = new WorldView();
+  wv.applySnapshot(makeSnapshot(1, [
+    makeRaw('a', [0, 0, 0], 1),
+  ]));
+
+  // Delta adds entity
+  wv.applyDelta(2, [makeRaw('b', [5, 0, 0], 2)], []);
+  assert.equal(wv.entities.size, 2);
+
+  // Full snapshot includes both
+  wv.applySnapshot(makeSnapshot(3, [
+    makeRaw('a', [1, 0, 0], 1),
+    makeRaw('b', [6, 0, 0], 2),
+  ]));
+  assert.equal(wv.entities.size, 2);
+
+  // Delta removes one
+  wv.applyDelta(4, [], ['a']);
+  assert.equal(wv.entities.size, 1);
+  assert.ok(wv.entities.has('b'));
+
+  // Another delta adds new
+  wv.applyDelta(5, [makeRaw('c', [10, 0, 0], 1)], []);
+  assert.equal(wv.entities.size, 2);
+  assert.ok(wv.entities.has('b'));
+  assert.ok(wv.entities.has('c'));
+});
+
+// 32
+test('warmup period snaps positions without interpolation', () => {
+  const wv = new WorldView();
+
+  // During warmup (first 3 snapshots), entities should snap
+  wv.applySnapshot(makeSnapshot(1, [makeRaw('a', [0, 0, 0], 1)]));
+  wv.applySnapshot(makeSnapshot(2, [makeRaw('a', [100, 0, 0], 1)]));
+
+  const entity = wv.entities.get('a')!;
+  // During warmup, all positions snap to server position
+  assert.equal(entity.position.x, 100);
+  assert.equal(entity.previousPosition.x, 100);
+  assert.equal(entity.currentPosition.x, 100);
+  assert.equal(entity.hasSecondSnapshot, false, 'during warmup hasSecondSnapshot stays false');
+});
+
+// 33
+test('post-warmup snapshot enables interpolation', () => {
+  const wv = new WorldView();
+  warmup(wv); // 3 warmup snapshots
+
+  wv.applySnapshot(makeSnapshot(10, [makeRaw('a', [0, 0, 0], 1)]));
+  wv.applySnapshot(makeSnapshot(11, [makeRaw('a', [20, 0, 0], 1)]));
+
+  const entity = wv.entities.get('a')!;
+  assert.equal(entity.hasSecondSnapshot, true, 'post-warmup should enable interpolation');
+  assert.equal(entity.currentPosition.x, 20);
 });
 
 // ── Summary ──

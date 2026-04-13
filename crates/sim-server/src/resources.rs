@@ -3,6 +3,40 @@ use shared::entity::{EntityId, EntityState, ServerId};
 use shared::protocol::PeerInfo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
+use crate::delta::CompactEntityState;
+
+/// Frame sent through per-client channels. Full snapshots are reference-counted
+/// (shared across all clients) to avoid cloning the same bytes N times.
+/// Delta frames are unique per client and owned directly.
+#[derive(Debug)]
+pub enum ClientFrame {
+    /// Full snapshot shared across all clients via Arc (zero-copy).
+    Shared(Arc<Vec<u8>>),
+    /// Per-client delta frame (unique content).
+    Owned(Vec<u8>),
+}
+
+impl ClientFrame {
+    /// Get a reference to the underlying bytes.
+    #[allow(dead_code)]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            ClientFrame::Shared(arc) => arc.as_slice(),
+            ClientFrame::Owned(vec) => vec.as_slice(),
+        }
+    }
+
+    /// Convert into owned bytes, cloning from Arc only if necessary.
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            ClientFrame::Shared(arc) => Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()),
+            ClientFrame::Owned(vec) => vec,
+        }
+    }
+}
 
 /// Server identity and configuration.
 #[derive(Resource)]
@@ -31,6 +65,22 @@ pub struct InboundQueue {
     pub forwarded_inputs: Vec<ForwardedInput>,
     pub client_inputs: Vec<shared::protocol::ClientMessage>,
     pub forwarded_removes: Vec<ForwardedRemove>,
+    /// Client registrations from handle_client tasks.
+    pub register_clients: Vec<ClientRegistrationEvent>,
+    /// Client unregistrations on disconnect.
+    pub unregister_clients: Vec<u64>,
+    /// Client-to-player ID assignments (set when SpawnPlayer is processed).
+    pub client_player_assignments: Vec<(u64, EntityId)>,
+    /// Clients requesting a forced full snapshot (RequestSnapshot).
+    pub force_full_snapshot_clients: Vec<u64>,
+}
+
+/// Event pushed by handle_client when a new WebSocket client connects.
+pub struct ClientRegistrationEvent {
+    pub client_id: u64,
+    pub tx: tokio::sync::mpsc::Sender<ClientFrame>,
+    pub acked_tick: Arc<AtomicU64>,
+    pub player_uuid: String,
 }
 
 /// Coordinator events received between ticks.
@@ -96,6 +146,60 @@ pub struct TimingAccumulator {
     pub transfers: std::time::Duration,
     pub replication: std::time::Duration,
     pub shadow_cleanup: std::time::Duration,
+}
+
+/// Per-client channel size. 8 frames = 400ms at 20Hz -- enough buffer for brief lag spikes.
+pub const PER_CLIENT_CHANNEL_SIZE: usize = 8;
+
+/// Registry of connected clients, each with its own frame channel and delta state.
+#[derive(Resource, Default)]
+pub struct ClientRegistry {
+    pub clients: HashMap<u64, ClientHandle>,
+    next_id: u64,
+}
+
+impl ClientRegistry {
+    /// Register a new client from a pre-built event. Returns the assigned client ID.
+    pub fn register_from_event(
+        &mut self,
+        client_id: u64,
+        tx: tokio::sync::mpsc::Sender<ClientFrame>,
+        acked_tick: Arc<AtomicU64>,
+    ) {
+        self.clients.insert(
+            client_id,
+            ClientHandle {
+                tx,
+                player_id: None,
+                acked_tick,
+                baseline: None,
+                ticks_since_full: 0,
+            },
+        );
+        if client_id >= self.next_id {
+            self.next_id = client_id + 1;
+        }
+    }
+
+    pub fn unregister(&mut self, id: u64) {
+        self.clients.remove(&id);
+    }
+}
+
+/// Per-client handle stored in the ECS ClientRegistry.
+pub struct ClientHandle {
+    /// Per-client frame channel sender (accepts shared or owned frames).
+    pub tx: tokio::sync::mpsc::Sender<ClientFrame>,
+    /// The player entity owned by this client (set on SpawnPlayer).
+    pub player_id: Option<EntityId>,
+    /// Last tick ACK'd by this client. Written by handle_client (async), read by game loop (ECS).
+    /// Currently used for diagnostics; future: conditional baseline confirmation.
+    #[allow(dead_code)]
+    pub acked_tick: Arc<AtomicU64>,
+    /// Baseline entity state for delta computation. None until first full snapshot sent.
+    pub baseline: Option<HashMap<EntityId, CompactEntityState>>,
+    /// Ticks since last forced full snapshot.
+    pub ticks_since_full: u32,
 }
 
 // -- Inbound event types --

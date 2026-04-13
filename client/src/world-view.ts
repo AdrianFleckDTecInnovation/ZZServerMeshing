@@ -10,6 +10,7 @@ export interface EntityData {
   authorityServer: number;
   hasSecondSnapshot: boolean;      // false until we have two positions to lerp between
   lastInputSeq: number;            // last acknowledged input sequence (players only)
+  lastUpdateTime: number;          // performance.now() when this entity was last updated by the server
 }
 
 export interface WorldSnapshot {
@@ -63,8 +64,6 @@ export class WorldView {
   localPlayerId: string | null = null;
   metrics: GatewayMetrics | null = null;
 
-  /** Timestamp of most recent snapshot arrival */
-  private lastSnapshotTime: number = performance.now();
   /** Measured interval between snapshots (adapts to actual network rate) */
   private measuredIntervalMs: number = 100;
   private prevSnapshotTime: number = 0;
@@ -107,14 +106,10 @@ export class WorldView {
     this.snapshotCount++;
 
     // During warmup, don't interpolate — snap to server positions
-    if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
-      this.lastSnapshotTime = now;
-      // Will snap all entities to currentPosition below (hasSecondSnapshot stays false)
-    } else {
+    if (this.snapshotCount > WorldView.WARMUP_SNAPSHOTS) {
       // Run interpolation one last time before applying new data
       // so entity.position reflects what was actually rendered
       this.interpolate(0);
-      this.lastSnapshotTime = now;
     }
 
     if (snapshot._metrics) {
@@ -136,6 +131,7 @@ export class WorldView {
       const isLocalPlayer = id === this.localPlayerId;
       if (existing) {
         existing.lastInputSeq = raw.last_input_seq ?? 0;
+        existing.lastUpdateTime = now;
         if (isLocalPlayer) {
           // Local player: update server state but don't touch rendered position
           // (prediction manager handles position via reconciliation)
@@ -172,6 +168,7 @@ export class WorldView {
           authorityServer: serverId,
           hasSecondSnapshot: false,
           lastInputSeq: raw.last_input_seq ?? 0,
+          lastUpdateTime: now,
         });
       }
     }
@@ -194,11 +191,12 @@ export class WorldView {
   }
 
   /** Apply a delta frame: update changed entities, remove deleted ones.
-   *  Does NOT reset lastSnapshotTime — interpolation timer only resets on full snapshots.
-   *  This prevents unchanged entities from warping back to previousPosition. */
+   *  Only resets lastUpdateTime for entities present in the delta's update list.
+   *  Unchanged entities continue interpolating with their existing timer. */
   applyDelta(tick: number, updates: RawEntity[], removals: string[], metrics?: GatewayMetrics): void {
     if (tick === this.currentTick) return;
     this.currentTick = tick;
+    const now = performance.now();
 
     if (metrics) {
       this.metrics = metrics;
@@ -215,6 +213,7 @@ export class WorldView {
       const existing = this.entities.get(id);
       if (existing) {
         existing.lastInputSeq = raw.last_input_seq ?? 0;
+        existing.lastUpdateTime = now;
         if (isLocalPlayer) {
           existing.currentPosition.copy(pos);
           existing.velocity.copy(vel);
@@ -240,6 +239,7 @@ export class WorldView {
           authorityServer: serverId,
           hasSecondSnapshot: false,
           lastInputSeq: raw.last_input_seq ?? 0,
+          lastUpdateTime: now,
         });
       }
     }
@@ -259,19 +259,34 @@ export class WorldView {
     }
   }
 
+  /** Staleness threshold: entities not updated for this long are removed as a safety net.
+   *  Set slightly above FULL_SNAPSHOT_INTERVAL (5s) to avoid removing entities that are
+   *  merely unchanged between full snapshots. This catches ghost entities from baseline
+   *  drift or missed delta removals. */
+  private static readonly STALE_ENTITY_THRESHOLD_MS = 6000;
+
   interpolate(_dt: number): void {
     const now = performance.now();
-    const timeSinceSnapshot = now - this.lastSnapshotTime;
-    // Use measured interval instead of hardcoded 50ms — adapts to actual network rate
-    const alpha = Math.min(timeSinceSnapshot / this.measuredIntervalMs, 1.2);
 
-    for (const entity of this.entities.values()) {
+    for (const [id, entity] of this.entities) {
       // Local player position is managed by the prediction system
       if (entity.id === this.localPlayerId) continue;
+
+      // Safety net: remove entities not updated by the server for >6 seconds.
+      // This catches ghost entities from baseline drift (#018) or missed delta removals (#023).
+      // Full snapshots arrive every 5s, so any legitimate entity will be refreshed well within this window.
+      if (now - entity.lastUpdateTime > WorldView.STALE_ENTITY_THRESHOLD_MS) {
+        this.entities.delete(id);
+        continue;
+      }
+
       if (!entity.hasSecondSnapshot) {
         entity.position.copy(entity.currentPosition);
         continue;
       }
+      // Per-entity interpolation: each entity tracks its own last update time
+      const timeSinceUpdate = now - entity.lastUpdateTime;
+      const alpha = Math.min(timeSinceUpdate / this.measuredIntervalMs, 1.2);
       entity.position.lerpVectors(entity.previousPosition, entity.currentPosition, alpha);
     }
   }

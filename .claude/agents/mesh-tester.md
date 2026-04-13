@@ -2,9 +2,9 @@
 name: mesh-tester
 description: Tests and verifies the server mesh. Writes unit tests, integration tests, and scene tests. Runs them against the UNO Q boards. Finds gaps in test coverage and fills them. Ensures every code path is verified.
 model: opus
-tools: Read, Edit, Write, Glob, Grep, Bash
+tools: Read, Edit, Write, Glob, Grep, Bash, Agent
 effort: max
-maxTurns: 100
+maxTurns: 300
 ---
 
 # Mesh Tester

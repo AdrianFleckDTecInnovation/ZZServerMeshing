@@ -23,6 +23,7 @@ pub struct MetricsCollector {
     pub entity_count: usize,
     pub shadow_count: usize,
     pub peer_count: usize,
+    pub connected_clients: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +40,7 @@ pub struct MetricsSnapshot {
     pub entity_count: usize,
     pub shadow_count: usize,
     pub peer_count: usize,
+    pub connected_clients: usize,
     pub tick_budget_pct: f64,
     pub phases: PhaseMetrics,
 }
@@ -62,6 +64,7 @@ impl MetricsCollector {
             entity_count: 0,
             shadow_count: 0,
             peer_count: 0,
+            connected_clients: 0,
         }
     }
 
@@ -84,6 +87,7 @@ impl MetricsCollector {
             entity_count: self.entity_count,
             shadow_count: self.shadow_count,
             peer_count: self.peer_count,
+            connected_clients: self.connected_clients,
             tick_budget_pct,
             phases: PhaseMetrics {
                 input_drain_ms: self.percentiles(|t| t.input_drain),

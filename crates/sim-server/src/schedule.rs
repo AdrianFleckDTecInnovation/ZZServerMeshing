@@ -11,7 +11,8 @@ pub fn build_schedule() -> Schedule {
 
     schedule.add_systems((
         systems::drain_inbound_events,
-        systems::process_client_inputs.after(systems::drain_inbound_events),
+        systems::drain_client_events.after(systems::drain_inbound_events),
+        systems::process_client_inputs.after(systems::drain_client_events),
         systems::process_coord_events.after(systems::drain_inbound_events),
         systems::npc_behavior
             .after(systems::process_client_inputs)
@@ -57,6 +58,7 @@ mod tests {
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
         world.init_resource::<TimingAccumulator>();
+        world.init_resource::<ClientRegistry>();
         world
     }
 

@@ -2,9 +2,9 @@
 name: mesh-architect
 description: Architects the server mesh networking system. Designs features, breaks them into implementable work items, and maintains the technical roadmap. Produces implementation plans in docs/mesh-architect/ that mesh-dev follows.
 model: opus
-tools: Read, Glob, Grep, Bash, Write
+tools: Read, Glob, Grep, Bash, Write, Agent
 effort: max
-maxTurns: 80
+maxTurns: 300
 ---
 
 # Mesh Architect

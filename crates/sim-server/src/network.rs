@@ -1,17 +1,22 @@
 use crate::game_loop::SharedInbound;
+use crate::resources::{ClientFrame, ClientRegistrationEvent, PER_CLIENT_CHANNEL_SIZE};
 use shared::protocol::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, StreamExt, stream::{SplitSink, SplitStream}};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+
+/// Atomic counter for assigning unique client IDs. This is incremented by each
+/// handle_client task to ensure uniqueness without needing shared mutable state.
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub async fn run_websocket_server(
     port: u16,
     inbound: Arc<SharedInbound>,
-    broadcast_tx: broadcast::Sender<Vec<u8>>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -32,7 +37,6 @@ pub async fn run_websocket_server(
         };
 
         let inbound = Arc::clone(&inbound);
-        let broadcast_rx = broadcast_tx.subscribe();
 
         if let Some(ref acceptor) = tls_acceptor {
             let acceptor = acceptor.clone();
@@ -52,7 +56,7 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr} (TLS)");
-                handle_client(ws_stream, addr, inbound, broadcast_rx).await;
+                handle_client(ws_stream, addr, inbound).await;
             });
         } else {
             tokio::spawn(async move {
@@ -64,7 +68,7 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr}");
-                handle_client(ws_stream, addr, inbound, broadcast_rx).await;
+                handle_client(ws_stream, addr, inbound).await;
             });
         }
     }
@@ -76,9 +80,17 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     ws_stream: WebSocketStream<S>,
     addr: std::net::SocketAddr,
     inbound: Arc<SharedInbound>,
-    mut broadcast_rx: broadcast::Receiver<Vec<u8>>,
 ) {
     let (mut ws_sink, mut ws_stream): (SplitSink<WebSocketStream<S>, Message>, SplitStream<WebSocketStream<S>>) = ws_stream.split();
+
+    // Assign a unique client ID
+    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+
+    // Create per-client frame channel (receives shared or owned frames)
+    let (frame_tx, mut frame_rx) = mpsc::channel::<ClientFrame>(PER_CLIENT_CHANNEL_SIZE);
+
+    // Shared ACK tick counter between this task and the ECS game loop
+    let acked_tick = Arc::new(AtomicU64::new(0));
 
     // Generate player UUID and push SpawnPlayer to the inbound queue.
     // The player entity is created on the next game loop tick.
@@ -88,6 +100,13 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         q.client_inputs.push(ClientMessage::SpawnPlayer {
             player_id: player_uuid.to_string(),
             position: [0.0, 0.0, 0.0],
+        });
+        // Register this client in the ECS via the inbound queue
+        q.register_clients.push(ClientRegistrationEvent {
+            client_id,
+            tx: frame_tx,
+            acked_tick: Arc::clone(&acked_tick),
+            player_uuid: player_uuid.to_string(),
         });
     }
 
@@ -102,36 +121,44 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             q.client_inputs.push(ClientMessage::RemoveEntity {
                 entity_id: player_uuid.to_string(),
             });
+            q.unregister_clients.push(client_id);
             return;
         }
     }
 
     tracing::info!(
+        client_id,
         "Assigned player {} to client {addr}",
         &player_uuid.to_string()[..8]
     );
 
     loop {
         tokio::select! {
-            // Forward binary snapshot frames to this client (produced by game loop)
-            msg = broadcast_rx.recv() => {
-                match msg {
-                    Ok(frame) => {
-                        if ws_sink.send(Message::Binary(frame.into())).await.is_err() {
+            // Receive per-client frames from the game loop
+            frame = frame_rx.recv() => {
+                match frame {
+                    Some(client_frame) => {
+                        let data = client_frame.into_vec();
+                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Client {addr} lagged {n} messages");
+                    None => {
+                        // Channel closed (game loop shut down)
+                        break;
                     }
-                    Err(_) => break,
                 }
             }
-            // Receive input from this client (still JSON text)
+            // Receive input from this client
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(ClientMessage::RequestSnapshot) => {
+                                // Route directly to force_full_snapshot_clients with client_id
+                                let mut q = inbound.queue.lock().await;
+                                q.force_full_snapshot_clients.push(client_id);
+                            }
                             Ok(input) => {
                                 let mut q = inbound.queue.lock().await;
                                 q.client_inputs.push(input);
@@ -140,6 +167,16 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                                 tracing::warn!("Invalid client message: {e}");
                             }
                         }
+                    }
+                    // Handle binary frames from client (tick ACKs)
+                    Some(Ok(Message::Binary(data))) => {
+                        if data.len() == 9 && data[0] == 0x03 {
+                            let tick = u64::from_le_bytes(
+                                data[1..9].try_into().unwrap_or([0; 8]),
+                            );
+                            acked_tick.store(tick, Ordering::Relaxed);
+                        }
+                        // Ignore other binary messages from client
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::info!("Client {addr} disconnected");
@@ -151,14 +188,16 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
 
-    // Client disconnected -- push RemoveEntity to the inbound queue
+    // Client disconnected -- push RemoveEntity and unregister
     {
         let mut q = inbound.queue.lock().await;
         q.client_inputs.push(ClientMessage::RemoveEntity {
             entity_id: player_uuid.to_string(),
         });
+        q.unregister_clients.push(client_id);
     }
     tracing::info!(
+        client_id,
         "Removed player {} on disconnect",
         &player_uuid.to_string()[..8]
     );
@@ -366,4 +405,65 @@ mod tests {
         assert_eq!(u32::from_le_bytes(buf[9..13].try_into().unwrap()), 0); // updates
         assert_eq!(u32::from_le_bytes(buf[13..17].try_into().unwrap()), 0); // removals
     }
+
+    // -- ACK parsing tests --
+
+    #[test]
+    fn ack_parse_valid() {
+        let mut buf = vec![0x03u8];
+        buf.extend_from_slice(&12345u64.to_le_bytes());
+        assert_eq!(buf.len(), 9);
+        assert_eq!(buf[0], 0x03);
+        let tick = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+        assert_eq!(tick, 12345);
+    }
+
+    #[test]
+    fn ack_parse_max_tick() {
+        let mut buf = vec![0x03u8];
+        buf.extend_from_slice(&u64::MAX.to_le_bytes());
+        let tick = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+        assert_eq!(tick, u64::MAX);
+    }
+
+    #[test]
+    fn ack_wrong_type_ignored() {
+        let buf = vec![0x04u8, 0, 0, 0, 0, 0, 0, 0, 0]; // wrong type byte
+        // Should not be parsed as ACK
+        assert!(buf.len() == 9 && buf[0] != 0x03);
+    }
+
+    #[test]
+    fn ack_wrong_length_ignored() {
+        let buf = vec![0x03u8, 0, 0, 0]; // too short
+        assert!(buf.len() != 9);
+    }
+
+    // -- ClientRegistry tests --
+
+    #[test]
+    fn client_registry_register_and_unregister() {
+        use crate::resources::{ClientFrame, ClientRegistry};
+        let mut registry = ClientRegistry::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = Arc::new(AtomicU64::new(0));
+
+        registry.register_from_event(0, tx.clone(), Arc::clone(&acked));
+        assert_eq!(registry.clients.len(), 1);
+        assert!(registry.clients.contains_key(&0));
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked2 = Arc::new(AtomicU64::new(0));
+        registry.register_from_event(1, tx2, acked2);
+        assert_eq!(registry.clients.len(), 2);
+
+        registry.unregister(0);
+        assert_eq!(registry.clients.len(), 1);
+        assert!(!registry.clients.contains_key(&0));
+        assert!(registry.clients.contains_key(&1));
+
+        registry.unregister(1);
+        assert_eq!(registry.clients.len(), 0);
+    }
+
 }

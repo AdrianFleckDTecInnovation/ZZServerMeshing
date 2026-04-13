@@ -2,9 +2,9 @@
 name: mesh-auditor
 description: Audits the server mesh codebase for bottlenecks, single points of failure, race conditions, data loss risks, and scalability limits. Produces actionable finding reports in docs/mesh-auditor/ that mesh-dev can implement against.
 model: opus
-tools: Read, Glob, Grep, Bash, Write
+tools: Read, Glob, Grep, Bash, Write, Agent
 effort: max
-maxTurns: 80
+maxTurns: 300
 ---
 
 # Mesh Auditor

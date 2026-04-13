@@ -1,6 +1,7 @@
 use crate::components::*;
 use crate::conversion::{despawn_and_remove, spawn_from_entity_state_direct, to_entity_state};
-use crate::encoding::encode_binary_snapshot;
+use crate::delta::{build_baseline, compute_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
+use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use glam::Vec3;
@@ -9,6 +10,7 @@ use shared::entity::{EntityId, EntityState, EntityType, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
 use shared::spatial::clamp_to_world;
 use shared::tick::{TICK_DURATION_MS, TICK_RATE};
+use std::sync::Arc;
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
 
@@ -195,6 +197,57 @@ pub fn drain_inbound_events(world: &mut World) {
                 entity = %fwd_rm.entity_id,
                 "Forwarded remove for unknown entity, ignoring"
             );
+        }
+    }
+}
+
+// ============================================================
+// System 1b: drain_client_events
+// ============================================================
+
+/// Drain client registration/unregistration events from InboundQueue into ClientRegistry.
+/// Runs after drain_inbound_events, before process_client_inputs.
+pub fn drain_client_events(
+    mut inbound: ResMut<InboundQueue>,
+    mut registry: ResMut<ClientRegistry>,
+) {
+    // Register new clients
+    let registrations = std::mem::take(&mut inbound.register_clients);
+    for event in registrations {
+        registry.register_from_event(event.client_id, event.tx, event.acked_tick);
+        // Also push client_player_assignment so the player_id can be set
+        // once SpawnPlayer is processed (matched by player_uuid).
+        inbound.client_player_assignments.push((
+            event.client_id,
+            shared::entity::EntityId(uuid::Uuid::parse_str(&event.player_uuid).unwrap_or_else(
+                |_| uuid::Uuid::nil(),
+            )),
+        ));
+        tracing::debug!(client_id = event.client_id, "Registered client in ECS");
+    }
+
+    // Unregister disconnected clients
+    let unregistrations = std::mem::take(&mut inbound.unregister_clients);
+    for client_id in unregistrations {
+        registry.unregister(client_id);
+        tracing::debug!(client_id, "Unregistered client from ECS");
+    }
+
+    // Apply player ID assignments
+    let assignments = std::mem::take(&mut inbound.client_player_assignments);
+    for (client_id, entity_id) in assignments {
+        if let Some(handle) = registry.clients.get_mut(&client_id) {
+            handle.player_id = Some(entity_id);
+        }
+    }
+
+    // Handle forced full snapshot requests
+    let force_fulls = std::mem::take(&mut inbound.force_full_snapshot_clients);
+    for client_id in force_fulls {
+        if let Some(handle) = registry.clients.get_mut(&client_id) {
+            handle.baseline = None;
+            handle.ticks_since_full = 0;
+            tracing::debug!(client_id, "Forced full snapshot for client");
         }
     }
 }
@@ -718,10 +771,16 @@ pub fn prepare_replication(
 // System 10: prepare_client_snapshot
 // ============================================================
 
-/// Query both authoritative and shadow entities, merge, encode binary frame.
+/// Query both authoritative and shadow entities, compute per-client delta frames,
+/// and send them through per-client mpsc channels. Falls back to full snapshots
+/// when clients have no baseline, at periodic intervals, or when ACK is missing.
+///
+/// Also writes a full snapshot to ClientSnapshot for backward compatibility
+/// (used by schedule tests that check ClientSnapshot.frame).
 pub fn prepare_client_snapshot(
     tick: Res<TickCounter>,
     mut snapshot: ResMut<ClientSnapshot>,
+    mut registry: ResMut<ClientRegistry>,
     auth_query: Query<
         (
             &NetworkId,
@@ -761,7 +820,66 @@ pub fn prepare_client_snapshot(
         }
     }
 
-    snapshot.frame = Some(encode_binary_snapshot(tick.0, &entities));
+    // Encode the full snapshot once, wrapped in Arc for zero-copy sharing across clients.
+    // Only a single clone is made for the backward-compat ClientSnapshot resource.
+    let full_frame = Arc::new(encode_binary_snapshot(tick.0, &entities));
+    snapshot.frame = Some((*full_frame).clone());
+
+    // Send per-client frames (delta or full).
+    // IMPORTANT: Baseline is updated ONLY after try_send succeeds (fix for audit #018).
+    // If the channel is full and the frame is dropped, the baseline is NOT advanced,
+    // so the next tick re-diffs against the last state the client actually received.
+    // On drop, we also force the next frame to be a full snapshot (clear baseline).
+    for (_client_id, handle) in registry.clients.iter_mut() {
+        let send_full = handle.baseline.is_none()
+            || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL;
+
+        if send_full {
+            // Full snapshot path: encode is shared via Arc, baseline built only on success.
+            let frame = ClientFrame::Shared(Arc::clone(&full_frame));
+            match handle.tx.try_send(frame) {
+                Ok(()) => {
+                    // Success: update baseline to match what we just sent
+                    handle.baseline = Some(build_baseline(&entities));
+                    handle.ticks_since_full = 1;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Frame dropped: clear baseline so next tick forces a full snapshot
+                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping full snapshot");
+                    handle.baseline = None;
+                    // ticks_since_full not incremented -- will try full again next tick
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Client disconnected; will be cleaned up by unregister event
+                }
+            }
+        } else {
+            // Delta path: compute delta against baseline, update baseline only on success.
+            let baseline = handle.baseline.as_ref().unwrap();
+            let delta = compute_delta(&entities, baseline);
+
+            let removal_ids: Vec<EntityId> = delta.removals.clone();
+            let frame = ClientFrame::Owned(encode_binary_delta(tick.0, &delta.updates, &removal_ids));
+
+            match handle.tx.try_send(frame) {
+                Ok(()) => {
+                    // Success: advance baseline to match the delta we just sent
+                    update_baseline(handle.baseline.as_mut().unwrap(), &delta);
+                    handle.ticks_since_full += 1;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Frame dropped: baseline NOT advanced. Clear it entirely to
+                    // force a full snapshot on the next tick, guaranteeing convergence.
+                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
+                    handle.baseline = None;
+                    handle.ticks_since_full = 0;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Client disconnected; will be cleaned up by unregister event
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -830,6 +948,7 @@ mod tests {
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
         world.init_resource::<TimingAccumulator>();
+        world.init_resource::<ClientRegistry>();
         world
     }
 
@@ -1098,6 +1217,447 @@ mod tests {
         assert_eq!(tick, 42);
         let count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(count, 1);
+    }
+
+    // -- per-client delta compression tests --
+
+    /// Helper: register a test client in the ClientRegistry and return (client_id, receiver).
+    fn register_test_client(world: &mut World, client_id: u64) -> tokio::sync::mpsc::Receiver<ClientFrame> {
+        use std::sync::atomic::AtomicU64;
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
+        let acked = std::sync::Arc::new(AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>()
+            .register_from_event(client_id, tx, acked);
+        rx
+    }
+
+    #[test]
+    fn per_client_first_frame_is_full_snapshot() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x01, "first frame to a new client must be a full snapshot");
+    }
+
+    #[test]
+    fn per_client_second_frame_is_delta() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::new(1.0, 0.0, 1.0), 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (baseline established)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let frame1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame1[0], 0x01, "first frame should be full snapshot");
+
+        // Tick 2: no changes -> delta
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let frame2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame2[0], 0x02, "second frame should be delta");
+    }
+
+    #[test]
+    fn per_client_delta_empty_when_no_changes() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::new(5.0, 0.0, 5.0), 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec(); // consume
+
+        // Tick 2: no changes -> delta with 0 updates, 0 removals
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x02);
+        let update_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
+        let removal_count = u32::from_le_bytes(frame[13..17].try_into().unwrap());
+        assert_eq!(update_count, 0, "no entities changed");
+        assert_eq!(removal_count, 0, "no entities removed");
+    }
+
+    #[test]
+    fn per_client_delta_detects_entity_movement() {
+        let mut world = setup_world(1);
+        let (entity, _eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec();
+
+        // Move the entity
+        world.get_mut::<Position>(entity).unwrap().0 = Vec3::new(50.0, 0.0, 50.0);
+
+        // Tick 2: delta should include the moved entity
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x02);
+        let update_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
+        assert_eq!(update_count, 1, "moved entity should be in delta updates");
+    }
+
+    #[test]
+    fn per_client_periodic_full_snapshot_at_interval() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        // Use a large enough channel to hold all 101 frames without drops
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>()
+            .register_from_event(100, tx, acked);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Run 101 ticks: tick 1 = full, ticks 2-100 = delta, tick 101 = full again
+        for tick in 1..=101 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+        }
+
+        // Read all 101 frames and check types
+        let mut full_count = 0u32;
+        let mut _delta_count = 0u32;
+        let mut last_frame_type = 0u8;
+        for _ in 0..101 {
+            let frame = rx.try_recv().unwrap().into_vec();
+            if frame[0] == 0x01 {
+                full_count += 1;
+            } else {
+                _delta_count += 1;
+            }
+            last_frame_type = frame[0];
+        }
+        // First frame (tick 1) is full, tick 101 should also be full (100 ticks since full)
+        assert!(full_count >= 2, "should have at least 2 full snapshots (first + periodic): got {full_count}");
+        assert_eq!(last_frame_type, 0x01, "tick 101 should be a full snapshot (100 ticks after first)");
+    }
+
+    #[test]
+    fn per_client_isolation_two_clients_get_independent_frames() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx_a = register_test_client(&mut world, 100);
+        let mut rx_b = register_test_client(&mut world, 200);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: both get full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame_a = rx_a.try_recv().unwrap().into_vec();
+        let frame_b = rx_b.try_recv().unwrap().into_vec();
+        assert_eq!(frame_a[0], 0x01, "client A first frame should be full");
+        assert_eq!(frame_b[0], 0x01, "client B first frame should be full");
+
+        // Tick 2: both should get delta
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+
+        let frame_a2 = rx_a.try_recv().unwrap().into_vec();
+        let frame_b2 = rx_b.try_recv().unwrap().into_vec();
+        assert_eq!(frame_a2[0], 0x02, "client A second frame should be delta");
+        assert_eq!(frame_b2[0], 0x02, "client B second frame should be delta");
+    }
+
+    #[test]
+    fn per_client_new_client_gets_full_while_existing_gets_delta() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx_a = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: client A gets full
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let fa1 = rx_a.try_recv().unwrap().into_vec();
+        assert_eq!(fa1[0], 0x01);
+
+        // Register client B mid-session
+        let mut rx_b = register_test_client(&mut world, 200);
+
+        // Tick 2: client A gets delta, client B gets full
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+
+        let fa2 = rx_a.try_recv().unwrap().into_vec();
+        let fb1 = rx_b.try_recv().unwrap().into_vec();
+        assert_eq!(fa2[0], 0x02, "existing client should get delta");
+        assert_eq!(fb1[0], 0x01, "new client should get full snapshot");
+    }
+
+    #[test]
+    fn force_full_snapshot_resets_baseline() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.add_systems(prepare_client_snapshot.after(drain_client_events));
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01);
+
+        // Tick 2: delta
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02);
+
+        // Request forced full snapshot
+        world.resource_mut::<InboundQueue>().force_full_snapshot_clients.push(100);
+
+        // Tick 3: should be full (baseline was cleared by drain_client_events)
+        world.resource_mut::<TickCounter>().0 = 3;
+        schedule.run(&mut world);
+        let f3 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f3[0], 0x01, "forced full snapshot should produce 0x01 frame");
+    }
+
+    #[test]
+    fn per_client_entity_removal_in_delta() {
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::X, 1); // second entity stays
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full with 2 entities
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01);
+        let count1 = u32::from_le_bytes(f1[9..13].try_into().unwrap());
+        assert_eq!(count1, 2);
+
+        // Remove first entity
+        crate::conversion::despawn_and_remove(&mut world, entity, eid);
+
+        // Tick 2: delta with 1 removal
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02);
+        let removal_count = u32::from_le_bytes(f2[13..17].try_into().unwrap());
+        assert_eq!(removal_count, 1, "should have 1 removal in delta");
+    }
+
+    #[test]
+    fn per_client_new_entity_appears_in_delta() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full with 1 entity
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec();
+
+        // Spawn a new entity
+        spawn_auth_npc(&mut world, Vec3::new(10.0, 0.0, 10.0), 1);
+
+        // Tick 2: delta should contain the new entity
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02);
+        let update_count = u32::from_le_bytes(f2[9..13].try_into().unwrap());
+        assert_eq!(update_count, 1, "new entity should be in delta updates");
+    }
+
+    #[test]
+    fn per_client_ticks_since_full_resets_on_full() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        // Use a large enough channel to hold all frames without drops
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>()
+            .register_from_event(100, tx, acked);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Run to just before periodic full snapshot
+        for tick in 1..=100 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+        }
+        // Consume 100 frames
+        for _ in 0..100 {
+            rx.try_recv().unwrap().into_vec();
+        }
+
+        // Tick 101: should be full (periodic reset)
+        world.resource_mut::<TickCounter>().0 = 101;
+        schedule.run(&mut world);
+        let f = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f[0], 0x01, "tick 101 should be periodic full snapshot");
+
+        // Tick 102: should be delta again (counter reset)
+        world.resource_mut::<TickCounter>().0 = 102;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "tick after periodic full should be delta again");
+    }
+
+    #[test]
+    fn per_client_client_disconnect_no_panic() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Drop the receiver, simulating a disconnected client
+        drop(rx);
+
+        // Should not panic -- try_send returns Closed error and is handled
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+    }
+
+    #[test]
+    fn per_client_channel_full_no_panic() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // Create a tiny channel that will fill up
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(1);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>()
+            .register_from_event(100, tx, acked);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Fill the channel
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        // Second tick should not panic even though channel is full
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+    }
+
+    #[test]
+    fn per_client_backward_compat_client_snapshot_resource() {
+        // Verify that ClientSnapshot resource is still populated for backward compatibility
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        // No clients registered - ClientSnapshot should still be written
+        world.resource_mut::<TickCounter>().0 = 5;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        schedule.run(&mut world);
+
+        let snap = world.resource::<ClientSnapshot>();
+        assert!(snap.frame.is_some(), "ClientSnapshot should be populated even with no clients");
+        let frame = snap.frame.as_ref().unwrap();
+        assert_eq!(frame[0], 0x01);
+    }
+
+    // -- drain_client_events tests --
+
+    #[test]
+    fn drain_client_events_registers_client() {
+        let mut world = setup_world(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        world.resource_mut::<InboundQueue>().register_clients.push(
+            ClientRegistrationEvent {
+                client_id: 42,
+                tx,
+                acked_tick: acked,
+                player_uuid: uuid::Uuid::new_v4().to_string(),
+            }
+        );
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.run(&mut world);
+
+        assert!(world.resource::<ClientRegistry>().clients.contains_key(&42));
+    }
+
+    #[test]
+    fn drain_client_events_unregisters_client() {
+        let mut world = setup_world(1);
+        let _rx = register_test_client(&mut world, 42);
+
+        world.resource_mut::<InboundQueue>().unregister_clients.push(42);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.run(&mut world);
+
+        assert!(!world.resource::<ClientRegistry>().clients.contains_key(&42));
+    }
+
+    #[test]
+    fn drain_client_events_force_full_clears_baseline() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 42);
+
+        // Run one tick to establish baseline
+        let mut snap_schedule = Schedule::default();
+        snap_schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        snap_schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec(); // consume
+
+        // Verify baseline exists
+        assert!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().baseline.is_some());
+
+        // Force full snapshot
+        world.resource_mut::<InboundQueue>().force_full_snapshot_clients.push(42);
+        let mut drain_schedule = Schedule::default();
+        drain_schedule.add_systems(drain_client_events);
+        drain_schedule.run(&mut world);
+
+        // Baseline should be cleared
+        assert!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().baseline.is_none());
+        assert_eq!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().ticks_since_full, 0);
     }
 
     // -- drain_inbound_events tests --

@@ -4,7 +4,7 @@ description: Specialized agent for developing server mesh netcode. Use for any w
 model: opus
 tools: Read, Edit, Write, Glob, Grep, Bash, Agent
 effort: max
-maxTurns: 100
+maxTurns: 300
 ---
 
 # Mesh Netcode Developer

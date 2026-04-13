@@ -8,6 +8,7 @@ mod resources;
 mod conversion;
 #[allow(dead_code)]
 mod encoding;
+mod delta;
 mod systems;
 mod schedule;
 mod game_loop;
@@ -102,9 +103,6 @@ async fn main() {
         queue: tokio::sync::Mutex::new(resources::CoordEventQueue::default()),
     });
 
-    // Broadcast channel: game loop sends encoded binary frames, WebSocket server forwards to clients
-    let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
-
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
 
@@ -129,7 +127,6 @@ async fn main() {
     let ws_handle = tokio::spawn(network::run_websocket_server(
         args.port,
         Arc::clone(&shared_inbound),
-        broadcast_tx.clone(),
         tls_acceptor,
     ));
 
@@ -158,7 +155,6 @@ async fn main() {
         Arc::clone(&shared_inbound),
         Arc::clone(&shared_coord_events),
         Arc::clone(&udp_socket),
-        broadcast_tx,
         Arc::clone(&metrics_collector),
         Arc::clone(&entity_count_atomic),
     ));

@@ -1,14 +1,22 @@
 # Mesh Architect Roadmap
 
-Last updated: 2026-04-12
+Last updated: 2026-04-13
 
 ## Active
 
-### 001: Bevy ECS Migration
+### 002: Delta Compression for Server-to-Client Snapshots
 **Status:** Designed, ready for implementation
+**Design:** `designs/002-delta-compression.md`
+**Work Items:** `work-items/002-delta-compression.md`
+**Summary:** Replace full entity snapshots with per-client delta frames. Tracks per-client baselines, computes diffs (new/changed/removed entities), sends only changes. Client sends tick ACKs. Periodic full snapshots as safety net. Prerequisite: per-entity interpolation timestamps to fix the previous delta compression failure. 10 work items across 4 phases, estimated 15-22 hours. Replaces the broadcast channel with per-client mpsc channels.
+
+## Completed
+
+### 001: Bevy ECS Migration
+**Status:** Implemented
 **Design:** `designs/001-bevy-ecs-migration.md`
 **Work Items:** `work-items/001-bevy-ecs-migration.md`
-**Summary:** Replace HashMap-based entity storage and hand-rolled game loop with bevy_ecs. Introduces component decomposition (Position, Velocity, EntityKind, etc.), system functions for each simulation phase, ordered schedules, and an async-to-ECS bridge for the tokio runtime. 8 work items, estimated 14-20 hours.
+**Summary:** Replaced HashMap-based entity storage and hand-rolled game loop with bevy_ecs. Component decomposition, system functions for each simulation phase, ordered schedules, async-to-ECS bridge.
 
 ## Planned
 
@@ -17,14 +25,9 @@ Last updated: 2026-04-12
 - Player persistence (design exists in `docs/player-persistence-design.md`, needs work items)
 - Peer health monitoring
 - Interest management (infrastructure exists but disabled, needs redesign for ECS)
-- Delta compression (infrastructure exists but disabled, needs redesign for ECS)
 - Shadow extrapolation
 - Smart rebalancing
 - Graceful degradation
 - Horizontal scaling
 - Security hardening
 - Observability improvements
-
-## Completed
-
-(None yet.)

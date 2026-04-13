@@ -1,15 +1,20 @@
 # Mesh Auditor Findings Index
 
-Audit of the Bevy ECS migration (sim-server HashMap -> bevy_ecs 0.18).
+## Audit 1: Bevy ECS Migration
 Audited: 2026-04-12
-
-## Summary
 
 17 findings across 7 categories. 1 critical, 4 high, 8 medium, 2 low.
 
-The most urgent issue is fire-and-forget authority transfers (#002), which can permanently destroy entities on UDP packet loss. The async-to-ECS bridge (#001, #003) and the despawn-during-iteration pattern (#007) are high-severity issues that should be addressed before production deployment.
+## Audit 2: Delta Compression Feature
+Audited: 2026-04-13
 
-## Findings by Severity
+10 new findings (018-027). 2 high, 6 medium, 2 low.
+
+The most urgent delta compression issue is baseline drift on dropped frames (#018), which causes entities to become invisible to clients for up to 5 seconds. The ghost entity problem (#023) is a direct consequence. The unused ACK infrastructure (#021) is the path to a proper fix.
+
+---
+
+## All Findings by Severity
 
 | # | Severity | Category | Title | Effort |
 |---|----------|----------|-------|--------|
@@ -19,6 +24,8 @@ The most urgent issue is fire-and-forget authority transfers (#002), which can p
 | [004](004-entity-lookup-desync-risk.md) | high | race-condition | EntityLookup can desync from ECS world | small |
 | [007](007-drain-despawns-during-iteration.md) | high | race-condition | Drain system despawns entities while iterating over handles | small |
 | [013](013-udp-send-blocks-game-loop.md) | high | bottleneck | Async UDP sends block the game loop tick | medium |
+| [018](018-baseline-drift-on-dropped-frames.md) | high | data-loss | Server baseline advances even when client frame is dropped | small |
+| [023](023-client-delta-removal-vs-snapshot-entity-set-race.md) | high | data-loss | Client delta path does not remove ghost entities from baseline drift | small |
 | [005](005-client-snapshot-double-iteration.md) | medium | bottleneck | Client snapshot system iterates queries three times | small |
 | [006](006-replication-clones-entire-entity-vec.md) | medium | bottleneck | Replication clones entire entity Vec every tick | small |
 | [008](008-outbound-vecs-never-shrink.md) | medium | scalability | Outbound Vec buffers grow but never shrink | small |
@@ -28,49 +35,48 @@ The most urgent issue is fire-and-forget authority transfers (#002), which can p
 | [012](012-rebalance-directive-last-writer-wins.md) | medium | data-loss | Multiple rebalance directives overwrite -- only last survives | small |
 | [015](015-outbound-clears-missing-from-tick-loop.md) | medium | race-condition | Outbound resources not cleared between ticks | small |
 | [016](016-bincode-serialization-cost-at-scale.md) | medium | scalability | Bincode serialization cost scales linearly per-peer per-tick | medium |
+| [019](019-per-client-memory-unbounded-baselines.md) | medium | scalability | Per-client baseline HashMaps grow unbounded with entity count | small |
+| [020](020-delta-computation-cost-per-client.md) | medium | bottleneck | Delta computation runs O(N*E) per tick across all clients | medium |
+| [021](021-ack-not-used-for-baseline-confirmation.md) | medium | protocol | Client tick ACKs are stored but never consulted | medium |
+| [022](022-change-threshold-suppresses-small-movements.md) | medium | protocol | 0.01 threshold uses per-component comparison, may suppress diagonal motion | small |
+| [024](024-full-snapshot-clone-per-client.md) | medium | bottleneck | Full snapshot binary frame cloned N times for N clients | small |
+| [026](026-registration-snapshot-race.md) | medium | race-condition | Client registration and first snapshot race across tick boundary | medium |
+| [027](027-npc-simulation-changes-defeat-delta.md) | medium | bottleneck | NPC movement every tick defeats delta compression savings | small |
 | [014](014-tick-counter-u64-not-synchronized.md) | low | protocol | Tick counter u64 not synchronized across servers | small |
 | [017](017-behavioral-divergence-rebalance-ignores-entity-ids.md) | low | protocol | Rebalance directive entity_ids field ignored | small |
+| [025](025-ack-parsing-no-validation.md) | low | protocol | Binary ACK parsing accepts any tick value without validation | small |
 
-## Findings by Category
+## Delta Compression Findings Detail
 
-### Data Loss (3)
-- **#002** (critical) Authority transfer fire-and-forget -- entities permanently lost on UDP drop
-- **#001** (high) Async bridge overwrites unconsumed data
-- **#012** (medium) Rebalance directives overwrite each other
+### Data Loss (2)
+- **#018** (high) Baseline drift on dropped frames -- server thinks client has entities it never received
+- **#023** (high) Ghost entities on client from baseline/removal mismatch (consequence of #018)
 
-### Bottleneck (5)
-- **#003** (high) Tokio mutex in tick loop
-- **#013** (high) UDP sends block game loop
-- **#005** (medium) Triple query iteration in client snapshot
-- **#006** (medium) Unnecessary Vec clone in replication
-- **#010** (medium) Exclusive systems prevent parallelism
+### Bottleneck (3)
+- **#020** (medium) O(N*E) delta computation duplicated across clients with identical views
+- **#024** (medium) Full snapshot Vec<u8> cloned per client instead of shared
+- **#027** (medium) All NPCs move every tick, making every delta as large as a full snapshot
 
-### Race Condition (3)
-- **#004** (high) EntityLookup desync risk
-- **#007** (high) Despawn during iteration
-- **#015** (medium) Outbound resources not cleared between ticks
+### Scalability (1)
+- **#019** (medium) Per-client baseline HashMaps: O(N*E) memory, never shrink
 
-### Scalability (2)
-- **#008** (medium) Vec buffers never shrink
-- **#016** (medium) Bincode serialization cost at scale (replication stops at ~1200 entities)
+### Protocol (3)
+- **#021** (medium) ACK infrastructure built but unused -- baseline advances optimistically
+- **#022** (medium) Change threshold per-component instead of per-vector
+- **#025** (low) ACK parsing has no tick validation
 
-### Operational (2)
-- **#009** (medium) process::exit prevents graceful shutdown
-- **#011** (medium) No client input rate limiting
+### Race Condition (1)
+- **#026** (medium) Client sees PlayerAssigned before player entity exists in first snapshot
 
-### Protocol (2)
-- **#014** (low) Tick counter drift across servers
-- **#017** (low) entity_ids field ignored in rebalance
+## Recommended Fix Order (Delta Compression)
 
-## Recommended Fix Order
-
-1. **#002** -- Authority transfer ack protocol (prevents permanent entity loss)
-2. **#001** -- Change swap to extend (one-line fix, prevents data loss)
-3. **#003** -- Replace tokio::sync::Mutex with std::sync::Mutex (reduces lock contention)
-4. **#007** -- Separate collect/despawn phases (prevents potential panics)
-5. **#011** -- Add client input rate limiting (prevents abuse)
-6. **#006** -- Remove unnecessary clone (one-line fix)
-7. **#005** -- Remove double iteration and HashSet (simple refactor)
-8. **#009** -- Replace process::exit with break (simple fix)
-9. **#013** -- Move UDP sends to separate task (medium effort, significant benefit)
-10. Everything else (low urgency)
+1. **#018** -- Move baseline update to after successful try_send (prevents data loss, small effort)
+2. **#023** -- Client-side staleness check as defense-in-depth (small effort, pairs with #018)
+3. **#024** -- Use Arc<Vec<u8>> for shared full snapshot frames (small effort, reduces allocations)
+4. **#021** -- Wire ACKs into baseline management OR remove dead code (medium effort, completes the protocol)
+5. **#020** -- Share delta computation across clients with identical views (medium effort)
+6. **#027** -- Add heuristic to skip delta when >80% entities changed (small effort)
+7. **#022** -- Switch to vector distance comparison (small effort)
+8. **#019** -- Reuse baseline HashMap on full snapshot (small effort)
+9. **#025** -- Add ACK tick validation (small effort, only matters after #021)
+10. **#026** -- Accept one-tick gap or defer PlayerAssigned (medium effort, low priority)
