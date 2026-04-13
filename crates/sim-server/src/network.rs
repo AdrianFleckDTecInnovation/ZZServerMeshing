@@ -327,4 +327,73 @@ mod tests {
         let seq = u32::from_le_bytes(buf[43..47].try_into().unwrap());
         assert_eq!(seq, 0);
     }
+
+    // -- encoding edge cases / robustness --
+
+    #[test]
+    fn encode_entity_extreme_positions() {
+        let mut e = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        e.position = Vec3::new(f32::MAX, f32::MIN, -0.0);
+        let mut buf = Vec::new();
+        encode_entity(&mut buf, &e);
+        let px = f32::from_le_bytes(buf[16..20].try_into().unwrap());
+        let py = f32::from_le_bytes(buf[20..24].try_into().unwrap());
+        assert_eq!(px, f32::MAX);
+        assert_eq!(py, f32::MIN);
+    }
+
+    #[test]
+    fn encode_entity_max_authority() {
+        let mut e = EntityState::new_npc(Vec3::ZERO, ServerId(u16::MAX));
+        let mut buf = Vec::new();
+        encode_entity(&mut buf, &e);
+        let auth = u16::from_le_bytes(buf[41..43].try_into().unwrap());
+        assert_eq!(auth, u16::MAX);
+    }
+
+    #[test]
+    fn encode_entity_max_seq() {
+        let mut e = EntityState::new_player(Vec3::ZERO, ServerId(1));
+        e.last_input_seq = u32::MAX;
+        let mut buf = Vec::new();
+        encode_entity(&mut buf, &e);
+        let seq = u32::from_le_bytes(buf[43..47].try_into().unwrap());
+        assert_eq!(seq, u32::MAX);
+    }
+
+    #[test]
+    fn encode_snapshot_100_entities_size() {
+        let entities: Vec<EntityState> = (0..100)
+            .map(|i| {
+                let mut e = EntityState::new_npc(Vec3::new(i as f32, 0.0, 0.0), ServerId(1));
+                e.last_input_seq = i;
+                e
+            })
+            .collect();
+        let buf = encode_binary_snapshot(999, &entities);
+        assert_eq!(buf.len(), 27 + 100 * 47);
+        // Verify entity count in header
+        assert_eq!(u32::from_le_bytes(buf[9..13].try_into().unwrap()), 100);
+    }
+
+    #[test]
+    fn encode_snapshot_preserves_all_entity_uuids() {
+        let entities: Vec<EntityState> = (0..10)
+            .map(|_| EntityState::new_npc(Vec3::ZERO, ServerId(1)))
+            .collect();
+        let buf = encode_binary_snapshot(1, &entities);
+        for (i, e) in entities.iter().enumerate() {
+            let offset = 27 + i * 47;
+            assert_eq!(&buf[offset..offset + 16], e.id.0.as_bytes());
+        }
+    }
+
+    #[test]
+    fn encode_delta_empty() {
+        let buf = encode_binary_delta(1, &[], &[]);
+        assert_eq!(buf.len(), 31); // header only
+        assert_eq!(buf[0], 0x02);
+        assert_eq!(u32::from_le_bytes(buf[9..13].try_into().unwrap()), 0); // updates
+        assert_eq!(u32::from_le_bytes(buf[13..17].try_into().unwrap()), 0); // removals
+    }
 }

@@ -21,6 +21,9 @@ import { meshVerify } from './scenarios/mesh-verify.js';
 import { inputSeqEcho } from './scenarios/input-seq-echo.js';
 import { peerReplication } from './scenarios/peer-replication.js';
 import { forwardedInput } from './scenarios/forwarded-input.js';
+import { multiClient } from './scenarios/multi-client.js';
+import { entityLifecycle } from './scenarios/entity-lifecycle.js';
+import { authorityTransfer } from './scenarios/authority-transfer.js';
 
 const ALL_SCENARIOS: Scenario[] = [
   spawnBurst,
@@ -34,6 +37,9 @@ const ALL_SCENARIOS: Scenario[] = [
   inputSeqEcho,
   peerReplication,
   forwardedInput,
+  multiClient,
+  entityLifecycle,
+  authorityTransfer,
 ];
 
 // ── CLI ──
@@ -300,6 +306,60 @@ async function connectServer(url: string): Promise<WebSocket> {
   });
 }
 
+async function cleanupSpawnedEntities(
+  baselineIds: Set<string>,
+  getSnapshot: () => { tick: number; entities: { id: string; entity_type: string }[] } | null,
+) {
+  const snap = getSnapshot();
+  if (!snap) return 0;
+
+  const toRemove = snap.entities.filter(e => !baselineIds.has(e.id) && e.entity_type === 'Npc');
+  if (toRemove.length === 0) return 0;
+
+  // Get all server addresses from coordinator so we can send RemoveEntity to each
+  // (entities may have been rebalanced to other servers)
+  const serverUrls: string[] = [];
+  try {
+    const resp = await fetch('http://localhost:7871/servers');
+    const data: { servers: { host: string; ws_port: number }[] } = await resp.json();
+    for (const s of data.servers) {
+      serverUrls.push(`ws://${s.host}:${s.ws_port}`);
+    }
+  } catch {
+    // Can't reach coordinator — just use the local connection
+  }
+
+  // Connect to each server and send RemoveEntity for all extra NPCs
+  const connections: WebSocket[] = [];
+  for (const url of serverUrls) {
+    try {
+      const ws = await new Promise<WebSocket>((resolve, reject) => {
+        const w = new WebSocket(url);
+        w.on('open', () => resolve(w));
+        w.on('error', reject);
+        setTimeout(() => reject(new Error('timeout')), 2000);
+      });
+      connections.push(ws);
+    } catch {}
+  }
+
+  for (const e of toRemove) {
+    const msg = JSON.stringify({ type: 'RemoveEntity', entity_id: e.id });
+    for (const ws of connections) {
+      try { ws.send(msg); } catch {}
+    }
+  }
+
+  // Wait for removals to propagate
+  await new Promise(r => setTimeout(r, 1000));
+
+  for (const ws of connections) {
+    try { ws.close(); } catch {}
+  }
+
+  return toRemove.length;
+}
+
 async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<ScenarioResult> {
   const ws = await connectServer(config.serverUrl);
   const ctx = createContext(ws, scenario.name, config);
@@ -307,15 +367,17 @@ async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<Sc
   // Wait for first snapshot to establish baseline
   await ctx.waitForTicks(1);
 
+  // Record baseline entity IDs so we can clean up after the scenario
+  const baselineSnap = ctx.getLatestSnapshot();
+  const baselineIds = new Set(baselineSnap?.entities.map(e => e.id) ?? []);
+
   const start = Date.now();
+  let result: ScenarioResult;
   try {
-    const result = await scenario.run(ctx);
+    result = await scenario.run(ctx);
     result.durationMs = Date.now() - start;
-    ws.close();
-    return result;
   } catch (err: any) {
-    ws.close();
-    return {
+    result = {
       name: scenario.name,
       status: 'fail',
       summary: `Exception: ${err.message}`,
@@ -323,6 +385,15 @@ async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<Sc
       durationMs: Date.now() - start,
     };
   }
+
+  // Clean up entities spawned during the scenario
+  const removed = await cleanupSpawnedEntities(baselineIds, ctx.getLatestSnapshot.bind(ctx));
+  if (removed > 0) {
+    console.log(color.dim(`  [cleanup] removed ${removed} entities spawned during ${scenario.name}`));
+  }
+
+  ws.close();
+  return result;
 }
 
 async function main() {

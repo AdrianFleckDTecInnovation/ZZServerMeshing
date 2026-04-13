@@ -98,6 +98,20 @@ curl localhost:8101/metrics | jq .      # server 1 metrics
 | rebalance-storm | 300 entities on one server, convergence |
 | spatial-hotspot | 200 clustered entities, UDP packet stress |
 | input-latency | MoveInput round-trip p50/p95/p99 |
+| mesh-verify | Binary frames, entity fields, multi-server visibility, tick monotonicity |
+| input-seq-echo | Prediction protocol: send seq 1-5, verify last_input_seq echoed |
+| peer-replication | Shadow counts, peer connectivity, cross-server visibility |
+| forwarded-input | MoveInput for shadow entity forwarded to authority and processed |
+| multi-client | Two clients on different servers see consistent world |
+| entity-lifecycle | Spawn → move → verify authority → remove |
+| authority-transfer | Overload server, verify rebalance transfers entities |
+
+### Scene Tests
+Deep mesh verification tests — run against a live cluster:
+```sh
+./test-scene.sh                        # start cluster + run scene tests
+./test-scene.sh --no-start             # use existing cluster
+```
 
 ### Docker (Pi Zero W2 simulation)
 Each container is limited to 1.0 CPU / 512MB RAM to simulate Raspberry Pi Zero W2 hardware.
@@ -107,6 +121,50 @@ docker compose -f docker-compose.test.yml down          # stop
 ```
 
 ## Agents
+
+### @mesh-dev
+Specialized agent for developing server mesh netcode. Use for any work on sim-server game loop, entity replication, authority transfers, binary protocol, prediction, peer communication, or WebSocket server code. Has full context on the UNO Q boards, testing workflow, protocol formats, and all key constants. Automatically tests on the boards.
+
+Use it for:
+- "Add a health field to EntityState"
+- "Implement peer health monitoring"
+- "Fix the authority transfer to preserve velocity"
+- "Add UDP chunking for large entity counts"
+
+Defined in `.claude/agents/mesh-dev.md`. Auto-triggered by `.claude/rules/mesh-dev-agent.md`.
+
+### @mesh-architect
+Architects the mesh networking system. Designs features, breaks them into implementable work items, and maintains the technical roadmap. Produces design docs and ordered work item lists in `docs/mesh-architect/` that mesh-dev follows.
+
+Use it for:
+- "Design peer health monitoring"
+- "What should we build next?"
+- "Plan out interest management properly"
+- "Break down player persistence into tasks"
+
+Defined in `.claude/agents/mesh-architect.md`. Writes to `docs/mesh-architect/`.
+
+### @mesh-tester
+Tests and verifies the mesh. Writes unit tests, integration tests, and scene tests. Runs them against the UNO Q boards. Finds coverage gaps and fills them. Reads the codebase thoroughly before writing tests.
+
+Use it for:
+- "Add tests for the replication code"
+- "Run the test suite on the boards"
+- "Find what's not tested"
+- "Write a scene test for crash recovery"
+
+Defined in `.claude/agents/mesh-tester.md`.
+
+### @mesh-auditor
+Audits the mesh codebase for bottlenecks, single points of failure, race conditions, data loss risks, and scalability limits. Writes finding reports to `docs/mesh-auditor/` that mesh-dev can implement against. Each finding has severity, evidence, impact, and a recommended fix.
+
+Use it for:
+- "Audit the mesh for problems"
+- "What breaks at 10,000 entities?"
+- "Find race conditions in replication"
+- "Are there data loss risks in authority transfers?"
+
+Defined in `.claude/agents/mesh-auditor.md`. Writes to `docs/mesh-auditor/`.
 
 ### @codebase-oracle
 Read-only agent that answers questions about how the codebase works. Treats code and tests as the ultimate source of truth — reads actual implementations before answering, cites `file:line`, and flags doc/code discrepancies. Use it for:
@@ -138,6 +196,17 @@ cd mcp-oracle && npm install && npm run build
 ```
 
 Then use `mcp__server-meshing-oracle__ask_server_meshing` from that project, or just ask about server meshing and Claude will route to it.
+
+## Commands
+
+### `/develop <feature>`
+Full development pipeline. Clarifies requirements, architects the feature, presents the design for approval, then implements → tests → audits using the mesh agent team. Example:
+```
+/develop Add peer health monitoring so servers detect struggling peers
+```
+
+### `/ship`
+Ship the current branch to main — commit, PR, merge, new branch.
 
 ## Conventions
 - Rust: standard formatting (`cargo fmt`), no unsafe unless justified

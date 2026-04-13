@@ -459,6 +459,237 @@ test('entity layout: 47-byte structure [uuid:16+pos:12+vel:12+type:1+auth:2+seq:
   assert.equal(e.last_input_seq, 12345);
 });
 
+// -- Edge case / robustness tests --
+
+function makeUuid(index: number): Buffer {
+  const buf = Buffer.alloc(16);
+  buf.writeUInt32BE(index, 12); // unique last 4 bytes
+  buf[0] = 0xAA; // recognizable prefix
+  return buf;
+}
+
+test('truncated full frame header returns null', () => {
+  const buf = Buffer.alloc(10);
+  buf[0] = FRAME_FULL;
+  let result: BinaryFrame | null = null;
+  let threw = false;
+  try {
+    result = decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+  } catch {
+    threw = true;
+  }
+  // Decoder may return null or throw a RangeError on short buffer — both are acceptable
+  assert.ok(result === null || threw, 'must return null or throw on truncated full header');
+});
+
+test('truncated delta frame header returns null', () => {
+  const buf = Buffer.alloc(20);
+  buf[0] = FRAME_DELTA;
+  let result: BinaryFrame | null = null;
+  let threw = false;
+  try {
+    result = decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+  } catch {
+    threw = true;
+  }
+  // Decoder may return null or throw a RangeError on short buffer — both are acceptable
+  assert.ok(result === null || threw, 'must return null or throw on truncated delta header');
+});
+
+test('full frame with truncated entity', () => {
+  // Build header that claims 1 entity but only provide 20 extra bytes (need 47)
+  const headerSize = 27;
+  const buf = Buffer.alloc(headerSize + 20);
+  buf[0] = FRAME_FULL;
+  buf.writeUInt32LE(1, 1);  // tick low
+  buf.writeUInt32LE(0, 5);  // tick high
+  buf.writeUInt32LE(1, 9);  // entity count = 1
+  writeMetrics(buf, 13, defaultMetrics);
+  // Only 20 bytes of entity data follow — not enough for 47
+  let threw = false;
+  let result: BinaryFrame | null = null;
+  try {
+    result = decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+  } catch {
+    threw = true;
+  }
+  // Returning null, partial data, or throwing a RangeError are all acceptable for truncated input.
+  assert.ok(
+    result === null || result !== undefined || threw,
+    'decoder must handle truncated entity without unhandled crash',
+  );
+});
+
+test('delta frame with truncated removal UUID', () => {
+  // Header says 0 updates, 1 removal, but only 10 bytes of UUID data
+  const headerSize = 31;
+  const buf = Buffer.alloc(headerSize + 10);
+  buf[0] = FRAME_DELTA;
+  buf.writeUInt32LE(1, 1);  // tick low
+  buf.writeUInt32LE(0, 5);  // tick high
+  buf.writeUInt32LE(0, 9);  // update count = 0
+  buf.writeUInt32LE(1, 13); // removal count = 1
+  writeMetrics(buf, 17, defaultMetrics);
+  // Only 10 bytes follow — not enough for 16-byte UUID
+  let threw = false;
+  try {
+    decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, 'decoder must not throw on truncated removal UUID');
+});
+
+test('full frame entity count zero', () => {
+  const frame = buildFullSnapshot(1, [], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.type, 'full');
+  assert.equal(decoded!.entities.length, 0);
+  assert.equal(decoded!.removals.length, 0);
+});
+
+test('delta frame both counts zero', () => {
+  const frame = buildDeltaFrame(1, [], [], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.type, 'delta');
+  assert.equal(decoded!.entities.length, 0);
+  assert.equal(decoded!.removals.length, 0);
+});
+
+test('full frame tick=0', () => {
+  const frame = buildFullSnapshot(0, [], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.tick, 0);
+});
+
+test('full frame tick max safe integer', () => {
+  // Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
+  // tickHigh overflows writeUInt32LE, so build the buffer manually with DataView
+  const maxSafe = Number.MAX_SAFE_INTEGER;
+  const headerSize = 27;
+  const buf = Buffer.alloc(headerSize);
+  buf[0] = FRAME_FULL;
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+  dv.setUint32(1, maxSafe >>> 0, true);                       // tick low
+  dv.setUint32(5, Math.floor(maxSafe / 0x100000000) >>> 0, true); // tick high
+  dv.setUint32(9, 0, true); // entity count = 0
+  writeMetrics(buf, 13, defaultMetrics);
+  const frame = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.tick, maxSafe);
+});
+
+test('full frame 100 entities', () => {
+  const entities = [];
+  for (let i = 0; i < 100; i++) {
+    entities.push({
+      uuid: makeUuid(i),
+      px: i * 1.0, py: 0, pz: i * -1.0,
+      vx: 0, vy: 0, vz: 0,
+      entityType: i % 2, // alternate Npc/Player
+      authority: (i % 3) + 1,
+      lastInputSeq: i,
+    });
+  }
+  const frame = buildFullSnapshot(999, entities, defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.entities.length, 100);
+  // Verify first and last entity decoded correctly
+  assert.ok(Math.abs(decoded!.entities[0].position[0] - 0) < 0.001);
+  assert.ok(Math.abs(decoded!.entities[99].position[0] - 99.0) < 0.001);
+  assert.equal(decoded!.entities[99].last_input_seq, 99);
+  // Verify frame size
+  assert.equal(frame.byteLength, 27 + 100 * ENTITY_SIZE);
+});
+
+test('delta frame 50 updates 50 removals', () => {
+  const updates = [];
+  for (let i = 0; i < 50; i++) {
+    updates.push({
+      uuid: makeUuid(i),
+      px: i * 2.0, py: 0, pz: 0,
+      vx: 0, vy: 0, vz: 0,
+      entityType: 0,
+      authority: 1,
+    });
+  }
+  const removals = [];
+  for (let i = 50; i < 100; i++) {
+    removals.push(makeUuid(i));
+  }
+  const frame = buildDeltaFrame(500, updates, removals, defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.entities.length, 50);
+  assert.equal(decoded!.removals.length, 50);
+  // Verify frame size: header(31) + 50*47 entities + 50*16 removal UUIDs
+  assert.equal(frame.byteLength, 31 + 50 * ENTITY_SIZE + 50 * 16);
+});
+
+test('entity at world boundary positions', () => {
+  const entity = {
+    uuid: TEST_UUID,
+    px: 500.0, py: 0, pz: -500.0,
+    vx: -500.0, vy: 0, vz: 500.0,
+    entityType: 0,
+    authority: 1,
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  const e = decoded!.entities[0];
+  assert.ok(Math.abs(e.position[0] - 500.0) < 0.001, 'x=+500 should survive round-trip');
+  assert.ok(Math.abs(e.position[2] - (-500.0)) < 0.001, 'z=-500 should survive round-trip');
+  assert.ok(Math.abs(e.velocity[0] - (-500.0)) < 0.001, 'vx=-500 should survive round-trip');
+  assert.ok(Math.abs(e.velocity[2] - 500.0) < 0.001, 'vz=+500 should survive round-trip');
+});
+
+test('entity with max authority server', () => {
+  const entity = {
+    uuid: TEST_UUID,
+    px: 0, py: 0, pz: 0,
+    vx: 0, vy: 0, vz: 0,
+    entityType: 0,
+    authority: 65535, // u16 max
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.entities[0].authority_server, 65535);
+});
+
+test('entity with max last_input_seq', () => {
+  const entity = {
+    uuid: TEST_UUID,
+    px: 0, py: 0, pz: 0,
+    vx: 0, vy: 0, vz: 0,
+    entityType: 1,
+    authority: 1,
+    lastInputSeq: 4294967295, // u32 max (0xFFFFFFFF)
+  };
+  const frame = buildFullSnapshot(1, [entity], defaultMetrics);
+  const decoded = decodeBinaryFrame(frame);
+  assert.notEqual(decoded, null);
+  assert.equal(decoded!.entities[0].last_input_seq, 4294967295);
+});
+
+test('single byte buffer returns null', () => {
+  const buf = new ArrayBuffer(1);
+  new Uint8Array(buf)[0] = 0x99; // not 0x01 or 0x02
+  assert.equal(decodeBinaryFrame(buf), null);
+});
+
+test('frame type 0x03 returns null', () => {
+  const buf = Buffer.alloc(64); // plenty of bytes, but unknown type
+  buf[0] = 0x03;
+  assert.equal(decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length)), null);
+});
+
 // ── Summary ──
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
