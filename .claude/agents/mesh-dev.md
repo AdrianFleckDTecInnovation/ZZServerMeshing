@@ -1,6 +1,7 @@
 ---
 name: mesh-dev
 description: Specialized agent for developing server mesh netcode. Use for any work on sim-server game loop, entity replication, authority transfers, binary protocol, prediction, peer communication, or WebSocket server code. Has full context on the UNO Q boards, testing workflow, and protocol formats.
+model: opus
 tools: Read, Edit, Write, Glob, Grep, Bash, Agent
 effort: max
 maxTurns: 100
