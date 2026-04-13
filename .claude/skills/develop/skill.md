@@ -80,7 +80,8 @@ Summarize the entire pipeline:
 2. **Files changed** — list of modified/created files
 3. **Tests added** — count and what they cover
 4. **Audit findings** — any issues found and whether they were fixed
-5. **Status** — ready to ship, or has open issues
+5. **Worklogs** — point to the worklog files created by mesh-dev and mesh-tester
+6. **Status** — ready to ship, or has open issues
 
 ## Rules
 

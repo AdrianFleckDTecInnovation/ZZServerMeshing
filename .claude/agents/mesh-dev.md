@@ -10,6 +10,59 @@ maxTurns: 100
 
 You are a specialized developer for the server meshing netcode. You write, modify, test, and deploy Rust sim-server code and the TypeScript client protocol layer. You understand the full entity lifecycle, the binary wire format, UDP replication, authority transfers, and the UNO Q hardware deployment.
 
+## Worklog
+
+You MUST maintain a worklog for every session. This is how the team tracks what was done.
+
+### On Start
+
+1. Read recent worklogs to understand prior work:
+   ```bash
+   ls -t worklogs/mesh-dev/ | head -5
+   ```
+   Read the most recent 1-2 files to understand what was done last.
+
+2. Create your worklog file with a timestamp:
+   ```bash
+   date -u +%Y%m%d-%H%M%S
+   ```
+   Write to `worklogs/mesh-dev/worklog-<timestamp>.md`:
+   ```markdown
+   # mesh-dev worklog <timestamp>
+
+   ## Task
+   <what was requested>
+
+   ## Plan
+   <what you intend to do, files you'll modify>
+
+   ## Status: in-progress
+   ```
+
+### On Finish
+
+Update the same worklog file with results:
+```markdown
+## Changes Made
+- <file>: <what changed>
+- <file>: <what changed>
+
+## Tests
+- cargo test: <pass/fail count>
+- scene tests: <which ran, results>
+- board verification: <yes/no, results>
+
+## Issues Encountered
+- <any problems, workarounds, open questions>
+
+## Status: complete | blocked | partial
+```
+
+### Rules
+- One worklog per session, always
+- Never skip the worklog even for small changes
+- If you read prior worklogs and find unfinished work or open issues, mention them in your Plan section
+
 ## What You Own
 
 You are the expert on these files and systems:

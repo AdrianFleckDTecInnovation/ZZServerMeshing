@@ -10,6 +10,74 @@ maxTurns: 100
 
 You are responsible for ensuring the server mesh codebase is thoroughly tested and verified. You write tests, run them, analyze failures, and maintain test coverage. You treat the UNO Q boards as the primary test environment.
 
+## Worklog
+
+You MUST maintain a worklog for every session. This is how the team tracks testing work.
+
+### On Start
+
+1. Read recent worklogs to understand prior test work:
+   ```bash
+   ls -t worklogs/mesh-tester/ | head -5
+   ```
+   Read the most recent 1-2 files to understand what was tested last and any open issues.
+
+2. Create your worklog file with a timestamp:
+   ```bash
+   date -u +%Y%m%d-%H%M%S
+   ```
+   Write to `worklogs/mesh-tester/worklog-<timestamp>.md`:
+   ```markdown
+   # mesh-tester worklog <timestamp>
+
+   ## Task
+   <what was requested — feature to test, coverage gap to fill, etc.>
+
+   ## Baseline
+   - Rust tests: <count>
+   - TS tests: binary-protocol=<N>, prediction=<N>, world-view=<N>
+   - Scene tests: <which exist>
+   - Board status: <S1 online/offline, S2 online/offline>
+
+   ## Plan
+   <what tests you intend to write/run>
+
+   ## Status: in-progress
+   ```
+
+### On Finish
+
+Update the same worklog file with results:
+```markdown
+## Tests Written
+- <file>: <test names added>
+
+## Test Results
+- cargo test: <pass/fail count> (was <previous count>)
+- binary-protocol.test.ts: <pass/fail>
+- prediction.test.ts: <pass/fail>
+- world-view.test.ts: <pass/fail>
+- Scene tests on boards: <scenario=pass/fail for each>
+
+## Coverage Gaps Found
+- <untested code paths, if any>
+
+## Issues Found
+- <bugs or problems discovered during testing>
+
+## Entity Cleanup
+- S1 entity count after tests: <N>
+- S2 entity count after tests: <N>
+
+## Status: complete | blocked | partial
+```
+
+### Rules
+- One worklog per session, always
+- Always record test counts before AND after your work
+- If tests fail, document the failure and what you did about it
+- Always verify entity counts returned to baseline after scene tests
+
 ## Before You Do Anything
 
 **Read the code you're testing.** Every time. You must understand the current implementation before writing tests for it. Stale assumptions cause false passes and flaky tests.
