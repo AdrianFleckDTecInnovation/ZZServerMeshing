@@ -96,7 +96,7 @@ When using `./start.sh`, logs are written to the project root:
 
 ## UNO Q Board Deployment
 
-To deploy on the embedded hardware mesh (3 UNO Q boards + Pi Zero W2), see [UNO Q Deployment](uno-q-deployment.md).
+To deploy on the embedded hardware mesh (3 UNO Q boards + Pi Zero W2), see [UNO Q Deployment](uno-q-deployment.md). For board specs, SSH setup, and systemd services, see [Hardware Stack](hardware-stack.md).
 
 ```bash
 ./start-unoq.sh    # cross-compile, deploy, start on boards

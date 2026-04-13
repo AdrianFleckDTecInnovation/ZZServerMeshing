@@ -2,6 +2,8 @@
 
 Deploy the server meshing prototype across 3 Arduino UNO Q boards and a Pi Zero W2 coordinator. The Mac is not required — the entire mesh runs on embedded hardware.
 
+For board specs, SSH setup, systemd service files, and first-time setup, see [Hardware Stack](hardware-stack.md).
+
 ## Hardware
 
 | Role | Device | Hostname | SSH | IP | Arch | User |
