@@ -16,9 +16,6 @@ cd ZZServerMeshing
 # Install client dependencies
 cd client && npm install && cd ..
 
-# Install gateway dependencies
-cd gateway && npm install && cd ..
-
 # Install tools dependencies (optional, for stress testing)
 cd tools && npm install && cd ..
 ```
@@ -26,7 +23,7 @@ cd tools && npm install && cd ..
 ## Run the Cluster
 
 ```bash
-# Start coordinator + 3 sim-servers + gateway + client
+# Start coordinator + 3 sim-servers + client
 ./start.sh
 
 # Or with a custom number of servers
@@ -60,35 +57,31 @@ Open http://localhost:4321 in your browser.
   - Per-server entity counts with load bars
   - Network metrics (snapshots/sec, bandwidth, rebalance events)
 
-## Stress Testing
+## Endpoints
 
-```bash
-cd tools
-
-# Spawn 200 entities at 10/sec
-npx tsx stress-test.ts ws://localhost:4322 200 10
-
-# Spawn 500 entities at 50/sec (heavier load)
-npx tsx stress-test.ts ws://localhost:4322 500 50
-```
+| Service | URL |
+|---------|-----|
+| Client | http://localhost:4321 |
+| Coordinator Dashboard | http://localhost:7871 |
+| Server Assignment | http://localhost:7871/assign |
+| S1 Metrics | http://localhost:8101/metrics |
+| S2 Metrics | http://localhost:8102/metrics |
+| S3 Metrics | http://localhost:8103/metrics |
 
 ## Manual Launch (for debugging)
 
 ```bash
 # Terminal 1: Coordinator
-cargo run -p coordinator -- --port 7870
+cargo run -p coordinator -- --port 7870 --http-port 7871
 
 # Terminal 2: Sim-server 1
-cargo run -p sim-server -- --server-id 1 --port 7878 --udp-port 9101 --coordinator 127.0.0.1:7870
+cargo run -p sim-server -- --server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 --coordinator 127.0.0.1:7870
 
 # Terminal 3: Sim-server 2
-cargo run -p sim-server -- --server-id 2 --port 7879 --udp-port 9102 --coordinator 127.0.0.1:7870
+cargo run -p sim-server -- --server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 --coordinator 127.0.0.1:7870
 
-# Terminal 4: Gateway
-cd gateway && COORDINATOR_URL=ws://127.0.0.1:7870 GATEWAY_PORT=4322 npx tsx src/index.ts
-
-# Terminal 5: Client
-cd client && npm run dev
+# Terminal 4: Client
+cd client && npx vite --port 4321
 ```
 
 ## Log Files
@@ -99,8 +92,16 @@ When using `./start.sh`, logs are written to the project root:
 |------|---------|
 | `.coordinator.log` | Coordinator |
 | `.sim-server-N.log` | Sim-server N |
-| `.gateway.log` | Gateway |
 | `.client.log` | Vite dev server |
+
+## UNO Q Board Deployment
+
+To deploy on the embedded hardware mesh (3 UNO Q boards + Pi Zero W2), see [UNO Q Deployment](uno-q-deployment.md).
+
+```bash
+./start-unoq.sh    # cross-compile, deploy, start on boards
+./stop-unoq.sh     # stop everything
+```
 
 ## Key Constants
 

@@ -49,13 +49,97 @@ cd client && npm run dev
 - Inputs for non-local entities are forwarded between peers via UDP
 - Entities color-coded by authority server in the client
 
+## Deployment Modes
+
+### Local (Mac only)
+Everything runs on the dev Mac. No TLS, plain `ws://`. WebGPU works because localhost is a secure context.
+
+```sh
+./start.sh                             # coordinator + 3 sim-servers + client
+./start.sh 5                           # 5 sim-servers instead
+./stop.sh                              # kill everything
+# Client: http://localhost:4321
+# Dashboard: http://localhost:7871
+```
+
+### UNO Q Boards (embedded hardware mesh)
+Full mesh on embedded hardware — no Mac processes required. Coordinator + client on a Pi Zero W2, sim-servers on 3 Arduino UNO Q boards. All connections use TLS (self-signed cert).
+
+| Device | Role | Host | IP |
+|--------|------|------|----|
+| zzttpi | Coordinator + client | zzttpi.local | 192.168.0.208 |
+| unoq   | Sim-server 1 | unoq.local | 192.168.0.15 |
+| unoq2  | Sim-server 2 | unoq2.local | 192.168.0.173 |
+| unoq3  | Sim-server 3 | unoq3.local | 192.168.0.86 |
+
+```sh
+./start-unoq.sh                       # cross-compile, deploy, start on boards
+./stop-unoq.sh                        # stop all
+# Client: https://192.168.0.208:7871
+# Dashboard: https://192.168.0.208:7871/dashboard
+# Board dashboards: http://<board-ip>:3000
+```
+
+Both deployments can run simultaneously — same ports, different hosts.
+
+#### Cross-compilation
+Two targets are needed:
+- `aarch64-unknown-linux-gnu` — UNO Q boards (sim-server, board-dash)
+- `armv7-unknown-linux-gnueabihf` — Pi Zero W2 (coordinator)
+
+Built via `cross` (Docker-based cross-compilation). Binaries deployed via SCP.
+
+#### TLS
+Self-signed cert generated on first run, stored in `certs/` (gitignored). Covers all board IPs via SANs. Both coordinator (HTTPS) and sim-servers (WSS) use it.
+
+To trust the cert (eliminates browser warnings):
+```sh
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/mesh-coordinator.crt
+```
+
+To regenerate (e.g., new board IP): `rm certs/mesh-coordinator.*` then run `start-unoq.sh`.
+
+#### Coordinator auto-start
+The coordinator runs as a systemd user service on zzttpi (`mesh-coordinator.service`). It starts on boot and restarts on crash. The coordinator is stateless — sim-servers reconnect automatically when it restarts.
+
+#### Connecting local client to board mesh
+```sh
+VITE_COORDINATOR_URL="https://192.168.0.208:7871" npx vite --port 4321
+```
+The Vite proxy in `vite.config.ts` forwards `/assign`, `/servers`, `/dashboard` to the coordinator URL (defaults to `http://localhost:7871` for local use).
+
+### Coordinator HTTP API
+The coordinator serves these endpoints on its HTTP port (7871):
+
+| Endpoint | Description |
+|----------|-------------|
+| `/assign` | Returns `{"ws_url":"ws[s]://..."}` for the least-loaded server |
+| `/servers` | Full server list with entity counts, ports, and hosts |
+| `/dashboard` | Live HTML dashboard with gauges and phase bars |
+| `/` | Client app (when `--static-dir` is set), otherwise redirects to dashboard |
+
+#### Coordinator CLI flags
+| Flag | Description |
+|------|-------------|
+| `--port` | WebSocket port for sim-server connections (default: 7870) |
+| `--http-port` | HTTP(S) port for assignment API and dashboard (default: 7871) |
+| `--static-dir` | Directory to serve client files from (e.g., built Vite output) |
+| `--tls-cert` | Path to TLS certificate file (PEM) |
+| `--tls-key` | Path to TLS private key file (PEM) |
+
+#### Sim-server CLI flags (TLS)
+| Flag | Description |
+|------|-------------|
+| `--tls-cert` | Path to TLS certificate file (PEM) — enables WSS |
+| `--tls-key` | Path to TLS private key file (PEM) |
+
+When TLS is enabled, the sim-server registers with `tls: true` and the coordinator returns `wss://` URLs in `/assign`.
+
 ## Testing Workflow
 
 Two-stage verification for all changes:
 1. **Local cluster first** — quick smoke test on the dev Mac (`./start.sh` + `./test.sh`)
-2. **UNO Q cluster second** — real deployment to the two Arduino UNO Q boards (`./start-unoq.sh`)
-
-The UNO Q boards are the primary testing ground for the mesh. They run the sim-servers on real separate hardware (unoq.local = S1, unoq2.local = S2) with the coordinator on the Mac.
+2. **UNO Q cluster second** — real deployment to the boards (`./start-unoq.sh`)
 
 ```sh
 # Stage 1: Local verification
@@ -65,8 +149,6 @@ The UNO Q boards are the primary testing ground for the mesh. They run the sim-s
 
 # Stage 2: UNO Q verification
 ./start-unoq.sh                       # cross-compile, deploy, start on boards
-# Open http://unoq.local:8101/ and http://unoq2.local:8102/ for dashboards
-# Open http://localhost:7871/ for coordinator overview
 ./stop-unoq.sh
 ```
 

@@ -14,6 +14,7 @@ pub async fn run_coordinator_client(
     coord_events: Arc<SharedCoordEvents>,
     advertise_host: Option<String>,
     entity_count: Arc<AtomicU32>,
+    tls: bool,
 ) {
     loop {
         tracing::info!("Connecting to coordinator at {coordinator_addr}...");
@@ -37,6 +38,7 @@ pub async fn run_coordinator_client(
             udp_port,
             ws_port,
             host: advertise_host.clone(),
+            tls,
         };
         if let Ok(json) = serde_json::to_string(&reg) {
             let _ = ws_sink.send(Message::Text(json.into())).await;

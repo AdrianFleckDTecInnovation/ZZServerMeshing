@@ -2,27 +2,38 @@
 
 API reference for the game servers running on the UNO Q boards. Use this to build dashboards, monitoring tools, or game clients that talk to the mesh servers.
 
-## The Boards
+See also: [Coordinator API Reference](coordinator-api.md) for the coordinator's HTTP API and CLI flags.
 
-| Board | Hostname | IP | Game Server | Metrics | Dashboard |
-|---|---|---|---|---|---|
-| UNO Q #1 | unoq.local | 192.168.0.15 | S1 | http://192.168.0.15:8101 | http://192.168.0.15:3000 |
-| UNO Q #2 | unoq2.local | 192.168.0.173 | S2 | http://192.168.0.173:8102 | http://192.168.0.173:3000 |
+## The Mesh
+
+| Device | Hostname | IP | Role | Ports |
+|---|---|---|---|---|
+| Pi Zero W2 | zzttpi.local | 192.168.0.208 | Coordinator + Client | ws:7870, https:7871 |
+| UNO Q #1 | unoq.local | 192.168.0.15 | Sim-server S1 | wss:7878, udp:9101, metrics:8101, dash:3000 |
+| UNO Q #2 | unoq2.local | 192.168.0.173 | Sim-server S2 | wss:7879, udp:9102, metrics:8102, dash:3000 |
+| UNO Q #3 | unoq3.local | 192.168.0.86 | Sim-server S3 | wss:7880, udp:9103, metrics:8103, dash:3000 |
 
 Each board runs:
 - **sim-server** — the game server (Rust binary at `~/mesh/sim-server`)
 - **board-dash** — system + game dashboard on port 3000 (Rust binary at `~/dashboard/unoq-dashboard`, systemd service `dashboard.service`)
 
-The two game servers form a mesh — they replicate entity state to each other over UDP. Each server owns some entities ("authoritative") and holds read-only copies of the other server's entities ("shadows"). A client connecting to either server sees the full world.
+The three game servers form a mesh — they replicate entity state to each other over UDP. Each server owns some entities ("authoritative") and holds read-only copies of other servers' entities ("shadows"). A client connecting to any server sees the full world.
+
+When TLS is enabled (board mesh), sim-servers use WSS and the coordinator returns `wss://` URLs from `/assign`.
 
 ## Quick Test
 
 ```bash
-# Is S1 alive?
-curl http://192.168.0.15:8101/metrics | jq .tick
+# Coordinator — list all servers
+curl -k https://192.168.0.208:7871/servers | jq .
 
-# Is S2 alive?
+# Get assigned to a server
+curl -k https://192.168.0.208:7871/assign
+
+# Check each server's metrics
+curl http://192.168.0.15:8101/metrics | jq .tick
 curl http://192.168.0.173:8102/metrics | jq .tick
+curl http://192.168.0.86:8103/metrics | jq .tick
 
 # Dashboard status (includes game server + system health)
 curl http://192.168.0.15:3000/api/mesh/status | jq .
@@ -69,11 +80,11 @@ Returns the full server state snapshot:
 
 | Field | Type | Description |
 |---|---|---|
-| `server_id` | number | Server ID (1 for S1, 2 for S2) |
+| `server_id` | number | Server ID (1, 2, or 3) |
 | `tick` | number | Current simulation tick. Increments 20 times per second (20Hz). |
 | `entity_count` | number | Entities this server is authoritative for (owns and simulates). |
-| `shadow_count` | number | Read-only copies of entities from the other server. Used for world visibility and crash recovery. |
-| `peer_count` | number | Connected peer game servers. Should be 1 in a 2-server mesh. |
+| `shadow_count` | number | Read-only copies of entities from other servers. Used for world visibility and crash recovery. |
+| `peer_count` | number | Connected peer game servers. Should be 2 in a 3-server mesh. |
 | `tick_budget_pct` | number | How much of the 50ms tick budget is being used (p95). Under 50% is healthy. Over 80% means the server is struggling. |
 
 #### Phase Timing
@@ -104,17 +115,20 @@ http://192.168.0.173:8102/
 
 ## Game Server WebSocket Protocol
 
-Clients connect to the game server via WebSocket to receive entity state and send input. S1 listens on `ws://192.168.0.15:7878`, S2 on `ws://192.168.0.173:7879`.
+Clients connect to the game server via WebSocket to receive entity state and send input. With TLS: `wss://192.168.0.15:7878`, without: `ws://localhost:7878`.
+
+Use the coordinator's `/assign` endpoint to get the best server to connect to.
 
 ### Connection Flow
 
 ```
-1. Client opens WebSocket to ws://192.168.0.15:7878
-2. Server creates a player entity at (0,0,0)
-3. Server sends JSON text frame:  {"type":"PlayerAssigned","player_id":"<uuid>"}
-4. Server begins streaming binary frames at 20Hz (full world snapshot every tick)
-5. Client sends JSON text frames for input
-6. On disconnect, server deletes the player entity
+1. Client fetches /assign from coordinator → gets ws[s]://host:port
+2. Client opens WebSocket to the assigned server
+3. Server creates a player entity at (0,0,0)
+4. Server sends JSON text frame:  {"type":"PlayerAssigned","player_id":"<uuid>"}
+5. Server begins streaming binary frames at 20Hz (full world snapshot every tick)
+6. Client sends JSON text frames for input
+7. On disconnect, server deletes the player entity
 ```
 
 ### Receiving Data: Binary Frames (Server → Client)
@@ -504,6 +518,7 @@ Every entity in the world has this state:
 const BOARDS = [
   { name: 'S1', ip: '192.168.0.15', metricsPort: 8101, dashPort: 3000 },
   { name: 'S2', ip: '192.168.0.173', metricsPort: 8102, dashPort: 3000 },
+  { name: 'S3', ip: '192.168.0.86', metricsPort: 8103, dashPort: 3000 },
 ];
 
 async function pollAll() {
@@ -536,10 +551,12 @@ function isHealthy(meshStatus) {
 ### Watch for entity imbalance
 
 ```javascript
-function checkBalance(s1metrics, s2metrics) {
-  const ratio = Math.max(s1metrics.entity_count, s2metrics.entity_count) /
-                Math.max(Math.min(s1metrics.entity_count, s2metrics.entity_count), 1);
-  return { ratio, balanced: ratio < 2.0 };
+function checkBalance(metrics) {
+  const counts = metrics.map(m => m.entity_count);
+  const max = Math.max(...counts);
+  const min = Math.max(Math.min(...counts), 1);
+  const ratio = max / min;
+  return { ratio, balanced: ratio < 2.0, counts };
 }
 ```
 

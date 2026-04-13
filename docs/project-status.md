@@ -1,31 +1,20 @@
 # Project Status — Server Meshing Prototype
 
-*Last updated: 2026-04-08*
+*Last updated: 2026-04-13*
 
 ## Overview
 
 A working prototype of **true server meshing** — the approach Star Citizen is attempting for large-scale multiplayer. Multiple Rust game servers share authority over the same spatial area, distributing entities across servers at the entity level, not by zones.
 
-**Stack**: Rust (sim-servers, coordinator, gateway) | Node.js/TypeScript (alternative gateway) | Three.js WebGPU (browser client)
+**Stack**: Rust (sim-servers, coordinator, board-dash) | Three.js WebGPU (browser client)
 
-**Codebase**: ~8,600 LOC across 47 source files | 7 commits | Single contributor
-
-| Area | Language | LOC | Files |
-|------|----------|-----|-------|
-| Sim-server | Rust | 1,730 | 9 |
-| Coordinator | Rust | 677 | 2 |
-| Shared types | Rust | 613 | 5 |
-| Rust gateway | Rust | ~200 | 2 |
-| Node.js gateway | TypeScript | 365 | 3 |
-| Client | TypeScript | 949 | 7 |
-| Test suite & tools | TypeScript | 3,032 | 18 |
-| Deployment | Shell/YAML | ~1,000 | ~15 |
+**Deployment**: 3 Arduino UNO Q boards (sim-servers) + Pi Zero W2 (coordinator) — entire mesh runs on embedded hardware. Also runs locally on Mac for development.
 
 ---
 
 ## Phase Completion
 
-All four planned phases are complete.
+All planned phases are complete, plus true peer-to-peer mesh and hardware deployment.
 
 ### Phase 1 — Single Server + Renderer
 - Rust workspace scaffold (shared, sim-server, coordinator crates)
@@ -38,12 +27,11 @@ All four planned phases are complete.
 - Coordinator: server registration, peer discovery, heartbeat monitoring, peer list broadcast
 - UDP + bincode peer-to-peer replication (server-to-server each tick)
 - Shadow entities: inbound UDP merged into read-only copies for spatial awareness
-- Node.js gateway: aggregates snapshots from all sim-servers, routes client inputs
 - Client entities color-coded by authority server
 
 ### Phase 3 — Dynamic Authority Transfer
 - Player assignment to least-loaded server on connect
-- WASD movement with input routing through gateway to authority server
+- WASD movement with input routing directly to authority server
 - Camera follow mode (F key)
 - Coordinator rebalancing: triggers on >30% imbalance, transfers peripheral NPCs
 - Authority transfer via UDP with full entity state
@@ -58,57 +46,87 @@ All four planned phases are complete.
 - Graceful drain protocol (transfer all entities before shutdown)
 - Stress test tool: verified 200 entities at 20 snapshots/sec
 
+### Phase 5 — True Peer-to-Peer Mesh
+- Removed gateway — clients connect directly to sim-servers
+- Each sim-server broadcasts full world view (auth + shadow entities) to its clients
+- Coordinator HTTP endpoint for client assignment (`/assign`)
+- Input forwarding between peers (MoveInput for non-local entities forwarded via UDP)
+- Binary WebSocket protocol (47 bytes per entity, 27-byte header)
+- Client-side prediction with server reconciliation
+
+### Phase 6 — Bevy ECS Migration
+- Migrated sim-server entity storage from `HashMap<EntityId, EntityState>` to Bevy ECS
+- Components: Position, Velocity, EntityTypeComp, AuthorityServer, NetworkId, LastInputSeq
+- ECS systems for simulation, NPC AI, input processing
+- Conversion layer between ECS components and network EntityState
+
+### Phase 7 — Hardware Deployment & TLS
+- Deployed on 3 Arduino UNO Q boards + Pi Zero W2
+- Cross-compilation for aarch64 (UNO Q) and armv7 (Pi Zero W2)
+- TLS support on coordinator (HTTPS) and sim-servers (WSS) via rustls
+- Self-signed certificate with SANs covering all board IPs
+- Coordinator serves built client app via `--static-dir`
+- Coordinator runs as systemd service on Pi (auto-start on boot)
+- Board dashboards on port 3000 with sim-server control
+- Both local (Mac) and board meshes can run simultaneously
+
 ---
 
 ## What's Deployed
 
 ### Local
-Single command (`./start.sh`) launches the full cluster: coordinator, 3 sim-servers, gateway, and Vite dev server. Configurable server count via `./start.sh N`.
+Single command (`./start.sh`) launches the full cluster: coordinator, N sim-servers, and Vite dev client. Configurable server count via `./start.sh N`. No TLS (localhost is a secure context for WebGPU).
+
+### UNO Q Boards
+`./start-unoq.sh` cross-compiles, deploys, and starts the full mesh on embedded hardware:
+- **zzttpi** (Pi Zero W2) — coordinator + client serving over HTTPS
+- **unoq, unoq2, unoq3** (UNO Q boards) — 3 sim-servers with WSS + UDP replication
 
 ### Docker
-`docker-compose.test.yml` runs the cluster with Pi Zero W2 resource constraints (0.25 CPU / 512MB per container) to simulate edge hardware.
-
-### Kubernetes / Azure
-Full deployment pipeline in `deploy/`:
-- AKS cluster + ACR + Azure Static Web Apps
-- K8s manifests: coordinator Deployment, sim-server StatefulSet (3 replicas), gateway Deployment
-- Resource limits: 200m–500m CPU, 128–512Mi RAM per sim-server
+`docker-compose.test.yml` runs the cluster with Pi Zero W2 resource constraints (1.0 CPU / 512MB per container) to simulate edge hardware.
 
 ---
 
 ## Test Infrastructure
 
-7 automated scenarios run via `./test.sh`:
+13 automated scenarios run via `./test.sh`:
 
 | Scenario | What it validates |
 |----------|-------------------|
 | spawn-burst | 500 entities in 2s, peak tick budget + recovery |
-| steady-scale | +100/sec until 80% budget, finds entity ceiling |
+| steady-scale | +10/sec until 80% budget, finds entity ceiling |
 | crash-recovery | Kill server, verify entity adoption by survivors |
-| rebalance-storm | 300 entities on one server, convergence time |
+| rebalance-storm | 300 entities on one server, convergence |
 | spatial-hotspot | 200 clustered entities, UDP stress |
 | input-latency | MoveInput round-trip p50/p95/p99 |
-| smoothness | Entity interpolation quality at 60fps |
+| mesh-verify | Binary frames, entity fields, multi-server visibility |
+| input-seq-echo | Prediction protocol: send seq 1-5, verify echoed |
+| peer-replication | Shadow counts, peer connectivity, cross-server visibility |
+| forwarded-input | MoveInput for shadow entity forwarded to authority |
+| multi-client | Two clients on different servers see consistent world |
+| entity-lifecycle | Spawn → move → verify authority → remove |
+| authority-transfer | Overload server, verify rebalance transfers entities |
 
-138 unit tests covering shared types, protocol serialization, spatial grid, and simulation logic.
+Scene tests (`./test-scene.sh`) for deep mesh verification against live clusters.
 
 ---
 
 ## Architecture at a Glance
 
 ```
-Browser ←─WS─→ Gateway ←─WS─→ Sim-Servers ←─UDP─→ each other
-                  │                  │
-                  └──WS──→ Coordinator ←──WS──┘
+Browser ←─WSS─→ Sim-Server 1 ←─UDP─→ Sim-Server 2 ←─WSS─→ Browser
+                      │                     │
+                      └──UDP──→ Sim-Server 3 ←──UDP──┘
+                                     │
+                              Coordinator
+                           (assignment + control)
 ```
 
-**Coordinator** (port 7870) — Server registry, peer lists, heartbeats, rebalance/drain directives, crash detection.
+**Coordinator** (port 7870 ws, 7871 https) — Server registry, peer lists, heartbeats, rebalance/drain directives, crash detection. Client assignment via `/assign`. Serves client app via `--static-dir`. Stateless — sim-servers auto-reconnect if it restarts.
 
-**Sim-Server** (ports 7878+N ws, 9100+N udp, 8100+N metrics) — 20Hz game loop with 5 phases: input drain, simulation, authority transfers, peer replication, shadow cleanup. Each instance owns a subset of entities.
+**Sim-Server** (ports 7878+N wss, 9100+N udp, 8100+N metrics) — 20Hz Bevy ECS game loop with 5 phases: input drain, simulation, authority transfers, peer replication, shadow cleanup. Each instance owns a subset of entities and broadcasts the full world to its connected clients.
 
-**Gateway** (port 4322) — Aggregates WorldSnapshot from all sim-servers into unified client view. Routes player inputs to correct authority server. Assigns players on connect.
-
-**Client** (port 4321) — Three.js WebGPU renderer. Entities are colored spheres (NPCs) and boxes (players). Debug overlay shows per-server load, network stats, and entity counts.
+**Client** (port 4321 dev, or served from coordinator) — Three.js WebGPU renderer. Entities are colored spheres (NPCs) and boxes (players). Debug overlay shows per-server load, network stats, and entity counts.
 
 ---
 
@@ -116,12 +134,14 @@ Browser ←─WS─→ Gateway ←─WS─→ Sim-Servers ←─UDP─→ each o
 
 | Decision | Rationale |
 |----------|-----------|
-| HashMap for entities, not ECS | Trivially serializable; full ECS overkill for network prototype |
-| UDP + bincode for replication | Minimal latency; no packet loss risk locally |
+| Bevy ECS for entities | Scalable entity management; component queries outperform HashMap iteration at high entity counts |
+| Direct client connections | True peer-to-peer mesh; no gateway bottleneck or SPOF in the data path |
+| UDP + bincode for replication | Minimal latency; no packet loss risk on LAN |
 | JSON for coordinator protocol | Human-readable; coordinator isn't in the hot path |
 | 20 Hz tick rate | Industry standard; client interpolates to 60fps |
-| Separate gateway process | Keeps sim-servers focused; Node.js excels at WebSocket fanout |
+| Binary WebSocket frames | 47 bytes/entity vs ~200 bytes JSON; critical for bandwidth at scale |
 | Entity-level distribution | Core innovation — no zones, entities balanced by load |
+| TLS via rustls | WebGPU requires secure context; no OpenSSL dependency for cross-compilation |
 
 ---
 
@@ -131,10 +151,10 @@ These were considered but descoped as unnecessary for the prototype:
 
 - Cross-server interaction RPC (collision/push between entities on different servers)
 - 3-step authority transfer handshake (simplified to direct send+accept)
-- Spatial grid cell visualization in client
 - Network time synchronization across servers
-- Delta compression for entity state updates (disabled pending per-entity interpolation)
-- QUIC transport (TLS/stream overhead not needed locally)
+- Delta compression for entity state updates
+- QUIC transport
+- Interest management (distance-based filtering)
 
 ---
 
@@ -144,17 +164,20 @@ These were considered but descoped as unnecessary for the prototype:
 |------|--------------------|
 | Authority transfer atomicity | Direct send+accept; rebalancer self-corrects within 10s |
 | UDP packet ordering | Tick-tagged; receiver discards stale updates |
-| Gateway aggregation latency | Forwards every tick (50ms); no batching |
+| Full world broadcast | Every client gets every entity; scales to ~500 entities before bandwidth limits |
 | Crash recovery duplication | Multiple survivors may adopt same shadows; rebalancer evens out |
-| No clock sync | Servers assume similar system clocks; fine for local/single-node |
+| No clock sync | Servers assume similar system clocks; fine for LAN |
+| Coordinator as SPOF | Control plane only; data plane continues without it |
 
 ---
 
 ## Metrics & Observability
 
-Each sim-server exposes `http://localhost:810N/metrics` with per-tick phase timing:
+Each sim-server exposes `http://host:810N/metrics` with per-tick phase timing:
 - **Phases tracked**: input drain, simulation, transfers, replication, shadow cleanup
 - **Percentiles**: p50, p95, p99 for each phase
-- **Tick budget**: max phase total / tick duration (50ms)
+- **Tick budget**: total phase time / tick duration (50ms)
 
-Gateway broadcasts `_metrics` to clients: snapshots/sec, bandwidth (KB/s), rebalance events, per-server entity counts.
+Coordinator dashboard at `/dashboard` shows all servers with live gauges, entity counts, and phase breakdowns.
+
+Board dashboards at `http://board-ip:3000` show system health (CPU, memory, temperature) and sim-server control.

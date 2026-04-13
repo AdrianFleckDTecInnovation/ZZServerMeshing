@@ -203,7 +203,7 @@ async fn api_mesh_status() -> Json<MeshStatus> {
 }
 
 async fn fetch_sim_metrics() -> Option<serde_json::Value> {
-    for port in [8101, 8102] {
+    for port in [8101, 8102, 8103, 8104, 8105] {
         if let Ok(mut stream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let req = "GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";

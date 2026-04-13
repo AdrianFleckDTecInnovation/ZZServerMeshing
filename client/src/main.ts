@@ -4,8 +4,9 @@ import { Renderer } from './renderer';
 import { DebugOverlay } from './debug-overlay';
 
 async function getServerUrl(): Promise<string> {
-  const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || 'http://localhost:7871';
-  const resp = await fetch(`${coordinatorUrl}/assign`);
+  const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || '';
+  const assignUrl = coordinatorUrl ? `${coordinatorUrl}/assign` : '/assign';
+  const resp = await fetch(assignUrl);
   const data = await resp.json();
   console.log(`Assigned to server: ${data.ws_url}`);
   return data.ws_url;

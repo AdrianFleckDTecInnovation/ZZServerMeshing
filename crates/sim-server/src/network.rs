@@ -1,25 +1,29 @@
 use crate::game_loop::SharedInbound;
 use shared::protocol::{ClientMessage, ServerMessage};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream::{SplitSink, SplitStream}};
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 pub async fn run_websocket_server(
     port: u16,
     inbound: Arc<SharedInbound>,
     broadcast_tx: broadcast::Sender<Vec<u8>>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("Failed to bind WebSocket port");
 
-    tracing::info!("WebSocket server listening on port {port}");
+    let scheme = if tls_acceptor.is_some() { "wss" } else { "ws" };
+    tracing::info!("WebSocket server listening on port {port} ({scheme})");
 
     // Accept client connections
     loop {
-        let (stream, addr) = match listener.accept().await {
+        let (tcp_stream, addr) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("Accept error: {e}");
@@ -27,106 +31,137 @@ pub async fn run_websocket_server(
             }
         };
 
-        tracing::info!("Client connected from {addr}");
-
-        let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                tracing::error!("WebSocket handshake error: {e}");
-                continue;
-            }
-        };
-
         let inbound = Arc::clone(&inbound);
-        let mut broadcast_rx = broadcast_tx.subscribe();
+        let broadcast_rx = broadcast_tx.subscribe();
 
-        tokio::spawn(async move {
-            let (mut ws_sink, mut ws_stream) = ws_stream.split();
-
-            // Generate player UUID and push SpawnPlayer to the inbound queue.
-            // The player entity is created on the next game loop tick.
-            let player_uuid = uuid::Uuid::new_v4();
-            {
-                let mut q = inbound.queue.lock().await;
-                q.client_inputs.push(ClientMessage::SpawnPlayer {
-                    player_id: player_uuid.to_string(),
-                    position: [0.0, 0.0, 0.0],
-                });
-            }
-
-            // Send PlayerAssigned as JSON text frame
-            let assign_msg = ServerMessage::PlayerAssigned {
-                player_id: player_uuid.to_string(),
-            };
-            if let Ok(json) = serde_json::to_string(&assign_msg) {
-                if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                    // Client disconnected during assignment -- remove the player
-                    let mut q = inbound.queue.lock().await;
-                    q.client_inputs.push(ClientMessage::RemoveEntity {
-                        entity_id: player_uuid.to_string(),
-                    });
-                    return;
-                }
-            }
-
-            tracing::info!(
-                "Assigned player {} to client {addr}",
-                &player_uuid.to_string()[..8]
-            );
-
-            loop {
-                tokio::select! {
-                    // Forward binary snapshot frames to this client (produced by game loop)
-                    msg = broadcast_rx.recv() => {
-                        match msg {
-                            Ok(frame) => {
-                                if ws_sink.send(Message::Binary(frame.into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!("Client {addr} lagged {n} messages");
-                            }
-                            Err(_) => break,
-                        }
+        if let Some(ref acceptor) = tls_acceptor {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(tcp_stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("TLS handshake error from {addr}: {e}");
+                        return;
                     }
-                    // Receive input from this client (still JSON text)
-                    msg = ws_stream.next() => {
-                        match msg {
-                            Some(Ok(Message::Text(text))) => {
-                                match serde_json::from_str::<ClientMessage>(&text) {
-                                    Ok(input) => {
-                                        let mut q = inbound.queue.lock().await;
-                                        q.client_inputs.push(input);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Invalid client message: {e}");
-                                    }
-                                }
-                            }
-                            Some(Ok(Message::Close(_))) | None => {
-                                tracing::info!("Client {addr} disconnected");
-                                break;
-                            }
-                            _ => {}
-                        }
+                };
+                let ws_stream = match tokio_tungstenite::accept_async(tls_stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!("WebSocket handshake error (TLS) from {addr}: {e}");
+                        return;
                     }
-                }
-            }
+                };
+                tracing::info!("Client connected from {addr} (TLS)");
+                handle_client(ws_stream, addr, inbound, broadcast_rx).await;
+            });
+        } else {
+            tokio::spawn(async move {
+                let ws_stream = match tokio_tungstenite::accept_async(tcp_stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!("WebSocket handshake error from {addr}: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("Client connected from {addr}");
+                handle_client(ws_stream, addr, inbound, broadcast_rx).await;
+            });
+        }
+    }
+}
 
-            // Client disconnected -- push RemoveEntity to the inbound queue
-            {
-                let mut q = inbound.queue.lock().await;
-                q.client_inputs.push(ClientMessage::RemoveEntity {
-                    entity_id: player_uuid.to_string(),
-                });
-            }
-            tracing::info!(
-                "Removed player {} on disconnect",
-                &player_uuid.to_string()[..8]
-            );
+/// Handle a single WebSocket client connection. Generic over the underlying
+/// transport (plain TCP or TLS) since both implement AsyncRead + AsyncWrite.
+async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+    ws_stream: WebSocketStream<S>,
+    addr: std::net::SocketAddr,
+    inbound: Arc<SharedInbound>,
+    mut broadcast_rx: broadcast::Receiver<Vec<u8>>,
+) {
+    let (mut ws_sink, mut ws_stream): (SplitSink<WebSocketStream<S>, Message>, SplitStream<WebSocketStream<S>>) = ws_stream.split();
+
+    // Generate player UUID and push SpawnPlayer to the inbound queue.
+    // The player entity is created on the next game loop tick.
+    let player_uuid = uuid::Uuid::new_v4();
+    {
+        let mut q = inbound.queue.lock().await;
+        q.client_inputs.push(ClientMessage::SpawnPlayer {
+            player_id: player_uuid.to_string(),
+            position: [0.0, 0.0, 0.0],
         });
     }
+
+    // Send PlayerAssigned as JSON text frame
+    let assign_msg = ServerMessage::PlayerAssigned {
+        player_id: player_uuid.to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&assign_msg) {
+        if ws_sink.send(Message::Text(json.into())).await.is_err() {
+            // Client disconnected during assignment -- remove the player
+            let mut q = inbound.queue.lock().await;
+            q.client_inputs.push(ClientMessage::RemoveEntity {
+                entity_id: player_uuid.to_string(),
+            });
+            return;
+        }
+    }
+
+    tracing::info!(
+        "Assigned player {} to client {addr}",
+        &player_uuid.to_string()[..8]
+    );
+
+    loop {
+        tokio::select! {
+            // Forward binary snapshot frames to this client (produced by game loop)
+            msg = broadcast_rx.recv() => {
+                match msg {
+                    Ok(frame) => {
+                        if ws_sink.send(Message::Binary(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Client {addr} lagged {n} messages");
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Receive input from this client (still JSON text)
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(input) => {
+                                let mut q = inbound.queue.lock().await;
+                                q.client_inputs.push(input);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Invalid client message: {e}");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::info!("Client {addr} disconnected");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Client disconnected -- push RemoveEntity to the inbound queue
+    {
+        let mut q = inbound.queue.lock().await;
+        q.client_inputs.push(ClientMessage::RemoveEntity {
+            entity_id: player_uuid.to_string(),
+        });
+    }
+    tracing::info!(
+        "Removed player {} on disconnect",
+        &player_uuid.to_string()[..8]
+    );
 }
 
 // Encoding is now in encoding.rs; test-only delegates below.

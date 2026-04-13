@@ -14,6 +14,7 @@ mod game_loop;
 
 use clap::Parser;
 use shared::entity::ServerId;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -49,6 +50,15 @@ struct Args {
     /// Advertised hostname for peer discovery (for Docker/k8s networking)
     #[arg(long)]
     advertise_host: Option<String>,
+
+    /// Path to TLS certificate file (PEM). When both --tls-cert and --tls-key
+    /// are provided, the WebSocket server accepts TLS connections (wss://).
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM).
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -58,8 +68,29 @@ async fn main() {
 
     let server_id = ServerId(args.server_id);
     let metrics_port = args.metrics_port.unwrap_or(8100 + args.server_id);
+
+    // Build TLS config if cert+key provided
+    let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let acceptor = build_tls_acceptor(cert_path, key_path)
+                .expect("Failed to build TLS config from provided cert/key");
+            tracing::info!(
+                "TLS enabled for WebSocket server (cert={}, key={})",
+                cert_path.display(),
+                key_path.display()
+            );
+            Some(acceptor)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            panic!("Both --tls-cert and --tls-key must be provided together");
+        }
+        (None, None) => None,
+    };
+    let use_tls = tls_acceptor.is_some();
+
+    let ws_scheme = if use_tls { "wss" } else { "ws" };
     tracing::info!(
-        "Sim-server {} starting (ws:{} udp:{} metrics:{})",
+        "Sim-server {} starting ({ws_scheme}:{} udp:{} metrics:{})",
         server_id, args.port, args.udp_port, metrics_port
     );
 
@@ -99,6 +130,7 @@ async fn main() {
         args.port,
         Arc::clone(&shared_inbound),
         broadcast_tx.clone(),
+        tls_acceptor,
     ));
 
     // Start UDP receiver (incoming peer entity states)
@@ -116,6 +148,7 @@ async fn main() {
         Arc::clone(&shared_coord_events),
         args.advertise_host,
         Arc::clone(&entity_count_atomic),
+        use_tls,
     ));
 
     // Run the ECS game loop
@@ -151,4 +184,37 @@ async fn main() {
             tracing::info!("Shutdown complete");
         }
     }
+}
+
+/// Build a tokio-rustls TLS acceptor from PEM certificate and key files.
+fn build_tls_acceptor(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    use rustls::pki_types::PrivateKeyDer;
+    use std::io::BufReader;
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("Failed to open cert file {}: {e}", cert_path.display()))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to parse certs: {e}"))?;
+    if certs.is_empty() {
+        return Err("No certificates found in cert file".into());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("Failed to open key file {}: {e}", key_path.display()))?;
+    let mut key_reader = BufReader::new(key_file);
+    let key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| format!("Failed to parse private key: {e}"))?
+        .ok_or("No private key found in key file")?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("Failed to build TLS config: {e}"))?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }

@@ -7,6 +7,7 @@ pub struct ServerEntry {
     pub udp_port: u16,
     pub ws_port: u16,
     pub host: String,
+    pub tls: bool,
     pub entity_count: u32,
     pub reply_tx: mpsc::UnboundedSender<String>,
     pub last_heartbeat: std::time::Instant,
@@ -33,6 +34,7 @@ impl Registry {
         udp_port: u16,
         ws_port: u16,
         host: Option<String>,
+        tls: bool,
         reply_tx: mpsc::UnboundedSender<String>,
     ) {
         if self.servers.contains_key(&server_id) {
@@ -46,6 +48,7 @@ impl Registry {
                 udp_port,
                 ws_port,
                 host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
+                tls,
                 entity_count: 0,
                 reply_tx,
                 last_heartbeat: std::time::Instant::now(),
@@ -191,7 +194,8 @@ impl Registry {
                 } else {
                     &s.host
                 };
-                format!("ws://{}:{}", host, s.ws_port)
+                let scheme = if s.tls { "wss" } else { "ws" };
+                format!("{scheme}://{host}:{}", s.ws_port)
             })
     }
 
@@ -267,7 +271,7 @@ mod tests {
 
     fn register_server(reg: &mut Registry, id: u16) -> mpsc::UnboundedReceiver<String> {
         let (tx, rx) = make_tx();
-        reg.register(id, 9100 + id, 7878 + id - 1, None, tx);
+        reg.register(id, 9100 + id, 7878 + id - 1, None, false, tx);
         rx
     }
 
@@ -322,7 +326,7 @@ mod tests {
     fn detect_dead_servers_skips_gateway() {
         let mut reg = Registry::new();
         let (tx, _rx) = make_tx();
-        reg.register(0, 0, 4322, None, tx); // gateway = server_id 0
+        reg.register(0, 0, 4322, None, false, tx); // gateway = server_id 0
 
         // Even if gateway heartbeat is stale, it shouldn't be detected as dead
         // (gateway uses server_id 0, which is filtered)
@@ -424,7 +428,7 @@ mod tests {
     fn broadcast_peer_list_excludes_gateway_from_sim_peers() {
         let mut reg = Registry::new();
         let (tx0, mut rx0) = make_tx();
-        reg.register(0, 0, 4322, None, tx0); // gateway
+        reg.register(0, 0, 4322, None, false, tx0); // gateway
         let mut rx1 = register_server(&mut reg, 1);
         reg.broadcast_peer_list();
 
@@ -502,7 +506,7 @@ mod tests {
     fn register_with_custom_host() {
         let mut reg = Registry::new();
         let (tx, _rx) = make_tx();
-        reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), tx);
+        reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), false, tx);
         assert_eq!(reg.servers.get(&1).unwrap().host, "10.0.0.5");
     }
 
@@ -510,7 +514,27 @@ mod tests {
     fn register_host_defaults_to_localhost() {
         let mut reg = Registry::new();
         let (tx, _rx) = make_tx();
-        reg.register(1, 9101, 7878, None, tx);
+        reg.register(1, 9101, 7878, None, false, tx);
         assert_eq!(reg.servers.get(&1).unwrap().host, "127.0.0.1");
+    }
+
+    #[test]
+    fn assign_returns_wss_when_tls() {
+        let mut reg = Registry::new();
+        let (tx, _rx) = make_tx();
+        reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), true, tx);
+        let url = reg.get_least_loaded_ws_addr(None).unwrap();
+        assert!(url.starts_with("wss://"), "expected wss:// but got {url}");
+        assert_eq!(url, "wss://10.0.0.5:7878");
+    }
+
+    #[test]
+    fn assign_returns_ws_when_no_tls() {
+        let mut reg = Registry::new();
+        let (tx, _rx) = make_tx();
+        reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), false, tx);
+        let url = reg.get_least_loaded_ws_addr(None).unwrap();
+        assert!(url.starts_with("ws://"), "expected ws:// but got {url}");
+        assert_eq!(url, "ws://10.0.0.5:7878");
     }
 }

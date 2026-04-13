@@ -5,62 +5,59 @@
 ```
 ZZServerMeshing/
 ├── Cargo.toml                      # Rust workspace root
-├── start.sh / stop.sh              # Cluster launch scripts
+├── start.sh / stop.sh              # Local cluster launch scripts
+├── start-unoq.sh / stop-unoq.sh   # UNO Q board deployment scripts
 ├── CLAUDE.md                       # AI assistant guidelines
-├── PLAN.md                         # Phase tracking
 │
 ├── crates/
-│   ├── shared/                     # Shared types (217 LOC)
+│   ├── shared/                     # Shared types
 │   │   ├── entity.rs               # EntityId, EntityState, EntityType, ServerId
-│   │   ├── protocol.rs             # All message types (8 enums)
+│   │   ├── protocol.rs             # All message types (ServerMessage, ClientMessage, PeerMessage, CoordClientMsg, CoordServerMsg)
 │   │   ├── spatial.rs              # Grid: world_to_cell(), clamp_to_world()
 │   │   └── tick.rs                 # TICK_RATE=20, TICK_DURATION_MS=50
 │   │
-│   ├── sim-server/                 # Game simulation server (850 LOC)
-│   │   ├── main.rs                 # CLI args, tokio runtime, service startup
-│   │   ├── world.rs                # Entity storage, shadow entities, transfers
-│   │   ├── simulation.rs           # Game loop, NPC AI, rebalance handling
-│   │   ├── network.rs              # WebSocket server + broadcast
+│   ├── sim-server/                 # Game simulation server (Bevy ECS)
+│   │   ├── main.rs                 # CLI args, tokio runtime, TLS setup, service startup
+│   │   ├── components.rs           # Bevy ECS components (Position, Velocity, Authority, etc.)
+│   │   ├── conversion.rs           # ECS ↔ EntityState conversion
+│   │   ├── systems.rs              # ECS systems (simulation, NPC AI, input processing)
+│   │   ├── game_loop.rs            # 20Hz fixed timestep loop, phase timing
+│   │   ├── network.rs              # WebSocket server (WS/WSS) + binary broadcast
 │   │   ├── replication.rs          # UDP outbound to peers (bincode)
 │   │   ├── receiver.rs             # UDP inbound, shadow merge, transfer accept
-│   │   └── coordinator_client.rs   # Registration, heartbeats, directive handling
+│   │   ├── coordinator_client.rs   # Registration, heartbeats, directive handling
+│   │   └── metrics_server.rs       # HTTP metrics endpoint
 │   │
-│   └── coordinator/                # Mesh coordinator (391 LOC)
-│       ├── main.rs                 # WebSocket listener, event loop, timers
-│       └── registry.rs             # Server registry, rebalance algo, crash recovery
+│   ├── coordinator/                # Mesh coordinator
+│   │   ├── main.rs                 # WebSocket listener, HTTP(S) server, TLS, static file serving
+│   │   └── registry.rs             # Server registry, rebalance algo, crash recovery
+│   │
+│   └── board-dash/                 # UNO Q board dashboard
+│       ├── main.rs                 # Axum web server
+│       ├── routes.rs               # API endpoints (stats, mesh status, start/stop)
+│       └── static/                 # Dashboard web assets
 │
-├── gateway/                        # Node.js gateway (365 LOC)
+├── client/                         # Three.js WebGPU client
 │   ├── src/
-│   │   ├── index.ts                # Main server, peer/client connections
-│   │   ├── aggregator.ts           # Snapshot merge, metrics, authority lookup
-│   │   └── router.ts               # Input routing to authority servers
-│   ├── package.json
-│   └── tsconfig.json
-│
-├── client/                         # Three.js WebGPU client (488 LOC)
-│   ├── src/
-│   │   ├── main.ts                 # Entry point
+│   │   ├── main.ts                 # Entry point, coordinator assignment
 │   │   ├── renderer.ts             # WebGPU renderer, mesh pools, camera
-│   │   ├── network.ts              # WebSocket client, reconnect
+│   │   ├── network.ts              # WebSocket client, binary frame decoding, reconnect
 │   │   ├── world-view.ts           # Entity state, interpolation, colors
+│   │   ├── binary-protocol.ts      # Binary frame decoder (47-byte entities)
+│   │   ├── prediction.ts           # Client-side prediction manager
 │   │   └── debug-overlay.ts        # FPS, server bars, network metrics
 │   ├── index.html
-│   ├── vite.config.ts
-│   ├── package.json
-│   └── tsconfig.json
-│
-├── tools/                          # Dev tools (152 LOC)
-│   ├── stress-test.ts              # Load generator + metrics
+│   ├── vite.config.ts              # Dev server + proxy config
 │   └── package.json
 │
+├── certs/                          # TLS certificates (gitignored)
+│
+├── tools/                          # Dev tools
+│   ├── stress-test.ts              # Load generator + metrics
+│   └── test-suite/                 # Automated test scenarios
+│
 └── docs/                           # Documentation
-    ├── architecture.md
-    ├── protocol.md
-    ├── quickstart.md
-    └── codebase.md                 # This file
 ```
-
-**Total**: ~2,500 lines of code across 19 source files.
 
 ## Dependencies
 
@@ -75,65 +72,54 @@ ZZServerMeshing/
 | `glam` | 0.29 | Vec3 math (with serde feature) |
 | `uuid` | 1 | Entity IDs (v4 + serde) |
 | `clap` | 4 | CLI argument parsing |
+| `bevy_ecs` | 0.15 | Entity Component System (sim-server) |
 | `tracing` + `tracing-subscriber` | 0.1/0.3 | Structured logging |
 | `rand` | 0.8 | NPC behavior randomization |
 | `futures-util` | 0.3 | Stream/Sink utilities |
+| `rustls` + `tokio-rustls` | 0.23/0.26 | TLS (coordinator + sim-server) |
+| `axum` | 0.8 | HTTP server (board-dash) |
 
 ### Node.js (package.json)
 
 | Package | Used In | Purpose |
 |---------|---------|---------|
-| `ws` | gateway, tools | WebSocket server/client |
 | `three` | client | Three.js WebGPU rendering |
 | `vite` | client | Dev server + bundler |
-| `tsx` | gateway, tools | TypeScript execution |
-| `typescript` | all | Type checking |
+| `typescript` | client, tools | Type checking |
 
-## Sim-Server CLI Arguments
+## CLI Arguments
+
+### Sim-Server
 
 ```
 sim-server [OPTIONS]
 
 Options:
-  --server-id <ID>           Unique server ID [default: 1]
+  --server-id <ID>           Unique server ID (u16, starting at 1)
   --port <PORT>              WebSocket port [default: 7878]
   --udp-port <PORT>          UDP port for peers [default: 9101]
+  --metrics-port <PORT>      HTTP metrics port [default: 8101]
   --coordinator <ADDR>       Coordinator address [default: 127.0.0.1:7870]
-  --initial-npcs <COUNT>     NPCs to spawn at start [default: 20]
+  --advertise-host <HOST>    IP to advertise to coordinator (for LAN routing)
+  --initial-npcs <COUNT>     NPCs to spawn at start [default: 0]
+  --tls-cert <PATH>          TLS certificate file (PEM) — enables WSS
+  --tls-key <PATH>           TLS private key file (PEM)
 ```
 
-## Coordinator CLI Arguments
+### Coordinator
 
 ```
 coordinator [OPTIONS]
 
 Options:
   --port <PORT>              WebSocket listen port [default: 7870]
-```
-
-## Gateway Environment Variables
-
-```
-COORDINATOR_URL=ws://127.0.0.1:7870    # Coordinator WebSocket URL
-GATEWAY_PORT=4322                       # Client-facing WebSocket port
+  --http-port <PORT>         HTTP(S) port [default: 7871]
+  --static-dir <PATH>        Directory to serve client files from
+  --tls-cert <PATH>          TLS certificate file (PEM) — enables HTTPS
+  --tls-key <PATH>           TLS private key file (PEM)
 ```
 
 ## Key Data Structures
-
-### World (sim-server/world.rs)
-```rust
-World {
-    server_id: ServerId,
-    tick: u64,
-    entities: HashMap<EntityId, EntityState>,        // Authoritative
-    shadow_entities: HashMap<EntityId, EntityState>,  // From peers
-    shadow_last_seen: HashMap<EntityId, u64>,         // Staleness
-    peer_addrs: HashMap<u16, SocketAddr>,             // Peer UDP
-    pending_transfers: Option<(Vec<String>, u16)>,    // Rebalance
-    draining: bool,                                   // Drain mode
-    drain_targets: Option<Vec<u16>>,
-}
-```
 
 ### EntityState (shared/entity.rs)
 ```rust
@@ -143,7 +129,19 @@ EntityState {
     velocity: Vec3,            // [vx, 0, vz]
     entity_type: EntityType,   // Player | Npc
     authority_server: ServerId, // Owner
+    last_input_seq: u32,       // For client prediction
 }
+```
+
+### Bevy ECS Components (sim-server/components.rs)
+```rust
+// Core entity components
+Position(Vec3)
+Velocity(Vec3)
+EntityTypeComp(EntityType)
+AuthorityServer(ServerId)
+NetworkId(EntityId)
+LastInputSeq(u32)
 ```
 
 ### Client Entity (world-view.ts)
@@ -156,6 +154,7 @@ EntityData {
     velocity: Vector3;
     entityType: 'Player' | 'Npc';
     authorityServer: number;
+    lastInputSeq: number;
     hasSecondSnapshot: boolean;
 }
 ```
@@ -165,13 +164,14 @@ EntityData {
 ```bash
 # Rust
 cargo build          # Build all crates
+cargo test           # Run tests
 cargo fmt            # Format
 cargo clippy         # Lint
 
 # TypeScript
 cd client && npx tsc --noEmit    # Type-check client
-cd gateway && npx tsc --noEmit   # Type-check gateway (if tsconfig setup)
 
-# Run stress test
-cd tools && npx tsx stress-test.ts ws://localhost:4322 200 10
+# Cross-compile for boards
+cross build --release --target aarch64-unknown-linux-gnu -p sim-server -p board-dash
+cross build --release --target armv7-unknown-linux-gnueabihf -p coordinator
 ```

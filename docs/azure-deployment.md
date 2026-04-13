@@ -1,8 +1,10 @@
 # Azure Deployment Plan
 
+> **Note:** This document predates the gateway removal and true peer-to-peer mesh migration. The gateway references below are outdated — clients now connect directly to sim-servers after coordinator assignment. The AKS manifests need updating to remove the gateway Deployment and add the coordinator's HTTP assignment endpoint. See [architecture.md](architecture.md) for the current architecture.
+
 Deploy the server meshing prototype to Azure for real cross-host network testing. The client is hosted on **Azure App Service** (static files). Everything else runs on **AKS** with sim-servers spread across different nodes to test real UDP latency.
 
-All services are Rust — coordinator, sim-server, and gateway share one Docker image with different entrypoints.
+All services are Rust — coordinator and sim-server share one Docker image with different entrypoints.
 
 ## Architecture
 

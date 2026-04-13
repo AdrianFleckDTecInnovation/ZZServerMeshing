@@ -1,253 +1,237 @@
 # UNO Q Mesh Deployment
 
-Deploy the server meshing prototype across two Arduino UNO Q boards, with a Mac as gateway and client.
+Deploy the server meshing prototype across 3 Arduino UNO Q boards and a Pi Zero W2 coordinator. The Mac is not required — the entire mesh runs on embedded hardware.
 
 ## Hardware
 
-| Role | Host | Hostname | IP | Specs |
-|---|---|---|---|---|
-| Sim-server 1 + Coordinator | UNO Q #1 | unoq.local | 192.168.0.15 | 4-core aarch64, 3.6 GB RAM, Debian Trixie 13 |
-| Sim-server 2 | UNO Q #2 | unoq2.local | 192.168.0.173 | 4-core aarch64, 3.6 GB RAM, Debian Trixie 13 |
-| Gateway + Client | Mac | localhost | — | macOS, runs browser + gateway process |
+| Role | Device | Hostname | SSH | IP | Arch | User |
+|------|--------|----------|-----|-----|------|------|
+| Coordinator + Client | Pi Zero W2 | zzttpi.local | `ssh zzttpi` | 192.168.0.208 | armv7l | dz |
+| Sim-server 1 | UNO Q #1 | unoq.local | `ssh unoq` | 192.168.0.15 | aarch64 | arduino |
+| Sim-server 2 | UNO Q #2 | unoq2.local | `ssh unoq2` | 192.168.0.173 | aarch64 | arduino |
+| Sim-server 3 | UNO Q #3 | unoq3.local | `ssh unoq3` | 192.168.0.86 | aarch64 | arduino |
 
-SSH access: `ssh unoq` / `ssh unoq2` (configured in `~/.ssh/config`, user `arduino`, key `~/.ssh/pi_key`).
+All boards: 4-core ARM, ~3.6 GB RAM, Debian Trixie 13. Pi Zero W2: 425 MB RAM, Raspbian Trixie 13.
 
 ## Architecture
 
 ```
-Browser (Mac :4321)
+Browser (any device on LAN)
     │
-    WS
+    HTTPS (:7871)
     ▼
-Gateway (Mac :4322)
-    │
-    WS ──────────────────── WS
-    ▼                        ▼
-┌──────────────────┐   ┌──────────────────┐
-│  unoq.local      │   │  unoq2.local     │
-│                  │   │                  │
-│  Coordinator     │   │                  │
-│    :7870         │   │                  │
-│                  │   │                  │
-│  Sim-server 1    │   │  Sim-server 2    │
-│    :7878 (ws)    │   │    :7879 (ws)    │
-│    :9101 (udp)   │   │    :9102 (udp)   │
-│    :8101 (metrics)│   │    :8102 (metrics)|
-└──────────────────┘   └──────────────────┘
-         │                      │
-         └──── UDP (bincode) ───┘
-           entity replication
+┌─────────────────────────┐
+│  zzttpi (Pi Zero W2)    │
+│                         │
+│  Coordinator  :7870 ws  │
+│  Client+API   :7871 https│
+│  (serves built Vite app)│
+└─────────────────────────┘
+    │ WS (coordinator protocol)
+    ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  unoq        │  │  unoq2       │  │  unoq3       │
+│              │  │              │  │              │
+│  S1          │  │  S2          │  │  S3          │
+│  :7878 wss   │  │  :7879 wss   │  │  :7880 wss   │
+│  :9101 udp   │  │  :9102 udp   │  │  :9103 udp   │
+│  :8101 metrics│  │  :8102 metrics│  │  :8103 metrics│
+│  :3000 dash  │  │  :3000 dash  │  │  :3000 dash  │
+└──────────────┘  └──────────────┘  └──────────────┘
+    │                  │                  │
+    └──── UDP (bincode) entity replication ┘
 ```
 
-The two UNO Q boards are the mesh — they replicate entities over UDP and handle simulation. The Mac is only the gateway (aggregation/routing) and client (browser). This keeps the heavy per-tick work on the boards and the Mac just presents it.
+Clients connect directly to sim-servers via WSS. The coordinator assigns clients to the least-loaded server. Each sim-server broadcasts the full world (authoritative + shadow entities) to its clients.
 
-Later, with the true-mesh refactor (see `true-mesh-architecture.md`), the gateway moves onto the boards too, and clients connect directly.
+## Quick Start
 
-## Port Mapping
+```sh
+./start-unoq.sh       # cross-compile, deploy, start everything
+./stop-unoq.sh        # stop everything
+```
 
-| Service | Host | Port |
-|---|---|---|
-| Coordinator | unoq | 7870 |
-| Sim-server 1 WS | unoq | 7878 |
-| Sim-server 1 UDP | unoq | 9101 |
-| Sim-server 1 Metrics | unoq | 8101 |
-| Sim-server 2 WS | unoq2 | 7879 |
-| Sim-server 2 UDP | unoq2 | 9102 |
-| Sim-server 2 Metrics | unoq2 | 8102 |
-| Gateway | Mac | 4322 |
-| Client (Vite) | Mac | 4321 |
+### URLs
+
+| Service | URL |
+|---------|-----|
+| Client (Three.js) | https://192.168.0.208:7871 |
+| Coordinator Dashboard | https://192.168.0.208:7871/dashboard |
+| Server Assignment | https://192.168.0.208:7871/assign |
+| Board 1 Dashboard | http://192.168.0.15:3000 |
+| Board 2 Dashboard | http://192.168.0.173:3000 |
+| Board 3 Dashboard | http://192.168.0.86:3000 |
+
+### Metrics
+
+```sh
+curl 192.168.0.15:8101/metrics     # S1
+curl 192.168.0.173:8102/metrics    # S2
+curl 192.168.0.86:8103/metrics     # S3
+```
 
 ## Cross-Compilation
 
-The boards are `aarch64-unknown-linux-gnu`. No Rust toolchain is installed on them (3 GB free disk — tight for rustup). Cross-compile from the Mac instead.
+Two targets for two architectures:
 
-### Option A: `cross` (Docker-based, recommended)
+| Target | Arch | Devices | Binaries |
+|--------|------|---------|----------|
+| `aarch64-unknown-linux-gnu` | 64-bit ARM | unoq, unoq2, unoq3 | sim-server, board-dash |
+| `armv7-unknown-linux-gnueabihf` | 32-bit ARM | zzttpi | coordinator |
 
-[`cross`](https://github.com/cross-rs/cross) uses Docker containers with the correct linker and sysroot. Docker is already installed.
+Built via [`cross`](https://github.com/cross-rs/cross) (Docker-based):
 
-```bash
-# Install cross
-cargo install cross --git https://github.com/cross-rs/cross
+```sh
+# UNO Q boards
+cross build --release --target aarch64-unknown-linux-gnu -p sim-server -p board-dash
 
-# Build all Rust crates for aarch64
-cross build --release --target aarch64-unknown-linux-gnu
+# Pi Zero W2
+cross build --release --target armv7-unknown-linux-gnueabihf -p coordinator
 ```
 
-Binaries land in `target/aarch64-unknown-linux-gnu/release/`.
+Binaries land in `target/<target>/release/`. Deployed via SCP to `~/mesh/` on each device.
 
-### Option B: Native linker (brew)
+## TLS
 
-```bash
-# Install the GNU toolchain for aarch64
-brew install aarch64-unknown-linux-gnu
+All WebSocket and HTTP connections use TLS (self-signed certificate). This is required for WebGPU — browsers only expose `navigator.gpu` in secure contexts (HTTPS/WSS or localhost).
 
-# Tell Cargo to use it
-mkdir -p .cargo
-cat >> .cargo/config.toml << 'EOF'
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-unknown-linux-gnu-gcc"
-EOF
+### Certificate
 
-# Build
-cargo build --release --target aarch64-unknown-linux-gnu
+Generated automatically on first `./start-unoq.sh` run. Stored in `certs/` (gitignored). Single cert covers all devices via Subject Alternative Names:
+
+```
+IP:192.168.0.208, IP:192.168.0.15, IP:192.168.0.173, IP:192.168.0.86
+DNS:zzttpi.local, DNS:zzttpi, DNS:unoq.local, DNS:unoq2.local, DNS:unoq3.local
 ```
 
-### Option C: Build on-board (slow, not recommended)
+### Trust the cert (macOS)
 
-Install rustup on each board and compile natively. Works but takes a long time on 4 ARM cores with 3.6 GB RAM, and eats into the limited 3 GB free disk.
+Eliminates browser warnings for all board IPs:
 
-## Deployment
-
-### 1. Build
-
-```bash
-cross build --release --target aarch64-unknown-linux-gnu
+```sh
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/mesh-coordinator.crt
 ```
 
-### 2. Deploy binaries
+### Regenerate
 
-```bash
-# Create deployment directory on each board
-ssh unoq 'mkdir -p ~/mesh'
-ssh unoq2 'mkdir -p ~/mesh'
+Delete and re-run (e.g., when adding a new board IP):
 
-# Copy binaries
-scp target/aarch64-unknown-linux-gnu/release/coordinator unoq:~/mesh/
-scp target/aarch64-unknown-linux-gnu/release/sim-server unoq:~/mesh/
-scp target/aarch64-unknown-linux-gnu/release/sim-server unoq2:~/mesh/
+```sh
+rm certs/mesh-coordinator.*
+./start-unoq.sh    # generates fresh cert with updated SANs
+# Re-trust the new cert:
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/mesh-coordinator.crt
 ```
 
-### 3. Start the mesh
+**Important:** Regenerating invalidates the trusted cert in the keychain. You must remove the old one and add the new one. To remove:
 
-**On unoq (coordinator + sim-server 1):**
-
-```bash
-# Terminal 1: coordinator
-ssh unoq '~/mesh/coordinator --port 7870'
-
-# Terminal 2: sim-server 1
-ssh unoq '~/mesh/sim-server --server-id 1 --port 7878 --udp-port 9101 --coordinator 127.0.0.1:7870'
+```sh
+sudo security delete-certificate -c "mesh-coordinator" /Library/Keychains/System.keychain
 ```
 
-**On unoq2 (sim-server 2):**
+## Coordinator Service
 
-```bash
-ssh unoq2 '~/mesh/sim-server --server-id 2 --port 7879 --udp-port 9102 --coordinator 192.168.0.15:7870'
+The coordinator runs as a systemd user service on zzttpi. It starts automatically on boot and restarts on crash.
+
+```sh
+# Status
+ssh zzttpi 'systemctl --user status mesh-coordinator'
+
+# Logs
+ssh zzttpi 'journalctl --user -u mesh-coordinator -f'
+
+# Manual restart
+ssh zzttpi 'systemctl --user restart mesh-coordinator'
 ```
 
-Note: unoq2 points its coordinator address at unoq's IP (`192.168.0.15`), not localhost.
+The service file is at `~/.config/systemd/user/mesh-coordinator.service` on zzttpi. Linger is enabled for user `dz` so the service starts without a login session.
 
-**On Mac (gateway + client):**
+### Coordinator resilience
 
-```bash
-# Gateway — point at unoq's coordinator
-COORDINATOR_URL=ws://192.168.0.15:7870 GATEWAY_PORT=4322 npx tsx gateway/src/index.ts
+The coordinator is stateless. If it restarts:
+- Sim-servers reconnect automatically (2-second retry loop)
+- Existing client WebSocket connections are unaffected (they're direct to sim-servers)
+- Only new client assignments (`/assign`) are unavailable during downtime
 
-# Client — update VITE_GATEWAY_URL if needed (default ws://localhost:4322 is fine)
-cd client && npm run dev
+## Board Dashboards
+
+Each UNO Q board runs a dashboard service on port 3000 (systemd user service `dashboard`). It shows system metrics and has a start/stop toggle for the local sim-server.
+
+The dashboard fetches sim-server metrics from the local metrics port (8101-8105 range, auto-detected).
+
+Dashboard binary: `board-dash` crate, deployed as `~/dashboard/unoq-dashboard`.
+
+## Deployment Directory Layout
+
+### UNO Q boards (`~/mesh/`)
+```
+~/mesh/
+├── sim-server                    # sim-server binary
+├── sim1.log (or sim2.log, sim3.log)
+└── certs/
+    ├── mesh-coordinator.crt      # shared TLS cert
+    └── mesh-coordinator.key
+~/dashboard/
+├── unoq-dashboard                # board-dash binary
+└── static/                       # dashboard web assets
 ```
 
-### 4. Verify
-
-```bash
-# Check coordinator sees both servers
-curl -s http://192.168.0.15:7870/status 2>/dev/null || echo "check coordinator logs"
-
-# Check sim-server metrics
-curl -s http://192.168.0.15:8101/metrics | jq .
-curl -s http://192.168.0.173:8102/metrics | jq .
-
-# Open browser
-open http://localhost:4321
+### zzttpi (`~/mesh/`)
+```
+~/mesh/
+├── coordinator                   # coordinator binary
+├── coordinator.log
+├── client-dist/                  # built Vite client app
+│   ├── index.html
+│   └── assets/
+│       └── index-*.js
+└── certs/
+    ├── mesh-coordinator.crt
+    └── mesh-coordinator.key
 ```
 
-## Start/Stop Scripts
+## Running Local Client Against Board Mesh
 
-A `start-mesh.sh` script to automate the above (future work):
+To use the Mac's Vite dev server (with WebGPU via localhost) but connect to the board mesh:
 
-```bash
-#!/bin/bash
-# start-mesh.sh — launch mesh across UNO Q boards + local gateway
-
-UNOQ=unoq
-UNOQ2=unoq2
-UNOQ_IP=192.168.0.15
-
-# Start coordinator on unoq
-ssh $UNOQ "nohup ~/mesh/coordinator --port 7870 > ~/mesh/coordinator.log 2>&1 &"
-sleep 1
-
-# Start sim-server 1 on unoq
-ssh $UNOQ "nohup ~/mesh/sim-server --server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 --coordinator 127.0.0.1:7870 > ~/mesh/sim1.log 2>&1 &"
-
-# Start sim-server 2 on unoq2
-ssh $UNOQ2 "nohup ~/mesh/sim-server --server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 --coordinator ${UNOQ_IP}:7870 > ~/mesh/sim2.log 2>&1 &"
-
-sleep 2
-
-# Start gateway locally
-COORDINATOR_URL=ws://${UNOQ_IP}:7870 GATEWAY_PORT=4322 npx tsx gateway/src/index.ts &
-
-# Start client
-cd client && npm run dev &
-
-echo "Mesh running. Open http://localhost:4321"
+```sh
+VITE_COORDINATOR_URL="https://192.168.0.208:7871" npx vite --port 4321
 ```
 
-```bash
-#!/bin/bash
-# stop-mesh.sh — kill everything
+The Vite proxy in `client/vite.config.ts` forwards `/assign`, `/servers`, `/dashboard` to the coordinator.
 
-ssh unoq 'pkill -f coordinator; pkill -f sim-server' 2>/dev/null
-ssh unoq2 'pkill -f sim-server' 2>/dev/null
-pkill -f "tsx gateway" 2>/dev/null
-pkill -f "vite" 2>/dev/null
+Without `VITE_COORDINATOR_URL`, the proxy defaults to `http://localhost:7871` (local mesh).
 
-echo "Mesh stopped."
+## Running Both Meshes Simultaneously
+
+The local mesh (`./start.sh`) and board mesh (`./start-unoq.sh`) use the same ports but on different hosts. They can run at the same time:
+
+| | Local (Mac) | Board Mesh |
+|---|---|---|
+| Coordinator | localhost:7870/7871 | 192.168.0.208:7870/7871 |
+| S1 | localhost:7878 | 192.168.0.15:7878 |
+| S2 | localhost:7879 | 192.168.0.173:7879 |
+| S3 | localhost:7880 | 192.168.0.86:7880 |
+| Client | localhost:4321 | 192.168.0.208:7871 |
+
+## Troubleshooting
+
+### Sim-server won't start
+```sh
+ssh unoq 'cat ~/mesh/sim1.log'   # check logs
+ssh unoq 'pgrep -a sim-server'   # check if already running
 ```
 
-## Gateway Config Changes
+### Dashboard shows "Running but metrics unavailable"
+The `board-dash` checks ports 8101-8105 for the metrics endpoint. If the sim-server uses a different metrics port, it won't find it.
 
-The gateway currently discovers sim-servers via the coordinator's `PeerList`. The sim-server WebSocket addresses in `PeerList` are currently `127.0.0.1:port` (since servers register with their local bind address). For cross-host deployment, sim-servers need to register with their LAN-routable address.
+### Certificate warnings after regeneration
+The old cert is still trusted in the keychain. Remove it and add the new one (see TLS section above).
 
-**Options:**
-1. Add a `--public-addr` flag to sim-server so it registers with the coordinator using its LAN IP
-2. Have the coordinator infer the source IP from the WebSocket connection
-3. Hardcode the mapping in the gateway
+### WebGPU not available
+WebGPU requires a secure context. Use either:
+- `https://` from the Pi (self-signed cert, trusted in keychain)
+- `http://localhost:4321` (localhost is always a secure context)
 
-Option 1 is cleanest:
-
-```bash
-# sim-server 1 on unoq
-~/mesh/sim-server --server-id 1 --port 7878 --udp-port 9101 \
-  --public-addr 192.168.0.15 --coordinator 127.0.0.1:7870
-
-# sim-server 2 on unoq2
-~/mesh/sim-server --server-id 2 --port 7879 --udp-port 9102 \
-  --public-addr 192.168.0.173 --coordinator 192.168.0.15:7870
-```
-
-This is a small code change: accept `--public-addr` in sim-server CLI args, use it in the `Register` message to the coordinator instead of `127.0.0.1`.
-
-## Scaling Up
-
-To add more sim-servers on the same boards (each board has 4 cores, 3.6 GB RAM):
-
-```bash
-# Second sim-server on unoq (server 3)
-ssh unoq '~/mesh/sim-server --server-id 3 --port 7880 --udp-port 9103 --metrics-port 8103 --coordinator 127.0.0.1:7870'
-
-# Second sim-server on unoq2 (server 4)
-ssh unoq2 '~/mesh/sim-server --server-id 4 --port 7881 --udp-port 9104 --metrics-port 8104 --coordinator 192.168.0.15:7870'
-```
-
-With 4 cores and ~3 GB available RAM per board, 2 sim-servers per board is reasonable. The coordinator is lightweight and can share a board with a sim-server.
-
-## Known Issues / TODO
-
-- [ ] `--public-addr` flag needs to be added to sim-server CLI
-- [ ] Coordinator `PeerList` uses the registered address — verify gateway can reach it
-- [ ] UDP replication between boards may need firewall rules (`ufw allow 9101:9110/udp`)
-- [ ] Binary size — check `release` binary fits comfortably in 3 GB free disk
-- [ ] Systemd service files for auto-start on boot (optional)
-- [ ] Log rotation on boards (small disk)
+### `openssl` cert generation fails
+Use `P-256` not `prime256r1` for the EC curve — macOS OpenSSL doesn't recognize `prime256r1`.

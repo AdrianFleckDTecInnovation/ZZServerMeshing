@@ -95,6 +95,9 @@ pub enum CoordClientMsg {
         /// Falls back to the connection source IP when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// Whether this server's WebSocket listener uses TLS (wss://).
+        #[serde(default)]
+        tls: bool,
     },
     Heartbeat {
         server_id: u16,
@@ -300,16 +303,18 @@ mod tests {
             udp_port: 9101,
             ws_port: 7878,
             host: Some("10.0.0.1".to_string()),
+            tls: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"Register\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::Register { server_id, udp_port, ws_port, host } => {
+            CoordClientMsg::Register { server_id, udp_port, ws_port, host, tls } => {
                 assert_eq!(server_id, 1);
                 assert_eq!(udp_port, 9101);
                 assert_eq!(ws_port, 7878);
                 assert_eq!(host, Some("10.0.0.1".to_string()));
+                assert!(!tls);
             }
             _ => panic!("wrong variant"),
         }
@@ -323,6 +328,7 @@ mod tests {
             udp_port: 9102,
             ws_port: 7879,
             host: None,
+            tls: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("host"));
@@ -330,6 +336,35 @@ mod tests {
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
             CoordClientMsg::Register { host, .. } => assert_eq!(host, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_client_msg_register_tls_defaults_to_false() {
+        // Old-format JSON without tls field
+        let json = r#"{"type":"Register","server_id":1,"udp_port":9101,"ws_port":7878}"#;
+        let decoded: CoordClientMsg = serde_json::from_str(json).unwrap();
+        match decoded {
+            CoordClientMsg::Register { tls, .. } => assert!(!tls),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn coord_client_msg_register_tls_true() {
+        let msg = CoordClientMsg::Register {
+            server_id: 1,
+            udp_port: 9101,
+            ws_port: 7878,
+            host: None,
+            tls: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"tls\":true"));
+        let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
+        match decoded {
+            CoordClientMsg::Register { tls, .. } => assert!(tls),
             _ => panic!("wrong variant"),
         }
     }

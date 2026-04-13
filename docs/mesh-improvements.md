@@ -2,7 +2,7 @@
 
 ## Current State
 
-Working true peer-to-peer mesh: clients connect directly to sim-servers, each server broadcasts full world view (authoritative + shadow entities), inputs for non-local entities are forwarded via UDP. Coordinator handles peer discovery, rebalancing, and client assignment. Binary encoding for server→client snapshots. Deployed on two Arduino UNO Q boards with coordinator on Mac.
+Working true peer-to-peer mesh: clients connect directly to sim-servers via WSS, each server broadcasts full world view (authoritative + shadow entities), inputs for non-local entities are forwarded via UDP. Coordinator handles peer discovery, rebalancing, and client assignment. Binary encoding for server→client snapshots (47 bytes/entity). Bevy ECS for entity management. Deployed on three Arduino UNO Q boards with Pi Zero W2 as coordinator — entire mesh runs on embedded hardware with TLS.
 
 ## What's Missing for Smooth Gameplay
 

@@ -4,6 +4,7 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use registry::Registry;
 use shared::protocol::CoordClientMsg;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -20,6 +21,20 @@ struct Args {
     /// HTTP port for client assignment endpoint
     #[arg(long, default_value_t = 7871)]
     http_port: u16,
+
+    /// Directory to serve static client files from (e.g., built Vite output).
+    /// When set, serves files on all non-API paths instead of the coordinator dashboard.
+    #[arg(long)]
+    static_dir: Option<PathBuf>,
+
+    /// Path to TLS certificate file (PEM). When both --tls-cert and --tls-key
+    /// are provided, the HTTP server serves HTTPS instead of plain HTTP.
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM).
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 /// Internal event from a sim-server connection to the main registry loop.
@@ -29,6 +44,7 @@ enum RegistryEvent {
         udp_port: u16,
         ws_port: u16,
         host: Option<String>,
+        tls: bool,
         /// Channel to send messages back to this server's WS connection.
         reply_tx: mpsc::UnboundedSender<String>,
     },
@@ -52,11 +68,34 @@ async fn main() {
     let registry = Arc::new(RwLock::new(Registry::new()));
     let (event_tx, event_rx) = mpsc::unbounded_channel::<RegistryEvent>();
 
+    // Build TLS config if cert+key provided
+    let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let acceptor = build_tls_acceptor(cert_path, key_path)
+                .expect("Failed to build TLS config from provided cert/key");
+            tracing::info!(
+                "TLS enabled for HTTP server (cert={}, key={})",
+                cert_path.display(),
+                key_path.display()
+            );
+            Some(acceptor)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            panic!("Both --tls-cert and --tls-key must be provided together");
+        }
+        (None, None) => None,
+    };
+
     // Spawn the registry manager
     tokio::spawn(run_registry(event_rx, Arc::clone(&registry)));
 
-    // Spawn the HTTP assignment server
-    tokio::spawn(run_assignment_server(args.http_port, Arc::clone(&registry)));
+    // Spawn the HTTP(S) assignment server
+    tokio::spawn(run_assignment_server(
+        args.http_port,
+        Arc::clone(&registry),
+        args.static_dir,
+        tls_acceptor,
+    ));
 
     // Accept sim-server WebSocket connections
     let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
@@ -115,6 +154,7 @@ async fn handle_server_connection(
                     udp_port,
                     ws_port,
                     host,
+                    tls,
                 }) => {
                     // Use advertised host if provided, otherwise use the peer's source IP
                     let resolved_host = host.unwrap_or_else(|| addr.ip().to_string());
@@ -124,6 +164,7 @@ async fn handle_server_connection(
                         udp_port,
                         ws_port,
                         host: Some(resolved_host),
+                        tls,
                         reply_tx: reply_tx.clone(),
                     });
                 }
@@ -168,8 +209,8 @@ async fn run_registry(
                 let Some(event) = event else { break };
                 let mut reg = registry.write().await;
                 match event {
-                    RegistryEvent::Register { server_id, udp_port, ws_port, host, reply_tx } => {
-                        reg.register(server_id, udp_port, ws_port, host, reply_tx);
+                    RegistryEvent::Register { server_id, udp_port, ws_port, host, tls, reply_tx } => {
+                        reg.register(server_id, udp_port, ws_port, host, tls, reply_tx);
                         tracing::info!(
                             "Registered S{server_id} (udp:{udp_port} ws:{ws_port}) | {} servers total",
                             reg.server_count()
@@ -216,6 +257,39 @@ async fn run_registry(
             }
         }
     }
+}
+
+/// Build a tokio-rustls TLS acceptor from PEM certificate and key files.
+fn build_tls_acceptor(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    use rustls::pki_types::PrivateKeyDer;
+    use std::io::BufReader;
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("Failed to open cert file {}: {e}", cert_path.display()))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to parse certs: {e}"))?;
+    if certs.is_empty() {
+        return Err("No certificates found in cert file".into());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("Failed to open key file {}: {e}", key_path.display()))?;
+    let mut key_reader = BufReader::new(key_file);
+    let key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| format!("Failed to parse private key: {e}"))?
+        .ok_or("No private key found in key file")?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("Failed to build TLS config: {e}"))?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
 const COORDINATOR_DASHBOARD: &str = r##"<!DOCTYPE html>
@@ -404,106 +478,195 @@ setInterval(fetchServers, 10000);
 </body>
 </html>"##;
 
-/// HTTP server for client assignment, server list, and coordinator dashboard.
-async fn run_assignment_server(port: u16, registry: Arc<RwLock<Registry>>) {
+/// Handle a single HTTP request on a stream that implements AsyncRead + AsyncWrite.
+/// This contains all the routing logic, shared between plain TCP and TLS connections.
+async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    mut stream: S,
+    registry: Arc<RwLock<Registry>>,
+    static_dir: Option<Arc<PathBuf>>,
+) {
+    let mut buf = [0u8; 1024];
+    let n = match stream.read(&mut buf).await {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Handle CORS preflight
+    if request.starts_with("OPTIONS") {
+        let response = "HTTP/1.1 204 No Content\r\n\
+            Access-Control-Allow-Origin: *\r\n\
+            Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+            Access-Control-Allow-Headers: *\r\n\
+            Content-Length: 0\r\n\
+            Connection: close\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return;
+    }
+
+    // Parse request path
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    // Extract client host from Host header
+    let client_host: Option<String> = request
+        .lines()
+        .find(|l| l.len() > 5 && l[..5].eq_ignore_ascii_case("host:"))
+        .map(|l| {
+            let value = l[5..].trim();
+            value.split(':').next().unwrap_or(value).to_string()
+        });
+
+    match path {
+        "/assign" => {
+            let r = registry.read().await;
+            let assignment = r.get_least_loaded_ws_addr(client_host.as_deref());
+            drop(r);
+
+            let (status, body) = match assignment {
+                Some(ws_url) => (
+                    "200 OK",
+                    format!(r#"{{"ws_url":"{}"}}"#, ws_url),
+                ),
+                None => (
+                    "503 Service Unavailable",
+                    r#"{"error":"no servers available"}"#.to_string(),
+                ),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                 Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        "/servers" => {
+            let r = registry.read().await;
+            let list = r.get_server_list();
+            drop(r);
+
+            let body = serde_json::json!({ "servers": list }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        "/dashboard" => {
+            // Always serve coordinator dashboard at /dashboard
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        _ => {
+            if let Some(ref dir) = static_dir {
+                // Serve static client files
+                let file_path = if path == "/" { "/index.html" } else { path };
+                let full_path = dir.join(file_path.trim_start_matches('/'));
+                if let Ok(body) = tokio::fs::read(&full_path).await {
+                    let content_type = match full_path.extension().and_then(|e| e.to_str()) {
+                        Some("html") => "text/html",
+                        Some("js") => "application/javascript",
+                        Some("css") => "text/css",
+                        Some("json") => "application/json",
+                        Some("wasm") => "application/wasm",
+                        Some("png") => "image/png",
+                        Some("svg") => "image/svg+xml",
+                        Some("ico") => "image/x-icon",
+                        _ => "application/octet-stream",
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                } else {
+                    // SPA fallback: serve index.html for unknown paths
+                    let index = dir.join("index.html");
+                    if let Ok(body) = tokio::fs::read(&index).await {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.write_all(&body).await;
+                    } else {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    }
+                }
+            } else {
+                // No static dir -- serve coordinator dashboard
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        }
+    }
+    let _ = stream.shutdown().await;
+}
+
+/// HTTP(S) server for client assignment, server list, and coordinator dashboard.
+/// When `static_dir` is set, serves client files from that directory on non-API paths.
+/// When `tls_acceptor` is provided, serves HTTPS; otherwise serves plain HTTP.
+async fn run_assignment_server(
+    port: u16,
+    registry: Arc<RwLock<Registry>>,
+    static_dir: Option<PathBuf>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+) {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("Failed to bind HTTP assignment port");
-    tracing::info!("Client assignment HTTP on port {port}");
+    let static_dir = static_dir.map(Arc::new);
+    let scheme = if tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+    if let Some(ref dir) = static_dir {
+        tracing::info!("Client assignment {scheme} on port {port} (serving client from {dir:?})");
+    } else {
+        tracing::info!("Client assignment {scheme} on port {port}");
+    }
 
     loop {
-        let (mut stream, _) = match listener.accept().await {
+        let (tcp_stream, _) = match listener.accept().await {
             Ok(v) => v,
             Err(_) => continue,
         };
 
         let reg = Arc::clone(&registry);
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let request = String::from_utf8_lossy(&buf[..n]);
+        let static_dir = static_dir.clone();
 
-            // Handle CORS preflight
-            if request.starts_with("OPTIONS") {
-                let response = "HTTP/1.1 204 No Content\r\n\
-                    Access-Control-Allow-Origin: *\r\n\
-                    Access-Control-Allow-Methods: GET, OPTIONS\r\n\
-                    Access-Control-Allow-Headers: *\r\n\
-                    Content-Length: 0\r\n\
-                    Connection: close\r\n\r\n";
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-                return;
-            }
-
-            // Parse request path
-            let path = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("/");
-
-            // Extract client host from Host header
-            let client_host: Option<String> = request
-                .lines()
-                .find(|l| l.len() > 5 && l[..5].eq_ignore_ascii_case("host:"))
-                .map(|l| {
-                    let value = l[5..].trim();
-                    value.split(':').next().unwrap_or(value).to_string()
-                });
-
-            match path {
-                "/assign" => {
-                    let r = reg.read().await;
-                    let assignment = r.get_least_loaded_ws_addr(client_host.as_deref());
-                    drop(r);
-
-                    let (status, body) = match assignment {
-                        Some(ws_url) => (
-                            "200 OK",
-                            format!(r#"{{"ws_url":"{}"}}"#, ws_url),
-                        ),
-                        None => (
-                            "503 Service Unavailable",
-                            r#"{"error":"no servers available"}"#.to_string(),
-                        ),
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-                         Connection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
+        if let Some(ref acceptor) = tls_acceptor {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(tcp_stream).await {
+                    Ok(tls_stream) => {
+                        handle_http_request(tls_stream, reg, static_dir).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!("TLS handshake failed: {e}");
+                    }
                 }
-                "/servers" => {
-                    let r = reg.read().await;
-                    let list = r.get_server_list();
-                    drop(r);
-
-                    let body = serde_json::json!({ "servers": list }).to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-                         Connection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                }
-                _ => {
-                    // Serve coordinator dashboard
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                }
-            }
-            let _ = stream.shutdown().await;
-        });
+            });
+        } else {
+            tokio::spawn(async move {
+                handle_http_request(tcp_stream, reg, static_dir).await;
+            });
+        }
     }
 }
