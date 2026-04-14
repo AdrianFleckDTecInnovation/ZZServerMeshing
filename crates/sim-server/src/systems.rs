@@ -1,6 +1,6 @@
 use crate::components::*;
 use crate::conversion::{despawn_and_remove, spawn_from_entity_state_direct, to_entity_state};
-use crate::delta::{build_baseline, compute_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
+use crate::delta::{build_baseline, change_ratio, compute_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
 use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
@@ -33,6 +33,11 @@ const TRANSFER_MAX_RETRIES: u8 = 3;
 
 /// Maximum ticks a drain can be active before forcing shutdown.
 const DRAIN_TIMEOUT_TICKS: u64 = 600; // 30 seconds at 20Hz
+
+/// When this fraction of entities changed, send a full snapshot instead of a delta.
+/// Full snapshot header is 4 bytes smaller (27 vs 31) and avoids the overhead of
+/// delta encoding when nearly everything changed (common with NPC movement every tick).
+const DELTA_FALLBACK_THRESHOLD: f32 = 0.80;
 
 /// Send a TransferAck back to the source server of an authority transfer.
 /// Looks up the source server's UDP address in PeerAddresses. If the source
@@ -1177,16 +1182,47 @@ pub fn prepare_client_snapshot(
     let full_frame = Arc::new(encode_binary_snapshot(tick.0, &entities));
     snapshot.frame = Some((*full_frame).clone());
 
+    // Pre-loop probe: check whether delta compression is worthwhile (audit #049).
+    // All clients diff against baselines derived from the same entity set, so the
+    // change ratio is approximately the same for all of them. Compute it once using
+    // any client's baseline. If >80% of entities changed, skip compute_delta for ALL
+    // clients and send full snapshots directly, avoiding O(E*C) wasted HashMap lookups.
+    let force_full = registry
+        .clients
+        .values()
+        .find_map(|h| h.baseline.as_ref())
+        .map(|baseline| change_ratio(&entities, baseline) > DELTA_FALLBACK_THRESHOLD)
+        .unwrap_or(false);
+
     // Send per-client frames (delta or full).
     // IMPORTANT: Baseline is updated ONLY after try_send succeeds (fix for audit #018).
     // If the channel is full and the frame is dropped, the baseline is NOT advanced,
     // so the next tick re-diffs against the last state the client actually received.
     // On drop, we also force the next frame to be a full snapshot (clear baseline).
     for (_client_id, handle) in registry.clients.iter_mut() {
+        // Stale-ACK detection: if the client has not ACK'd recent frames for 2 seconds,
+        // force a full snapshot to resync (audit #021).
+        // Clamp to current server tick to prevent malicious clients from sending
+        // future ticks and bypassing stale-ACK detection (audit #025).
+        let acked = handle.acked_tick.load(std::sync::atomic::Ordering::Relaxed).min(tick.0);
+        let stale_ack = handle.last_sent_tick > 0
+            && handle.baseline.is_some()
+            && handle.last_sent_tick.saturating_sub(acked) > ACK_STALE_TICKS;
+
         let send_full = handle.baseline.is_none()
-            || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL;
+            || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL
+            || stale_ack
+            || force_full;
 
         if send_full {
+            if stale_ack {
+                tracing::info!(
+                    client_id = _client_id,
+                    acked_tick = acked,
+                    sent_tick = handle.last_sent_tick,
+                    "ACK stale, forcing full snapshot for client"
+                );
+            }
             // Full snapshot path: encode is shared via Arc, baseline built only on success.
             let frame = ClientFrame::Shared(Arc::clone(&full_frame));
             match handle.tx.try_send(frame) {
@@ -1194,6 +1230,7 @@ pub fn prepare_client_snapshot(
                     // Success: update baseline to match what we just sent
                     handle.baseline = Some(build_baseline(&entities));
                     handle.ticks_since_full = 1;
+                    handle.last_sent_tick = tick.0;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     // Frame dropped: clear baseline so next tick forces a full snapshot
@@ -1206,28 +1243,56 @@ pub fn prepare_client_snapshot(
                 }
             }
         } else {
-            // Delta path: compute delta against baseline, update baseline only on success.
+            // Delta path: compute delta against baseline, then decide if delta is worth it.
             let baseline = handle.baseline.as_ref().unwrap();
             let delta = compute_delta(&entities, baseline);
 
-            let removal_ids: Vec<EntityId> = delta.removals.clone();
-            let frame = ClientFrame::Owned(encode_binary_delta(tick.0, &delta.updates, &removal_ids));
+            // Heuristic: if >80% of entities changed, full snapshot is cheaper (audit #027).
+            // Full snapshot has a smaller header (27 vs 31 bytes) and avoids delta encoding CPU.
+            let change_ratio = if entities.is_empty() {
+                0.0
+            } else {
+                delta.updates.len() as f32 / entities.len() as f32
+            };
 
-            match handle.tx.try_send(frame) {
-                Ok(()) => {
-                    // Success: advance baseline to match the delta we just sent
-                    update_baseline(handle.baseline.as_mut().unwrap(), &delta);
-                    handle.ticks_since_full += 1;
+            if change_ratio > DELTA_FALLBACK_THRESHOLD {
+                // Too many changes -- send full snapshot instead of delta
+                let frame = ClientFrame::Shared(Arc::clone(&full_frame));
+                match handle.tx.try_send(frame) {
+                    Ok(()) => {
+                        handle.baseline = Some(build_baseline(&entities));
+                        handle.ticks_since_full = 1;
+                        handle.last_sent_tick = tick.0;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(client_id = _client_id,
+                            "Client frame channel full, dropping fallback full snapshot");
+                        handle.baseline = None;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Frame dropped: baseline NOT advanced. Clear it entirely to
-                    // force a full snapshot on the next tick, guaranteeing convergence.
-                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
-                    handle.baseline = None;
-                    handle.ticks_since_full = 0;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Client disconnected; will be cleaned up by unregister event
+            } else {
+                // Normal delta path
+                let removal_ids: Vec<EntityId> = delta.removals.clone();
+                let frame = ClientFrame::Owned(encode_binary_delta(tick.0, &delta.updates, &removal_ids));
+
+                match handle.tx.try_send(frame) {
+                    Ok(()) => {
+                        // Success: advance baseline to match the delta we just sent
+                        update_baseline(handle.baseline.as_mut().unwrap(), &delta);
+                        handle.ticks_since_full += 1;
+                        handle.last_sent_tick = tick.0;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        // Frame dropped: baseline NOT advanced. Clear it entirely to
+                        // force a full snapshot on the next tick, guaranteeing convergence.
+                        tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
+                        handle.baseline = None;
+                        handle.ticks_since_full = 0;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        // Client disconnected; will be cleaned up by unregister event
+                    }
                 }
             }
         }
@@ -1573,7 +1638,7 @@ mod tests {
 
     // -- per-client delta compression tests --
 
-    /// Helper: register a test client in the ClientRegistry and return (client_id, receiver).
+    /// Helper: register a test client in the ClientRegistry and return the receiver.
     fn register_test_client(world: &mut World, client_id: u64) -> tokio::sync::mpsc::Receiver<ClientFrame> {
         use std::sync::atomic::AtomicU64;
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
@@ -1581,6 +1646,20 @@ mod tests {
         world.resource_mut::<ClientRegistry>()
             .register_from_event(client_id, tx, acked);
         rx
+    }
+
+    /// Helper: register a test client and return both the receiver and acked_tick Arc.
+    /// Use when the test needs to manipulate the client's ACK state.
+    fn register_test_client_with_ack(
+        world: &mut World,
+        client_id: u64,
+    ) -> (tokio::sync::mpsc::Receiver<ClientFrame>, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        use std::sync::atomic::AtomicU64;
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
+        let acked = std::sync::Arc::new(AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>()
+            .register_from_event(client_id, tx, std::sync::Arc::clone(&acked));
+        (rx, acked)
     }
 
     #[test]
@@ -1649,6 +1728,9 @@ mod tests {
     fn per_client_delta_detects_entity_movement() {
         let mut world = setup_world(1);
         let (entity, _eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        // Need multiple entities so moving one stays below the 80% delta fallback threshold
+        spawn_auth_npc(&mut world, Vec3::new(10.0, 0.0, 10.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(20.0, 0.0, 20.0), 1);
         let mut rx = register_test_client(&mut world, 100);
 
         let mut schedule = Schedule::default();
@@ -1659,7 +1741,7 @@ mod tests {
         schedule.run(&mut world);
         rx.try_recv().unwrap().into_vec();
 
-        // Move the entity
+        // Move only the first entity (1/3 = 33% < 80%, stays in delta path)
         world.get_mut::<Position>(entity).unwrap().0 = Vec3::new(50.0, 0.0, 50.0);
 
         // Tick 2: delta should include the moved entity
@@ -1679,13 +1761,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         world.resource_mut::<ClientRegistry>()
-            .register_from_event(100, tx, acked);
+            .register_from_event(100, tx, std::sync::Arc::clone(&acked));
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
 
-        // Run 101 ticks: tick 1 = full, ticks 2-100 = delta, tick 101 = full again
-        for tick in 1..=101 {
+        // Run 101 ticks: tick 1 = full, ticks 2-100 = delta, tick 101 = full again.
+        // ACK each tick to prevent stale-ACK detection from interfering.
+        for tick in 1u64..=101 {
+            acked.store(tick.saturating_sub(1), std::sync::atomic::Ordering::Relaxed);
             world.resource_mut::<TickCounter>().0 = tick;
             schedule.run(&mut world);
         }
@@ -1853,6 +1937,670 @@ mod tests {
         assert_eq!(update_count, 1, "new entity should be in delta updates");
     }
 
+    // -- Delta fallback heuristic tests (audit #027) --
+
+    #[test]
+    fn delta_fallback_all_entities_changed() {
+        let mut world = setup_world(1);
+        // Spawn 10 entities
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (baseline established)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01);
+
+        // Move ALL 10 entities (100% > 80% threshold)
+        for e in &entities {
+            world.get_mut::<Position>(*e).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: should get full snapshot due to fallback heuristic
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x01,
+            "100% entities changed should trigger delta fallback to full snapshot");
+    }
+
+    #[test]
+    fn delta_fallback_below_threshold() {
+        let mut world = setup_world(1);
+        // Spawn 10 entities
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec();
+
+        // Move 7 of 10 entities (70% < 80% threshold)
+        for i in 0..7 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: should get delta (below threshold)
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02,
+            "70% entities changed should send delta, not full snapshot");
+    }
+
+    #[test]
+    fn delta_fallback_at_boundary() {
+        let mut world = setup_world(1);
+        // Spawn 10 entities
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec();
+
+        // Move 8 of 10 entities (80% = threshold, NOT exceeded -- strict >)
+        for i in 0..8 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: should get delta (threshold is strict >)
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02,
+            "80% entities changed (at boundary, not exceeded) should send delta");
+    }
+
+    #[test]
+    fn delta_fallback_just_above_boundary() {
+        let mut world = setup_world(1);
+        // Spawn 10 entities
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap().into_vec();
+
+        // Move 9 of 10 entities (90% > 80% threshold)
+        for i in 0..9 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: should get full snapshot (above threshold)
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x01,
+            "90% entities changed should trigger delta fallback to full snapshot");
+    }
+
+    // -- ACK-based baseline management tests (audit #021) --
+
+    #[test]
+    fn ack_stale_forces_full_snapshot() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (baseline established)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01);
+
+        // Simulate: client never ACKs (acked_tick stays at 0).
+        // Advance ticks so last_sent_tick - acked > ACK_STALE_TICKS (40).
+        // Run 41 more ticks (2-42) to build up the stale gap.
+        for tick in 2..=42 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap(); // consume frame
+        }
+
+        // At tick 42: last_sent_tick should be 42, acked=0, gap=42 > 40. Stale!
+        // Tick 43 should force a full snapshot due to stale ACK.
+        world.resource_mut::<TickCounter>().0 = 43;
+        schedule.run(&mut world);
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x01,
+            "stale ACK (gap > 40 ticks) should force full snapshot");
+        // Verify acked_tick is still 0
+        assert_eq!(acked.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ack_fresh_sends_delta() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Client ACKs every tick -- stays fresh
+        for tick in 2..=10 {
+            acked.store(tick - 1, std::sync::atomic::Ordering::Relaxed);
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let frame = rx.try_recv().unwrap().into_vec();
+            assert_eq!(frame[0], 0x02,
+                "fresh ACK should produce delta, not full snapshot (tick {tick})");
+        }
+    }
+
+    #[test]
+    fn ack_stale_new_client_no_false_positive() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, _acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: new client, baseline=None, last_sent_tick=0, acked=0
+        // Should get full snapshot because baseline is None, NOT because of stale ACK
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01, "new client gets full snapshot (baseline=None)");
+
+        // Tick 2: baseline is set, last_sent_tick=1, acked=0
+        // Gap: 1-0=1, which is < 40. NOT stale. Should get delta.
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "new client should get delta on second tick (not false-positive stale)");
+    }
+
+    #[test]
+    fn ack_at_boundary_not_stale() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, _acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Run up to tick 41: last_sent_tick=41, acked=0, gap=41-0=41 > 40. Stale!
+        // But at tick 41: last_sent_tick=40, acked=0, gap=40-0=40. NOT > 40 (strict >).
+        // Run exactly 40 ticks after baseline set (ticks 2-41).
+        for tick in 2..=41 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap(); // consume
+        }
+        // Now last_sent_tick=41, acked=0, gap=41 > 40 => stale
+        // Tick 42 should be full
+        world.resource_mut::<TickCounter>().0 = 42;
+        schedule.run(&mut world);
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x01, "gap of 41 > 40 should trigger stale ACK full snapshot");
+    }
+
+    #[test]
+    fn last_sent_tick_updated_on_send() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 50: full snapshot
+        world.resource_mut::<TickCounter>().0 = 50;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
+        assert_eq!(handle.last_sent_tick, 50, "last_sent_tick should be 50 after sending at tick 50");
+
+        // Tick 51: delta
+        world.resource_mut::<TickCounter>().0 = 51;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
+        assert_eq!(handle.last_sent_tick, 51, "last_sent_tick should be 51 after sending at tick 51");
+    }
+
+    #[test]
+    fn ack_stale_ticks_constant_value() {
+        assert_eq!(ACK_STALE_TICKS, 40, "ACK_STALE_TICKS should be 40 (2 seconds at 20Hz)");
+    }
+
+    #[test]
+    fn ack_clamp_to_server_tick() {
+        // A malicious client sends ACK with u64::MAX. The server clamps it to the
+        // current tick when reading it, so stale-ACK detection still works.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Malicious client sets acked_tick to u64::MAX
+        acked.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+
+        // Tick 2: the server should clamp acked to tick.0 (2), not use u64::MAX
+        // If not clamped, the stale-ACK check would see acked > last_sent_tick
+        // and never trigger, even if the client stops processing frames.
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        // Should get a delta (acked clamped to 2, gap = 1 - 2 = 0, not stale)
+        assert_eq!(f2[0], 0x02,
+            "clamped ACK should allow normal delta flow, not cause issues");
+
+        // Now set acked to 0 and advance 42 ticks -- should trigger stale even with
+        // a prior u64::MAX ACK in the atomic (stale detection uses clamped value)
+        acked.store(0, std::sync::atomic::Ordering::Relaxed);
+        for tick in 3..=44 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap();
+        }
+        world.resource_mut::<TickCounter>().0 = 45;
+        schedule.run(&mut world);
+        let f_stale = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f_stale[0], 0x01,
+            "after resetting ACK to 0 and advancing 42 ticks, stale detection should fire");
+    }
+
+    // -- Stale ACK recovery: client resumes ACKing after stale (WI-022) --
+
+    #[test]
+    fn ack_stale_recovery_resumes_delta() {
+        // After stale ACK triggers full snapshot, client resumes ACKing
+        // and should get deltas again (not stuck in full snapshot loop).
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (baseline established)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Client stops ACKing for 42 ticks (stale gap > 40)
+        for tick in 2..=43 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap();
+        }
+
+        // Tick 44: stale triggers full snapshot
+        world.resource_mut::<TickCounter>().0 = 44;
+        schedule.run(&mut world);
+        let stale_frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(stale_frame[0], 0x01, "stale ACK should trigger full snapshot");
+
+        // Client resumes ACKing (catches up to tick 44)
+        acked.store(44, std::sync::atomic::Ordering::Relaxed);
+
+        // Tick 45: should get delta (not another full)
+        world.resource_mut::<TickCounter>().0 = 45;
+        schedule.run(&mut world);
+        let recovery_frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(recovery_frame[0], 0x02,
+            "after client resumes ACKing, should get delta (not stuck in full snapshot loop)");
+    }
+
+    #[test]
+    fn ack_stale_exact_boundary_40_not_stale() {
+        // Gap of exactly 40 should NOT trigger stale (strict >).
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, _acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Run ticks 2 through 41 without ACKing.
+        // After tick 41: last_sent_tick=41, acked=0.
+        // But stale-ACK check at tick 41 uses last_sent_tick from the PREVIOUS tick (40).
+        // At tick 41: we check last_sent_tick=40, gap=40-0=40. Strict > means NOT stale.
+        for tick in 2..=41 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let frame = rx.try_recv().unwrap().into_vec();
+            assert_eq!(frame[0], 0x02,
+                "gap <= 40 should produce delta at tick {tick}");
+        }
+    }
+
+    #[test]
+    fn ack_stale_boundary_41_triggers() {
+        // Gap of 41 should trigger stale.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx, _acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Run ticks 2-41: all delta
+        for tick in 2..=41 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap();
+        }
+
+        // Tick 42: last_sent_tick=41, acked=0, gap=41 > 40. Stale!
+        world.resource_mut::<TickCounter>().0 = 42;
+        schedule.run(&mut world);
+        let frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(frame[0], 0x01,
+            "gap of 41 (> 40) should trigger stale ACK full snapshot");
+    }
+
+    // -- Delta fallback edge cases (WI-021) --
+
+    #[test]
+    fn delta_fallback_empty_entities_no_panic() {
+        // When entity count is 0, change_ratio should be 0.0 (guard against division by zero).
+        let mut world = setup_world(1);
+        // No entities spawned.
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (empty, but no baseline yet)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01, "first frame with no entities should be full snapshot");
+
+        // Tick 2: delta path with 0 entities. change_ratio = 0.0 / 0.0 => guarded to 0.0.
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "empty entity set should produce delta (no fallback to full)");
+    }
+
+    #[test]
+    fn delta_fallback_single_entity_100_percent() {
+        // 1 entity changed = 100% > 80%. Should trigger fallback.
+        let mut world = setup_world(1);
+        let (entity, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Move the single entity (100% > 80%)
+        world.get_mut::<Position>(entity).unwrap().0 = Vec3::new(50.0, 0.0, 50.0);
+
+        // Tick 2: should get full snapshot via fallback
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x01,
+            "single entity changed (100%) should trigger delta fallback to full snapshot");
+    }
+
+    #[test]
+    fn delta_fallback_resets_baseline_and_ticks_since_full() {
+        // After a fallback full snapshot, the baseline should be rebuilt and
+        // ticks_since_full should be reset. Next tick should be delta.
+        let mut world = setup_world(1);
+        let (entity, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Move the entity (100% > 80%, triggers fallback)
+        world.get_mut::<Position>(entity).unwrap().0 = Vec3::new(50.0, 0.0, 50.0);
+
+        // Tick 2: fallback full snapshot
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x01, "should be fallback full snapshot");
+
+        // Verify baseline was rebuilt: ticks_since_full should be 1
+        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
+        assert!(handle.baseline.is_some(), "baseline should be set after fallback full");
+        assert_eq!(handle.ticks_since_full, 1, "ticks_since_full should be 1 after fallback full");
+
+        // Tick 3: no changes -> delta (not another full)
+        world.resource_mut::<TickCounter>().0 = 3;
+        schedule.run(&mut world);
+        let f3 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f3[0], 0x02, "after fallback full, next unchanged tick should produce delta");
+    }
+
+    #[test]
+    fn delta_fallback_with_precise_fraction() {
+        // Use a number of entities where we can precisely control the fraction.
+        // 5 entities, 5 changed = 100%. 4 changed = 80% (exactly at boundary, not exceeded).
+        let mut world = setup_world(1);
+        let mut entities = Vec::new();
+        for i in 0..5 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 20.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx.try_recv().unwrap();
+
+        // Move 4/5 = 80% (at boundary, strict > means delta)
+        for i in 0..4 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "4/5 = 80% (not exceeded) should produce delta");
+
+        // Now move all 5 again (rebuild baseline first by consuming tick 2)
+        // Need to rebuild baseline -- trick: wait for tick 3 with 5/5 changed
+        for i in 0..5 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+        world.resource_mut::<TickCounter>().0 = 3;
+        schedule.run(&mut world);
+        let f3 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f3[0], 0x01, "5/5 = 100% (> 80%) should trigger fallback to full");
+    }
+
+    // -- Integration: delta + fallback + ACK interaction (multi-tick) --
+
+    #[test]
+    fn integration_delta_fallback_and_ack_lifecycle() {
+        // Simulate a full lifecycle:
+        // 1. Client connects, gets full snapshot
+        // 2. Normal deltas while ACKing
+        // 3. Client stops ACKing -> stale -> full snapshot
+        // 4. Client resumes ACKing -> deltas again
+        // 5. Mass movement -> fallback full snapshot
+        // 6. Normal deltas resume
+        let mut world = setup_world(1);
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 20.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Phase 1: First frame = full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f[0], 0x01, "phase 1: first frame should be full");
+
+        // Phase 2: Normal deltas while ACKing (ticks 2-10)
+        for tick in 2..=10 {
+            acked.store(tick - 1, std::sync::atomic::Ordering::Relaxed);
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let f = rx.try_recv().unwrap().into_vec();
+            assert_eq!(f[0], 0x02, "phase 2: normal ACK should produce delta at tick {tick}");
+        }
+
+        // Phase 3: Client stops ACKing. ACK stays at tick 10.
+        // Run 42 more ticks (11-52) to build up stale gap: 52 - 10 = 42 > 40.
+        for tick in 11..=52 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx.try_recv().unwrap(); // consume
+        }
+        // Tick 53: stale gap triggers full
+        world.resource_mut::<TickCounter>().0 = 53;
+        schedule.run(&mut world);
+        let f_stale = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f_stale[0], 0x01, "phase 3: stale ACK should trigger full snapshot");
+
+        // Phase 4: Client resumes ACKing -> deltas
+        acked.store(53, std::sync::atomic::Ordering::Relaxed);
+        world.resource_mut::<TickCounter>().0 = 54;
+        schedule.run(&mut world);
+        let f_resume = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f_resume[0], 0x02, "phase 4: resumed ACK should produce delta");
+
+        // Phase 5: Mass movement -> fallback
+        acked.store(54, std::sync::atomic::Ordering::Relaxed);
+        for e in &entities {
+            world.get_mut::<Position>(*e).unwrap().0 += Vec3::new(100.0, 0.0, 100.0);
+        }
+        world.resource_mut::<TickCounter>().0 = 55;
+        schedule.run(&mut world);
+        let f_fallback = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f_fallback[0], 0x01,
+            "phase 5: 100% entities changed should trigger fallback full snapshot");
+
+        // Phase 6: Normal deltas resume
+        acked.store(55, std::sync::atomic::Ordering::Relaxed);
+        world.resource_mut::<TickCounter>().0 = 56;
+        schedule.run(&mut world);
+        let f_normal = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f_normal[0], 0x02, "phase 6: normal operation should produce delta");
+    }
+
+    #[test]
+    fn integration_two_clients_independent_stale_detection() {
+        // Two clients: one ACKs, one does not. Only the stale client gets full snapshot.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        let (mut rx_a, acked_a) = register_test_client_with_ack(&mut world, 100);
+        let (mut rx_b, _acked_b) = register_test_client_with_ack(&mut world, 200);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: both get full
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx_a.try_recv().unwrap();
+        rx_b.try_recv().unwrap();
+
+        // Run 42 ticks: client A ACKs, client B does not
+        for tick in 2..=43 {
+            acked_a.store(tick - 1, std::sync::atomic::Ordering::Relaxed);
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            rx_a.try_recv().unwrap();
+            rx_b.try_recv().unwrap();
+        }
+
+        // Tick 44: client A should get delta, client B should get full (stale)
+        acked_a.store(43, std::sync::atomic::Ordering::Relaxed);
+        world.resource_mut::<TickCounter>().0 = 44;
+        schedule.run(&mut world);
+
+        let fa = rx_a.try_recv().unwrap().into_vec();
+        let fb = rx_b.try_recv().unwrap().into_vec();
+        assert_eq!(fa[0], 0x02, "client A (ACKing) should get delta");
+        assert_eq!(fb[0], 0x01, "client B (not ACKing) should get full snapshot due to stale");
+    }
+
     #[test]
     fn per_client_ticks_since_full_resets_on_full() {
         let mut world = setup_world(1);
@@ -1861,13 +2609,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         world.resource_mut::<ClientRegistry>()
-            .register_from_event(100, tx, acked);
+            .register_from_event(100, tx, std::sync::Arc::clone(&acked));
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
 
-        // Run to just before periodic full snapshot
-        for tick in 1..=100 {
+        // Run to just before periodic full snapshot.
+        // ACK each tick to prevent stale-ACK detection from interfering.
+        for tick in 1u64..=100 {
+            acked.store(tick.saturating_sub(1), std::sync::atomic::Ordering::Relaxed);
             world.resource_mut::<TickCounter>().0 = tick;
             schedule.run(&mut world);
         }
@@ -1877,12 +2627,14 @@ mod tests {
         }
 
         // Tick 101: should be full (periodic reset)
+        acked.store(100, std::sync::atomic::Ordering::Relaxed);
         world.resource_mut::<TickCounter>().0 = 101;
         schedule.run(&mut world);
         let f = rx.try_recv().unwrap().into_vec();
         assert_eq!(f[0], 0x01, "tick 101 should be periodic full snapshot");
 
         // Tick 102: should be delta again (counter reset)
+        acked.store(101, std::sync::atomic::Ordering::Relaxed);
         world.resource_mut::<TickCounter>().0 = 102;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap().into_vec();
@@ -5148,5 +5900,105 @@ mod tests {
             "TransferOutbound to dead server should be removed");
         assert!(world.resource::<EntityLookup>().0.contains_key(&transfer_eid),
             "Transferred entity should still exist");
+    }
+
+    // -- Pre-loop force_full probe tests (audit #049) --
+
+    #[test]
+    fn force_full_skips_delta_for_all_clients() {
+        // With 10 entities and 3 clients, moving all entities should trigger
+        // the pre-loop probe and send full snapshots to ALL clients without
+        // calling compute_delta for any of them.
+        let mut world = setup_world(1);
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx1 = register_test_client(&mut world, 100);
+        let mut rx2 = register_test_client(&mut world, 200);
+        let mut rx3 = register_test_client(&mut world, 300);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshots for all (baseline established)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        assert_eq!(rx1.try_recv().unwrap().into_vec()[0], 0x01);
+        assert_eq!(rx2.try_recv().unwrap().into_vec()[0], 0x01);
+        assert_eq!(rx3.try_recv().unwrap().into_vec()[0], 0x01);
+
+        // Move ALL 10 entities (100% > 80%)
+        for e in &entities {
+            world.get_mut::<Position>(*e).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: all 3 clients should get full snapshots via force_full
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        assert_eq!(rx1.try_recv().unwrap().into_vec()[0], 0x01,
+            "client 1 should get full snapshot via force_full");
+        assert_eq!(rx2.try_recv().unwrap().into_vec()[0], 0x01,
+            "client 2 should get full snapshot via force_full");
+        assert_eq!(rx3.try_recv().unwrap().into_vec()[0], 0x01,
+            "client 3 should get full snapshot via force_full");
+    }
+
+    #[test]
+    fn force_full_not_triggered_when_below_threshold() {
+        // With 10 entities and 2 clients, moving 7 (70% < 80%) should NOT
+        // trigger force_full -- clients should get deltas.
+        let mut world = setup_world(1);
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let (e, _) = spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+            entities.push(e);
+        }
+        let mut rx1 = register_test_client(&mut world, 100);
+        let mut rx2 = register_test_client(&mut world, 200);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshots
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        rx1.try_recv().unwrap();
+        rx2.try_recv().unwrap();
+
+        // Move 7 of 10 (70%)
+        for i in 0..7 {
+            world.get_mut::<Position>(entities[i]).unwrap().0 += Vec3::new(50.0, 0.0, 50.0);
+        }
+
+        // Tick 2: both clients should get deltas
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        assert_eq!(rx1.try_recv().unwrap().into_vec()[0], 0x02,
+            "client 1 should get delta when below threshold");
+        assert_eq!(rx2.try_recv().unwrap().into_vec()[0], 0x02,
+            "client 2 should get delta when below threshold");
+    }
+
+    #[test]
+    fn force_full_no_clients_with_baseline_skips_probe() {
+        // When no clients have baselines (all new), force_full should be false.
+        // All clients get full snapshots via the baseline.is_none() path, not force_full.
+        let mut world = setup_world(1);
+        for i in 0..5 {
+            spawn_auth_npc(&mut world, Vec3::new(i as f32 * 10.0, 0.0, 0.0), 1);
+        }
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: no baseline exists, so force_full probe returns false (unwrap_or(false))
+        // Client still gets full snapshot via baseline.is_none()
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        assert_eq!(rx.try_recv().unwrap().into_vec()[0], 0x01,
+            "new client with no baseline should get full snapshot");
     }
 }

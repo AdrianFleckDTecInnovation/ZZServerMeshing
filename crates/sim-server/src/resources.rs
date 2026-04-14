@@ -155,6 +155,12 @@ pub struct TimingAccumulator {
 /// Per-client channel size. 8 frames = 400ms at 20Hz -- enough buffer for brief lag spikes.
 pub const PER_CLIENT_CHANNEL_SIZE: usize = 8;
 
+/// Ticks without ACK progress before forcing a full snapshot.
+/// 40 ticks = 2 seconds at 20Hz. Faster recovery than the 5-second periodic full
+/// (FULL_SNAPSHOT_INTERVAL = 100 ticks). Detects clients that stopped processing frames
+/// (e.g., browser tab backgrounded).
+pub const ACK_STALE_TICKS: u64 = 40;
+
 /// Registry of connected clients, each with its own frame channel and delta state.
 #[derive(Resource, Default)]
 pub struct ClientRegistry {
@@ -178,6 +184,7 @@ impl ClientRegistry {
                 acked_tick,
                 baseline: None,
                 ticks_since_full: 0,
+                last_sent_tick: 0,
             },
         );
         if client_id >= self.next_id {
@@ -197,13 +204,14 @@ pub struct ClientHandle {
     /// The player entity owned by this client (set on SpawnPlayer).
     pub player_id: Option<EntityId>,
     /// Last tick ACK'd by this client. Written by handle_client (async), read by game loop (ECS).
-    /// Currently used for diagnostics; future: conditional baseline confirmation.
-    #[allow(dead_code)]
+    /// Used by prepare_client_snapshot for stale-ACK detection (audit #021).
     pub acked_tick: Arc<AtomicU64>,
     /// Baseline entity state for delta computation. None until first full snapshot sent.
     pub baseline: Option<HashMap<EntityId, CompactEntityState>>,
     /// Ticks since last forced full snapshot.
     pub ticks_since_full: u32,
+    /// Tick of the most recently sent frame. Used with acked_tick for stale-ACK detection.
+    pub last_sent_tick: u64,
 }
 
 // -- Inbound event types --

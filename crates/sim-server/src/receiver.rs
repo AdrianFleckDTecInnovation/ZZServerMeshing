@@ -75,7 +75,7 @@ pub async fn run_udp_receiver(
                 server_id,
                 entities,
             } => {
-                let mut q = inbound.queue.lock().await;
+                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.peer_updates.push(PeerUpdate {
                     tick,
                     server_id,
@@ -89,7 +89,7 @@ pub async fn run_udp_receiver(
                 to_server,
                 full_state,
             } => {
-                let mut q = inbound.queue.lock().await;
+                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.authority_transfers.push(InboundTransfer {
                     tick,
                     entity_id,
@@ -109,7 +109,7 @@ pub async fn run_udp_receiver(
                 direction,
                 seq,
             } => {
-                let mut q = inbound.queue.lock().await;
+                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.forwarded_inputs.push(ForwardedInput {
                     entity_id,
                     direction,
@@ -117,7 +117,7 @@ pub async fn run_udp_receiver(
                 });
             }
             PeerMessage::ForwardedRemove { entity_id } => {
-                let mut q = inbound.queue.lock().await;
+                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.forwarded_removes.push(ForwardedRemove { entity_id });
                 tracing::info!(
                     entity = %entity_id,
@@ -125,7 +125,7 @@ pub async fn run_udp_receiver(
                 );
             }
             PeerMessage::TransferAck { entity_id, tick } => {
-                let mut q = inbound.queue.lock().await;
+                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.transfer_acks.push(InboundTransferAck { entity_id, tick });
                 tracing::debug!(
                     entity = %entity_id,
@@ -166,7 +166,7 @@ pub async fn run_udp_receiver(
                 if entry.received.len() == entry.total_chunks as usize {
                     // Complete! Push to inbound queue
                     let complete = reassembly.remove(&key).unwrap();
-                    let mut q = inbound.queue.lock().await;
+                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                     q.peer_updates.push(PeerUpdate {
                         tick,
                         server_id,

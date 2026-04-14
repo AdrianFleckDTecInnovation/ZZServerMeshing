@@ -9,6 +9,14 @@ export const inputLatency: Scenario = {
     const SAMPLES = 30;
     const latencies: number[] = [];
 
+    // Record existing player IDs so we can find the newly spawned one
+    const preSpawnSnap = ctx.getLatestSnapshot();
+    const existingPlayerIds = new Set(
+      (preSpawnSnap?.entities ?? [])
+        .filter(e => e.entity_type === 'Player')
+        .map(e => e.id)
+    );
+
     // Spawn a player entity to test with
     ctx.log('Spawning test player...');
     ctx.server.send(JSON.stringify({
@@ -19,7 +27,7 @@ export const inputLatency: Scenario = {
 
     await ctx.sleep(1000);
 
-    // Find our player entity
+    // Find our newly spawned player entity (not a pre-existing one)
     const snapshot = ctx.getLatestSnapshot();
     if (!snapshot) {
       return {
@@ -31,20 +39,34 @@ export const inputLatency: Scenario = {
       };
     }
 
-    const players = snapshot.entities.filter(e => e.entity_type === 'Player');
-    if (players.length === 0) {
-      return {
-        name: 'input-latency',
-        status: 'fail',
-        summary: 'No player entity found',
-        details: [],
-        durationMs: 0,
-      };
+    const newPlayers = snapshot.entities.filter(
+      e => e.entity_type === 'Player' && !existingPlayerIds.has(e.id)
+    );
+    const allPlayers = snapshot.entities.filter(e => e.entity_type === 'Player');
+
+    if (newPlayers.length === 0) {
+      // Fallback: use the auto-assigned player (spawned on connect, always local)
+      // Parse the server port from the URL to find which server we're on
+      const portMatch = ctx.serverUrl.match(/:(\d+)/);
+      const wsPort = portMatch ? parseInt(portMatch[1]) : 0;
+      const connectedServer = wsPort > 0 ? wsPort - 7877 : 0;
+
+      // Find a player on our connected server
+      const localPlayer = allPlayers.find(p => p.authority_server === connectedServer);
+      if (!localPlayer) {
+        return {
+          name: 'input-latency',
+          status: 'fail',
+          summary: `No local player found (${allPlayers.length} players exist, connected to S${connectedServer})`,
+          details: allPlayers.map(p => `  ${p.id.substring(0, 8)}... on S${p.authority_server}`),
+          durationMs: 0,
+        };
+      }
+      newPlayers.push(localPlayer);
     }
 
-    // Use the last spawned player
-    const player = players[players.length - 1];
-    details.push(`Test player: ${player.id.substring(0, 8)}... on S${player.authority_server}`);
+    const player = newPlayers[0];
+    details.push(`Test player: ${player.id.substring(0, 8)}... on S${player.authority_server} (connected to ${ctx.serverUrl})`);
 
     // Measure latency by sending MoveInput and waiting for position change
     ctx.log(`Measuring ${SAMPLES} input round-trips...`);
@@ -92,7 +114,17 @@ export const inputLatency: Scenario = {
       }
 
       if (!observed) {
-        details.push(`Sample ${i + 1}: timeout (no position change observed)`);
+        // Debug: log what we actually saw
+        const debugSnap = ctx.getLatestSnapshot();
+        const debugP = debugSnap?.entities.find(e => e.id === player.id);
+        const debugPlayers = debugSnap?.entities.filter(e => e.entity_type === 'Player') ?? [];
+        const debugDetails = debugP
+          ? `vel=[${debugP.velocity.map(v => v.toFixed(2))}] pos=[${debugP.position.map(v => v.toFixed(2))}] auth=S${debugP.authority_server}`
+          : `entity not found in ${debugSnap?.entities.length ?? 0} entities (${debugPlayers.length} players: ${debugPlayers.map(p => p.id.substring(0, 8)).join(',')})`;
+        const prevVel = prevPlayer?.velocity ?? [0, 0, 0];
+        if (i < 3) { // Only log first 3 timeouts with full detail
+          details.push(`Sample ${i + 1}: timeout (${debugDetails}, prevVel=[${prevVel.map(v => v.toFixed(2))}], dir=[${dir}])`);
+        }
       }
 
       // Brief pause between samples

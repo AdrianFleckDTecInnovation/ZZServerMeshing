@@ -9,6 +9,15 @@ export const inputSeqEcho: Scenario = {
 
     // ── Step 1: Spawn a player entity ──
     ctx.log('Spawning test player...');
+
+    // Record existing player IDs so we can find ours after spawn
+    const preSnap = ctx.getLatestSnapshot();
+    const existingPlayerIds = new Set(
+      (preSnap?.entities ?? []).filter(e => e.entity_type === 'Player').map(e => e.id)
+    );
+
+    // Spawn directly on the primary connection (not round-robin) so the player
+    // is authoritative on the server we're connected to
     ctx.server.send(JSON.stringify({
       type: 'SpawnEntity',
       position: [50, 0, 50],
@@ -17,7 +26,7 @@ export const inputSeqEcho: Scenario = {
 
     await ctx.sleep(1000);
 
-    // Find player entities in the snapshot
+    // Find OUR player by diffing the entity list
     const snap = ctx.getLatestSnapshot();
     if (!snap) {
       return {
@@ -29,19 +38,25 @@ export const inputSeqEcho: Scenario = {
       };
     }
 
-    const players = snap.entities.filter(e => e.entity_type === 'Player');
-    if (players.length === 0) {
-      return {
-        name: 'input-seq-echo',
-        status: 'fail',
-        summary: 'No Player entities found after spawn',
-        details: [`Snapshot has ${snap.entities.length} entities but none are Player type`],
-        durationMs: 0,
-      };
+    const newPlayers = snap.entities.filter(
+      e => e.entity_type === 'Player' && !existingPlayerIds.has(e.id)
+    );
+    if (newPlayers.length === 0) {
+      // Fallback: try any player
+      const allPlayers = snap.entities.filter(e => e.entity_type === 'Player');
+      if (allPlayers.length === 0) {
+        return {
+          name: 'input-seq-echo',
+          status: 'fail',
+          summary: 'No Player entities found after spawn',
+          details: [`Snapshot has ${snap.entities.length} entities but none are Player type`],
+          durationMs: 0,
+        };
+      }
+      newPlayers.push(allPlayers[allPlayers.length - 1]);
     }
 
-    // Use the last spawned player (most likely ours)
-    const player = players[players.length - 1];
+    const player = newPlayers[0];
     details.push(`Test player: ${player.id.substring(0, 8)}... on S${player.authority_server}`);
     details.push(`Initial last_input_seq: ${player.last_input_seq}`);
     ctx.log(`Player: ${player.id.substring(0, 8)}... seq=${player.last_input_seq}`);

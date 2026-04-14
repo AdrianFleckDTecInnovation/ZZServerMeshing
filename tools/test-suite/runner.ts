@@ -230,9 +230,47 @@ function decodeBinaryFrame(data: Buffer): WorldSnapshot | null {
   return null;
 }
 
-function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig): TestContext {
+// WebSocket options (must be defined before openSpawnConnections uses it)
+const wsOptions: Record<string, any> = {};
+
+// Fetch WebSocket URLs for all servers from the coordinator
+async function fetchServerUrls(): Promise<string[]> {
+  try {
+    const resp = await fetch(`${coordinatorUrl}/servers`, { signal: AbortSignal.timeout(3000) });
+    if (!resp.ok) return [];
+    const data: { servers: { host: string; ws_port: number }[] } = await resp.json();
+    const wsProto = config.serverUrl.startsWith('wss') ? 'wss' : 'ws';
+    return data.servers.map(s => `${wsProto}://${s.host}:${s.ws_port}`);
+  } catch {
+    return [];
+  }
+}
+
+// Open WebSocket connections to all servers for spawn distribution.
+// Returns only the connections that succeeded. Falls back to empty array
+// on total failure (caller should use primary connection as fallback).
+async function openSpawnConnections(urls: string[]): Promise<WebSocket[]> {
+  const connections: WebSocket[] = [];
+  for (const url of urls) {
+    try {
+      const ws = await new Promise<WebSocket>((resolve, reject) => {
+        const w = new WebSocket(url, wsOptions);
+        w.on('open', () => resolve(w));
+        w.on('error', reject);
+        setTimeout(() => reject(new Error('timeout')), 3000);
+      });
+      connections.push(ws);
+    } catch {
+      // Skip servers that fail to connect
+    }
+  }
+  return connections;
+}
+
+function createContext(ws: WebSocket, spawnConnections: WebSocket[], scenarioName: string, config: RunnerConfig): TestContext {
   let latestSnapshot: WorldSnapshot | null = null;
   let tickResolvers: { target: number; resolve: () => void }[] = [];
+  let spawnRoundRobinIndex = 0;
 
   ws.on('message', (data: Buffer | string, isBinary: boolean) => {
     try {
@@ -260,6 +298,10 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
       }
     } catch {}
   });
+
+  // Build the list of connections to use for spawning.
+  // If we have dedicated spawn connections, use those; otherwise fall back to primary.
+  const spawnTargets = spawnConnections.length > 0 ? spawnConnections : [ws];
 
   return {
     server: ws,
@@ -299,11 +341,20 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
           0,
           (Math.random() - 0.5) * 800,
         ];
-        ws.send(JSON.stringify({
+        const msg = JSON.stringify({
           type: 'SpawnEntity',
           position: pos,
           entity_type: options?.entityType ?? 'npc',
-        }));
+        });
+        // Round-robin across all available server connections
+        const target = spawnTargets[spawnRoundRobinIndex % spawnTargets.length];
+        try {
+          target.send(msg);
+        } catch {
+          // Connection may have died -- fall back to primary
+          ws.send(msg);
+        }
+        spawnRoundRobinIndex++;
       }
     },
 
@@ -319,7 +370,10 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
 
 // ── Main runner ──
 
-const wsOptions = config.serverUrl.startsWith('wss') ? { rejectUnauthorized: false } : {};
+// Set TLS options now that config is available
+if (config.serverUrl.startsWith('wss')) {
+  wsOptions.rejectUnauthorized = false;
+}
 
 async function connectServer(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -336,7 +390,7 @@ async function cleanupSpawnedEntities(
   const snap = getSnapshot();
   if (!snap) return 0;
 
-  const toRemove = snap.entities.filter(e => !baselineIds.has(e.id) && e.entity_type === 'Npc');
+  const toRemove = snap.entities.filter(e => !baselineIds.has(e.id));
   if (toRemove.length === 0) return 0;
 
   // Get all server addresses from coordinator so we can send RemoveEntity to each
@@ -353,7 +407,7 @@ async function cleanupSpawnedEntities(
     // Can't reach coordinator — just use the local connection
   }
 
-  // Connect to each server and send RemoveEntity for all extra NPCs
+  // Connect to each server and send RemoveEntity
   const connections: WebSocket[] = [];
   for (const url of serverUrls) {
     try {
@@ -367,15 +421,69 @@ async function cleanupSpawnedEntities(
     } catch {}
   }
 
-  for (const e of toRemove) {
-    const msg = JSON.stringify({ type: 'RemoveEntity', entity_id: e.id });
-    for (const ws of connections) {
-      try { ws.send(msg); } catch {}
+  // Send RemoveEntity in batches of 200 with a brief pause between batches
+  // to avoid overwhelming the server's WebSocket handler (large entity counts
+  // can cause TCP backpressure that blocks inbound message processing).
+  const BATCH_SIZE = 200;
+  for (let start = 0; start < toRemove.length; start += BATCH_SIZE) {
+    const batch = toRemove.slice(start, start + BATCH_SIZE);
+    for (const e of batch) {
+      const msg = JSON.stringify({ type: 'RemoveEntity', entity_id: e.id });
+      for (const ws of connections) {
+        try { ws.send(msg); } catch {}
+      }
+    }
+    // Brief pause between batches to let the server process
+    if (start + BATCH_SIZE < toRemove.length) {
+      await new Promise(r => setTimeout(r, 100));
     }
   }
 
-  // Wait for removals to propagate
-  await new Promise(r => setTimeout(r, 1000));
+  // Wait for removals to propagate, then verify via metrics.
+  // After heavy scenarios (e.g., steady-scale with thousands of entities), removal
+  // can take a while. We wait up to 20s for entity counts to return to baseline.
+  await new Promise(r => setTimeout(r, 2000));
+
+  let lastTotal = -1;
+  for (let attempt = 0; attempt < 9; attempt++) {
+    try {
+      let total = 0;
+      for (let s = 1; s <= config.serverCount; s++) {
+        try {
+          const m = await fetchMetrics(s, config.metricsBasePort);
+          total += m.entity_count;
+        } catch {}
+      }
+      if (total <= baselineIds.size + 5) break; // close enough (auto-spawned players)
+
+      // If entity count isn't decreasing, warn — removal may not be working
+      if (lastTotal >= 0 && total >= lastTotal) {
+        console.log(color.yellow(`  [cleanup] entity count not decreasing: ${total} (expected ~${baselineIds.size})`));
+      }
+      lastTotal = total;
+    } catch {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  // After entities are removed, wait for tick budgets to settle below 10%.
+  // This prevents starting the next test while servers are still processing
+  // the cleanup workload (replication of removals, shadow cleanup, etc.).
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      let maxBudget = 0;
+      for (let s = 1; s <= config.serverCount; s++) {
+        try {
+          const m = await fetchMetrics(s, config.metricsBasePort);
+          maxBudget = Math.max(maxBudget, m.tick_budget_pct);
+        } catch {}
+      }
+      if (maxBudget < 10) break;
+      if (attempt === 0) {
+        console.log(color.dim(`  [cleanup] waiting for tick budget to settle (currently ${maxBudget.toFixed(0)}%)...`));
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
 
   for (const ws of connections) {
     try { ws.close(); } catch {}
@@ -384,9 +492,110 @@ async function cleanupSpawnedEntities(
   return toRemove.length;
 }
 
+async function reassignServer(config: RunnerConfig): Promise<string> {
+  try {
+    const resp = await fetch(`${coordinatorUrl}/assign`);
+    const data: { ws_url: string } = await resp.json();
+    return data.ws_url;
+  } catch {
+    return config.serverUrl;
+  }
+}
+
+// ── Inter-test cluster health check ──
+// Verifies all expected servers are registered and peer counts are correct.
+// Waits up to 30 seconds for recovery if the cluster is degraded.
+async function checkClusterHealth(expectedServers: number): Promise<boolean> {
+  const MAX_WAIT_MS = 30_000;
+  const POLL_INTERVAL_MS = 2000;
+  const startTime = Date.now();
+  let warned = false;
+
+  while (Date.now() - startTime < MAX_WAIT_MS) {
+    try {
+      const resp = await fetch(`${coordinatorUrl}/servers`, { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data: { servers: { server_id: number; entity_count: number }[] } = await resp.json();
+      const registeredCount = data.servers.length;
+
+      // Check server count
+      if (registeredCount < expectedServers) {
+        if (!warned) {
+          console.log(color.yellow(`  [health] cluster degraded: ${registeredCount}/${expectedServers} servers registered, waiting for recovery...`));
+          warned = true;
+        }
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+        continue;
+      }
+
+      // Check peer counts via metrics — each server should see (serverCount - 1) peers
+      let peersOk = true;
+      for (let s = 1; s <= expectedServers; s++) {
+        try {
+          const m = await fetchMetrics(s, config.metricsBasePort);
+          if (m.peer_count < expectedServers - 1) {
+            peersOk = false;
+            if (!warned) {
+              console.log(color.yellow(`  [health] S${s} has ${m.peer_count}/${expectedServers - 1} peers, waiting...`));
+              warned = true;
+            }
+            break;
+          }
+        } catch {
+          // Metrics endpoint unreachable — server may still be starting
+          peersOk = false;
+          break;
+        }
+      }
+
+      if (peersOk) {
+        if (warned) {
+          console.log(color.green(`  [health] cluster recovered (${registeredCount} servers, peers OK)`));
+        }
+        return true;
+      }
+
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    } catch {
+      // Coordinator unreachable
+      if (!warned) {
+        console.log(color.yellow(`  [health] coordinator unreachable, waiting...`));
+        warned = true;
+      }
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    }
+  }
+
+  // Timed out — cluster still degraded
+  console.log(color.red(`  [health] ERROR: cluster still degraded after ${MAX_WAIT_MS / 1000}s — continuing anyway`));
+  return false;
+}
+
 async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<ScenarioResult> {
-  const ws = await connectServer(config.serverUrl);
-  const ctx = createContext(ws, scenario.name, config);
+  let ws: WebSocket;
+  try {
+    ws = await connectServer(config.serverUrl);
+  } catch {
+    // Server may have been killed by a prior scenario (e.g. crash-recovery).
+    // Get a fresh assignment from the coordinator and retry.
+    const newUrl = await reassignServer(config);
+    if (newUrl !== config.serverUrl) {
+      console.log(color.dim(`  [runner] Reassigned to ${newUrl} (previous server unavailable)`));
+      config.serverUrl = newUrl;
+    }
+    ws = await connectServer(config.serverUrl);
+  }
+
+  // Open connections to all servers for spawn distribution
+  const serverUrls = await fetchServerUrls();
+  const spawnConnections = serverUrls.length > 1
+    ? await openSpawnConnections(serverUrls)
+    : [];
+  if (spawnConnections.length > 1) {
+    console.log(color.dim(`  [runner] Spawn distribution: ${spawnConnections.length} servers`));
+  }
+
+  const ctx = createContext(ws, spawnConnections, scenario.name, config);
 
   // Wait for first snapshot to establish baseline
   await ctx.waitForTicks(1);
@@ -416,6 +625,10 @@ async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<Sc
     console.log(color.dim(`  [cleanup] removed ${removed} entities spawned during ${scenario.name}`));
   }
 
+  // Close all connections
+  for (const conn of spawnConnections) {
+    try { conn.close(); } catch {}
+  }
   ws.close();
   return result;
 }
@@ -476,8 +689,12 @@ async function main() {
       console.log(`  ${color.dim('│')} ${detail}`);
     }
 
-    // Brief pause between scenarios to let cluster stabilize
-    await new Promise(r => setTimeout(r, 2000));
+    // Inter-test health check: verify the cluster is intact before starting the next scenario.
+    // This catches cases where a heavy scenario (steady-scale, crash-recovery) left the cluster
+    // in a fragmented state that would poison subsequent tests.
+    if (scenario !== scenarios[scenarios.length - 1]) {
+      await checkClusterHealth(config.serverCount);
+    }
   }
 
   // Final summary

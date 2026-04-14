@@ -8,7 +8,11 @@ export const steadyScale: Scenario = {
     const details: string[] = [];
     const SPAWN_RATE = 100; // per second
     const BUDGET_CEILING = 80; // percent
-    const MAX_ENTITIES = 10000; // safety cap
+    // Allow capping via env var for resource-constrained hardware (e.g., UNO Q boards).
+    // Default 10000 for local dev, but board tests should pass STEADY_SCALE_MAX=3000.
+    const MAX_ENTITIES = process.env.STEADY_SCALE_MAX
+      ? parseInt(process.env.STEADY_SCALE_MAX, 10)
+      : 10000;
     const CHECK_INTERVAL_MS = 1000;
 
     // Record baseline
@@ -21,7 +25,7 @@ export const steadyScale: Scenario = {
     let ceilingEntityCount = 0;
     let ceilingMetrics: Awaited<ReturnType<typeof ctx.getAllMetrics>> | null = null;
 
-    ctx.log(`Scaling at ${SPAWN_RATE} entities/sec...`);
+    ctx.log(`Scaling at ${SPAWN_RATE} entities/sec (cap: ${MAX_ENTITIES}${process.env.STEADY_SCALE_MAX ? ' via STEADY_SCALE_MAX' : ''})...`);
 
     while (totalSpawned < MAX_ENTITIES) {
       // Spawn a batch

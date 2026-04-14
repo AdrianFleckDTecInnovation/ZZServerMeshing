@@ -4,6 +4,20 @@ Last updated: 2026-04-13
 
 ## Active
 
+### 005: Tick Loop Health (Mutex Swap, UDP Sender Task, Clean Exit)
+**Status:** Designed, ready for implementation
+**Priority:** High
+**Design:** `designs/005-tick-loop-health.md`
+**Work Items:** `work-items/005-tick-loop-health.md`
+**Summary:** Fixes 3 audit findings (#003, #013, #009) that introduce unpredictable latency and unsafe behavior in the 50ms game loop. (1) Replace 3 tokio::Mutex locks with std::sync::Mutex -- eliminates scheduler yields on sub-microsecond critical sections. (2) Move all UDP send_to calls off the tick loop into a dedicated sender task with an mpsc channel -- removes 6-15 awaited syscalls per tick. (3) Replace std::process::exit(0) on drain-complete with a clean loop break -- enables graceful runtime shutdown. 7 work items, estimated 5-8 hours.
+
+### 004: Data Integrity Fixes (Delta Compression and Baseline Management)
+**Status:** Designed, ready for implementation
+**Priority:** Medium-High
+**Design:** `designs/004-data-integrity-fixes.md`
+**Work Items:** `work-items/004-data-integrity-fixes.md`
+**Summary:** Fixes for 4 open audit findings in the delta compression system. (1) Wire ACKs into baseline management so stale clients get full snapshots within 2s instead of 5s. (2) Use vector distance instead of per-component threshold for change detection. (3) Fall back to full snapshot when >80% of entities changed (NPCs defeat delta). (4) Validate ACK tick values for monotonicity and server-tick bounds. Also confirms 3 findings (#018, #023, #024) are already resolved in code. 5 work items, estimated 4-6 hours.
+
 ### 003: Critical/High Audit Fixes (Two-Phase Transfer, UDP Chunking, Persistence Race)
 **Status:** Designed, ready for implementation
 **Priority:** Critical/High

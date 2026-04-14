@@ -54,6 +54,9 @@ enum RegistryEvent {
     },
     Disconnected {
         server_id: u16,
+        /// The reply_tx from this connection, used to verify we only unregister
+        /// the correct entry (not a newer re-registered connection).
+        reply_tx: mpsc::UnboundedSender<String>,
     },
     Draining {
         server_id: u16,
@@ -145,7 +148,7 @@ async fn handle_server_connection(
         }
     });
 
-    // Read inbound messages
+    // Read inbound messages.
     while let Some(Ok(msg)) = ws_stream.next().await {
         if let Message::Text(text) = msg {
             match serde_json::from_str::<CoordClientMsg>(&text) {
@@ -204,7 +207,10 @@ async fn handle_server_connection(
     // Server disconnected
     if let Some(sid) = server_id {
         tracing::info!("Sim-server S{sid} disconnected ({addr})");
-        let _ = event_tx.send(RegistryEvent::Disconnected { server_id: sid });
+        let _ = event_tx.send(RegistryEvent::Disconnected {
+            server_id: sid,
+            reply_tx: reply_tx.clone(),
+        });
     }
     sink_task.abort();
 }
@@ -234,23 +240,25 @@ async fn run_registry(
                     RegistryEvent::Heartbeat { server_id, entity_count } => {
                         reg.heartbeat(server_id, entity_count);
                     }
-                    RegistryEvent::Disconnected { server_id } => {
-                        let had_entities = reg.server_count() > 0;
-                        reg.unregister(server_id);
-                        tracing::info!(
-                            "Unregistered S{server_id} | {} servers remain",
-                            reg.server_count()
-                        );
-                        reg.broadcast_peer_list();
-                        // If this was an unexpected disconnect (crash), trigger recovery
-                        if server_id > 0 && had_entities {
-                            tracing::warn!("S{server_id} crashed — broadcasting recovery");
-                            reg.broadcast_recovery(server_id);
-                        }
-                    }
                     RegistryEvent::Draining { server_id } => {
                         tracing::info!("S{server_id} requesting graceful drain");
                         reg.drain_server(server_id);
+                    }
+                    RegistryEvent::Disconnected { server_id, reply_tx } => {
+                        // Only unregister if this disconnect is from the current connection,
+                        // not a stale one that was replaced by a re-registration.
+                        if reg.unregister_if_sender_matches(server_id, &reply_tx) {
+                            tracing::info!(
+                                "Unregistered S{server_id} | {} servers remain",
+                                reg.server_count()
+                            );
+                            reg.broadcast_peer_list();
+                            // If this was an unexpected disconnect (crash), trigger recovery
+                            if server_id > 0 {
+                                tracing::warn!("S{server_id} crashed — broadcasting recovery");
+                                reg.broadcast_recovery(server_id);
+                            }
+                        }
                     }
                 }
             }

@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(name = "sim-server", about = "Game simulation server")]
@@ -97,17 +96,17 @@ async fn main() {
 
     // Create shared async-to-ECS buffers
     let shared_inbound = Arc::new(game_loop::SharedInbound {
-        queue: tokio::sync::Mutex::new(resources::InboundQueue::default()),
+        queue: std::sync::Mutex::new(resources::InboundQueue::default()),
     });
     let shared_coord_events = Arc::new(game_loop::SharedCoordEvents {
-        queue: tokio::sync::Mutex::new(resources::CoordEventQueue::default()),
+        queue: std::sync::Mutex::new(resources::CoordEventQueue::default()),
     });
 
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
 
     // Create metrics collector
-    let metrics_collector = Arc::new(Mutex::new(metrics::MetricsCollector::new(args.server_id)));
+    let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
 
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
@@ -148,13 +147,28 @@ async fn main() {
         use_tls,
     ));
 
-    // Run the ECS game loop
+    // Create two UDP sender channels: replication (bulk, best-effort) and
+    // control (latency-critical: transfers, forwarded inputs).
+    let (udp_repl_tx, udp_repl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
+        game_loop::UDP_REPLICATION_CHANNEL_SIZE,
+    );
+    let (udp_ctrl_tx, udp_ctrl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
+        game_loop::UDP_CONTROL_CHANNEL_SIZE,
+    );
+    let sender_handle = tokio::spawn(game_loop::run_udp_sender(
+        Arc::clone(&udp_socket),
+        udp_ctrl_rx,
+        udp_repl_rx,
+    ));
+
+    // Run the ECS game loop (receives both channel senders, not the socket)
     let sim_handle = tokio::spawn(game_loop::run_game_loop_ecs(
         server_id,
         args.initial_npcs,
         Arc::clone(&shared_inbound),
         Arc::clone(&shared_coord_events),
-        Arc::clone(&udp_socket),
+        udp_repl_tx,
+        udp_ctrl_tx,
         Arc::clone(&metrics_collector),
         Arc::clone(&entity_count_atomic),
     ));
@@ -165,15 +179,17 @@ async fn main() {
         r = recv_handle => { if let Err(e) = r { tracing::error!("UDP receiver error: {e}"); } }
         r = coord_handle => { if let Err(e) = r { tracing::error!("Coordinator client error: {e}"); } }
         r = sim_handle => { if let Err(e) = r { tracing::error!("Game loop error: {e}"); } }
+        r = sender_handle => { if let Err(e) = r { tracing::error!("UDP sender error: {e}"); } }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Received shutdown signal -- initiating graceful drain");
             // Push drain event through the coordinator event queue
-            let mut q = shared_coord_events.queue.lock().await;
-            // Drain targets: we need the peer addresses, but we don't have direct access
-            // to the ECS world. Instead, push an empty drain directive -- the game loop
-            // will use whatever peers it knows about.
-            q.drain_directives.push(vec![]);
-            drop(q);
+            {
+                let mut q = shared_coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                // Drain targets: we need the peer addresses, but we don't have direct access
+                // to the ECS world. Instead, push an empty drain directive -- the game loop
+                // will use whatever peers it knows about.
+                q.drain_directives.push(vec![]);
+            }
             // Give the game loop time to drain entities
             tracing::info!("Draining entities to peers...");
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

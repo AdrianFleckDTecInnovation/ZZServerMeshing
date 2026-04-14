@@ -64,12 +64,37 @@ pub async fn run_coordinator_client(
             }
         });
 
-        // Listen for coordinator messages
-        while let Some(Ok(msg)) = ws_stream.next().await {
+        // Listen for coordinator messages.
+        // 30-second read timeout as defense-in-depth: if the TCP connection is
+        // half-open (no FIN received), we won't block forever waiting for frames.
+        // The coordinator sends PeerList on any topology change and heartbeat
+        // processing is continuous, so 30s of silence indicates a dead connection.
+        let read_timeout = std::time::Duration::from_secs(30);
+        loop {
+            let frame = tokio::time::timeout(read_timeout, ws_stream.next()).await;
+            let msg = match frame {
+                Ok(Some(Ok(msg))) => msg,
+                Ok(Some(Err(e))) => {
+                    tracing::warn!("Coordinator WebSocket error: {e}");
+                    break;
+                }
+                Ok(None) => {
+                    // Stream ended (connection closed cleanly)
+                    break;
+                }
+                Err(_) => {
+                    // Read timeout — assume connection is dead
+                    tracing::warn!(
+                        server_id,
+                        "No coordinator message for {read_timeout:?}, assuming dead connection"
+                    );
+                    break;
+                }
+            };
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<CoordServerMsg>(&text) {
                     Ok(CoordServerMsg::PeerList { peers }) => {
-                        let mut q = coord_events.queue.lock().await;
+                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.peer_list_updates.push(peers);
                         tracing::info!("Received PeerList update");
                     }
@@ -77,12 +102,12 @@ pub async fn run_coordinator_client(
                         entity_ids,
                         target_server,
                     }) => {
-                        let mut q = coord_events.queue.lock().await;
+                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.rebalance_directives.push((entity_ids, target_server));
                         tracing::info!("Received rebalance directive -> S{target_server}");
                     }
                     Ok(CoordServerMsg::DrainDirective { target_servers }) => {
-                        let mut q = coord_events.queue.lock().await;
+                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.drain_directives.push(target_servers.clone());
                         tracing::info!(
                             "Received drain directive -> {:?}",
@@ -96,7 +121,7 @@ pub async fn run_coordinator_client(
                         dead_server_id,
                         survivors,
                     }) => {
-                        let mut q = coord_events.queue.lock().await;
+                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.recover_events.push((dead_server_id, survivors));
                     }
                     Ok(CoordServerMsg::PlayerTransferResult {
@@ -122,7 +147,7 @@ pub async fn run_coordinator_client(
         }
 
         hb_task.abort();
-        tracing::warn!("Lost coordinator connection, reconnecting...");
+        tracing::warn!(server_id, "Lost coordinator connection, will re-register as S{server_id} in 2s...");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }

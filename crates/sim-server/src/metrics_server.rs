@@ -2,7 +2,6 @@ use crate::metrics::MetricsCollector;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
 const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
@@ -206,7 +205,7 @@ setInterval(poll, 1000);
 </html>"##;
 
 /// Minimal HTTP server that serves a dashboard at `/` and metrics JSON at `/metrics`.
-pub async fn run_metrics_server(port: u16, collector: Arc<Mutex<MetricsCollector>>) {
+pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<MetricsCollector>>) {
     let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -240,7 +239,7 @@ pub async fn run_metrics_server(port: u16, collector: Arc<Mutex<MetricsCollector
 
             if path == "/metrics" {
                 // JSON metrics
-                let snapshot = collector.lock().await.snapshot();
+                let snapshot = collector.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
                 let body = match serde_json::to_string_pretty(&snapshot) {
                     Ok(b) => b,
                     Err(_) => return,

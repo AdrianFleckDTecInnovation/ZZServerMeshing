@@ -96,7 +96,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // The player entity is created on the next game loop tick.
     let player_uuid = uuid::Uuid::new_v4();
     {
-        let mut q = inbound.queue.lock().await;
+        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push(ClientMessage::SpawnPlayer {
             player_id: player_uuid.to_string(),
             position: [0.0, 0.0, 0.0],
@@ -117,7 +117,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     if let Ok(json) = serde_json::to_string(&assign_msg) {
         if ws_sink.send(Message::Text(json.into())).await.is_err() {
             // Client disconnected during assignment -- remove the player
-            let mut q = inbound.queue.lock().await;
+            let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
             q.client_inputs.push(ClientMessage::RemoveEntity {
                 entity_id: player_uuid.to_string(),
             });
@@ -156,11 +156,11 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(ClientMessage::RequestSnapshot) => {
                                 // Route directly to force_full_snapshot_clients with client_id
-                                let mut q = inbound.queue.lock().await;
+                                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                                 q.force_full_snapshot_clients.push(client_id);
                             }
                             Ok(input) => {
-                                let mut q = inbound.queue.lock().await;
+                                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                                 q.client_inputs.push(input);
                             }
                             Err(e) => {
@@ -174,7 +174,17 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             let tick = u64::from_le_bytes(
                                 data[1..9].try_into().unwrap_or([0; 8]),
                             );
-                            acked_tick.store(tick, Ordering::Relaxed);
+                            // Monotonicity: only accept if tick > 0 and advances beyond
+                            // the previous ACK. Prevents stale/reordered ACKs from
+                            // regressing the value. Server tick clamping happens at the
+                            // consumer (prepare_client_snapshot) since we don't have
+                            // easy access to the server tick here (audit #025).
+                            if tick > 0 {
+                                let prev = acked_tick.load(Ordering::Relaxed);
+                                if tick > prev {
+                                    acked_tick.store(tick, Ordering::Relaxed);
+                                }
+                            }
                         }
                         // Ignore other binary messages from client
                     }
@@ -190,7 +200,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Client disconnected -- push RemoveEntity and unregister
     {
-        let mut q = inbound.queue.lock().await;
+        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push(ClientMessage::RemoveEntity {
             entity_id: player_uuid.to_string(),
         });
@@ -437,6 +447,188 @@ mod tests {
     fn ack_wrong_length_ignored() {
         let buf = vec![0x03u8, 0, 0, 0]; // too short
         assert!(buf.len() != 9);
+    }
+
+    // -- ACK validation tests (audit #025) --
+
+    /// Simulate the ACK validation logic from handle_client for unit testing.
+    /// The actual code runs in an async context; this helper extracts the logic.
+    fn apply_ack_validation(acked_tick: &AtomicU64, data: &[u8]) {
+        if data.len() == 9 && data[0] == 0x03 {
+            let tick = u64::from_le_bytes(
+                data[1..9].try_into().unwrap_or([0; 8]),
+            );
+            if tick > 0 {
+                let prev = acked_tick.load(Ordering::Relaxed);
+                if tick > prev {
+                    acked_tick.store(tick, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn make_ack_frame(tick: u64) -> Vec<u8> {
+        let mut buf = vec![0x03u8];
+        buf.extend_from_slice(&tick.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn ack_monotonicity_rejects_lower() {
+        let acked = AtomicU64::new(0);
+
+        // ACK tick=100 -> accepted
+        apply_ack_validation(&acked, &make_ack_frame(100));
+        assert_eq!(acked.load(Ordering::Relaxed), 100);
+
+        // ACK tick=50 -> rejected (not monotonically increasing)
+        apply_ack_validation(&acked, &make_ack_frame(50));
+        assert_eq!(acked.load(Ordering::Relaxed), 100, "lower tick should be rejected");
+
+        // ACK tick=150 -> accepted
+        apply_ack_validation(&acked, &make_ack_frame(150));
+        assert_eq!(acked.load(Ordering::Relaxed), 150);
+
+        // ACK tick=100 again -> rejected
+        apply_ack_validation(&acked, &make_ack_frame(100));
+        assert_eq!(acked.load(Ordering::Relaxed), 150, "equal-to-previous tick should be rejected");
+    }
+
+    #[test]
+    fn ack_rejects_zero() {
+        let acked = AtomicU64::new(0);
+
+        // ACK tick=0 -> rejected (tick > 0 required)
+        apply_ack_validation(&acked, &make_ack_frame(0));
+        assert_eq!(acked.load(Ordering::Relaxed), 0, "tick=0 should be rejected");
+
+        // ACK tick=1 -> accepted
+        apply_ack_validation(&acked, &make_ack_frame(1));
+        assert_eq!(acked.load(Ordering::Relaxed), 1);
+
+        // ACK tick=0 again -> still rejected
+        apply_ack_validation(&acked, &make_ack_frame(0));
+        assert_eq!(acked.load(Ordering::Relaxed), 1, "tick=0 should still be rejected after valid ACK");
+    }
+
+    #[test]
+    fn ack_monotonicity_sequential() {
+        let acked = AtomicU64::new(0);
+
+        for tick in 1..=100 {
+            apply_ack_validation(&acked, &make_ack_frame(tick));
+            assert_eq!(acked.load(Ordering::Relaxed), tick);
+        }
+    }
+
+    // -- ACK validation edge cases (WI-023) --
+
+    #[test]
+    fn ack_duplicate_same_tick_rejected() {
+        let acked = AtomicU64::new(0);
+
+        // First ACK tick=50 -> accepted
+        apply_ack_validation(&acked, &make_ack_frame(50));
+        assert_eq!(acked.load(Ordering::Relaxed), 50);
+
+        // Duplicate ACK tick=50 -> rejected (requires tick > prev, not >=)
+        apply_ack_validation(&acked, &make_ack_frame(50));
+        assert_eq!(acked.load(Ordering::Relaxed), 50, "duplicate ACK with same tick should be rejected");
+    }
+
+    #[test]
+    fn ack_large_jump_accepted() {
+        let acked = AtomicU64::new(0);
+
+        // ACK tick=1 -> accepted
+        apply_ack_validation(&acked, &make_ack_frame(1));
+        assert_eq!(acked.load(Ordering::Relaxed), 1);
+
+        // ACK jumps to 1_000_000 -> accepted (monotonically increasing)
+        apply_ack_validation(&acked, &make_ack_frame(1_000_000));
+        assert_eq!(acked.load(Ordering::Relaxed), 1_000_000,
+            "large jump forward should be accepted");
+    }
+
+    #[test]
+    fn ack_sequence_then_reset_attempt() {
+        let acked = AtomicU64::new(0);
+
+        // Normal sequence: 1, 2, 3, 4, 5
+        for tick in 1..=5 {
+            apply_ack_validation(&acked, &make_ack_frame(tick));
+        }
+        assert_eq!(acked.load(Ordering::Relaxed), 5);
+
+        // Attempt to reset to 1 -> rejected
+        apply_ack_validation(&acked, &make_ack_frame(1));
+        assert_eq!(acked.load(Ordering::Relaxed), 5, "reset attempt should be rejected");
+
+        // Attempt to reset to 0 -> rejected
+        apply_ack_validation(&acked, &make_ack_frame(0));
+        assert_eq!(acked.load(Ordering::Relaxed), 5, "reset to 0 should be rejected");
+
+        // Can still advance
+        apply_ack_validation(&acked, &make_ack_frame(6));
+        assert_eq!(acked.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn ack_out_of_order_batch() {
+        // Simulate out-of-order ACKs arriving: 3, 1, 5, 2, 4
+        let acked = AtomicU64::new(0);
+
+        apply_ack_validation(&acked, &make_ack_frame(3));
+        assert_eq!(acked.load(Ordering::Relaxed), 3);
+
+        apply_ack_validation(&acked, &make_ack_frame(1));
+        assert_eq!(acked.load(Ordering::Relaxed), 3, "1 < 3, should be rejected");
+
+        apply_ack_validation(&acked, &make_ack_frame(5));
+        assert_eq!(acked.load(Ordering::Relaxed), 5);
+
+        apply_ack_validation(&acked, &make_ack_frame(2));
+        assert_eq!(acked.load(Ordering::Relaxed), 5, "2 < 5, should be rejected");
+
+        apply_ack_validation(&acked, &make_ack_frame(4));
+        assert_eq!(acked.load(Ordering::Relaxed), 5, "4 < 5, should be rejected");
+    }
+
+    #[test]
+    fn ack_malformed_frame_too_short() {
+        let acked = AtomicU64::new(0);
+
+        // Various malformed frames
+        apply_ack_validation(&acked, &[0x03]);           // only type byte
+        apply_ack_validation(&acked, &[0x03, 0, 0, 0]);  // 4 bytes (need 9)
+        apply_ack_validation(&acked, &[]);                // empty
+
+        assert_eq!(acked.load(Ordering::Relaxed), 0, "malformed frames should not change acked_tick");
+    }
+
+    #[test]
+    fn ack_malformed_frame_wrong_type() {
+        let acked = AtomicU64::new(0);
+
+        // Correct length but wrong type byte
+        let mut buf = vec![0x01u8];
+        buf.extend_from_slice(&42u64.to_le_bytes());
+        apply_ack_validation(&acked, &buf);
+
+        assert_eq!(acked.load(Ordering::Relaxed), 0, "wrong type byte should not change acked_tick");
+    }
+
+    #[test]
+    fn ack_u64_max_accepted_if_monotonic() {
+        let acked = AtomicU64::new(0);
+
+        apply_ack_validation(&acked, &make_ack_frame(u64::MAX));
+        assert_eq!(acked.load(Ordering::Relaxed), u64::MAX,
+            "u64::MAX should be accepted from initial state");
+
+        // Nothing can advance past u64::MAX
+        apply_ack_validation(&acked, &make_ack_frame(1));
+        assert_eq!(acked.load(Ordering::Relaxed), u64::MAX, "cannot regress from u64::MAX");
     }
 
     // -- ClientRegistry tests --

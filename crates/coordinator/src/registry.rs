@@ -37,9 +37,15 @@ impl Registry {
         tls: bool,
         reply_tx: mpsc::UnboundedSender<String>,
     ) {
-        if self.servers.contains_key(&server_id) {
-            tracing::warn!("S{server_id} already registered — ignoring duplicate");
-            return;
+        if let Some(existing) = self.servers.get(&server_id) {
+            if existing.reply_tx.is_closed() {
+                tracing::info!(
+                    "S{server_id} re-registering (old connection dead) — replacing entry"
+                );
+            } else {
+                tracing::warn!("S{server_id} already registered with live connection — ignoring duplicate");
+                return;
+            }
         }
         self.servers.insert(
             server_id,
@@ -57,19 +63,53 @@ impl Registry {
     }
 
     pub fn unregister(&mut self, server_id: u16) {
+        // Removing the entry drops reply_tx, closing the mpsc channel.
+        // The sink task detects the closed channel, exits, and closes the
+        // WebSocket. The sim-server detects the disconnect and reconnects.
         self.servers.remove(&server_id);
+    }
+
+    /// Unregister a server only if its current reply_tx matches the given sender.
+    /// This prevents a stale Disconnected event from removing a newer re-registered
+    /// connection. Returns true if the server was actually removed.
+    pub fn unregister_if_sender_matches(
+        &mut self,
+        server_id: u16,
+        reply_tx: &mpsc::UnboundedSender<String>,
+    ) -> bool {
+        if let Some(existing) = self.servers.get(&server_id) {
+            if existing.reply_tx.same_channel(reply_tx) {
+                // The connection is already closing (this is the Disconnected event),
+                // Connection is already closing — just remove the entry.
+                self.servers.remove(&server_id);
+                return true;
+            }
+            tracing::debug!(
+                "S{server_id} disconnect from stale connection — ignoring (new connection active)"
+            );
+            return false;
+        }
+        false
     }
 
     pub fn heartbeat(&mut self, server_id: u16, entity_count: u32) {
         if let Some(entry) = self.servers.get_mut(&server_id) {
             entry.entity_count = entity_count;
             entry.last_heartbeat = std::time::Instant::now();
+        } else {
+            tracing::warn!(
+                server_id,
+                "Heartbeat from unregistered server S{server_id}, ignoring"
+            );
         }
     }
 
     /// Detect servers that have missed heartbeats.
+    /// Timeout is 15 seconds. With yield points in the game loop ensuring the
+    /// heartbeat task can run, 15s gives ample margin while keeping crash
+    /// detection responsive.
     pub fn detect_dead_servers(&self) -> Vec<u16> {
-        let timeout = std::time::Duration::from_secs(5);
+        let timeout = std::time::Duration::from_secs(15);
         let now = std::time::Instant::now();
         self.servers
             .values()
@@ -330,9 +370,9 @@ mod tests {
 
         // Even if gateway heartbeat is stale, it shouldn't be detected as dead
         // (gateway uses server_id 0, which is filtered)
-        // Manually set stale heartbeat
+        // Manually set stale heartbeat (well past the 15s timeout)
         if let Some(entry) = reg.servers.get_mut(&0) {
-            entry.last_heartbeat = std::time::Instant::now() - std::time::Duration::from_secs(10);
+            entry.last_heartbeat = std::time::Instant::now() - std::time::Duration::from_secs(45);
         }
         assert!(reg.detect_dead_servers().is_empty());
     }
@@ -667,9 +707,9 @@ mod tests {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
 
-        // Manually set stale heartbeat (6 seconds ago, timeout is 5s)
+        // Manually set stale heartbeat (20 seconds ago, timeout is 15s)
         reg.servers.get_mut(&1).unwrap().last_heartbeat =
-            std::time::Instant::now() - std::time::Duration::from_secs(6);
+            std::time::Instant::now() - std::time::Duration::from_secs(20);
 
         let dead = reg.detect_dead_servers();
         assert_eq!(dead, vec![1]);
@@ -682,11 +722,11 @@ mod tests {
         let _rx2 = register_server(&mut reg, 2);
         let _rx3 = register_server(&mut reg, 3);
 
-        // S1 and S3 are stale, S2 is fresh
+        // S1 and S3 are stale (past 15s timeout), S2 is fresh
         reg.servers.get_mut(&1).unwrap().last_heartbeat =
-            std::time::Instant::now() - std::time::Duration::from_secs(6);
+            std::time::Instant::now() - std::time::Duration::from_secs(20);
         reg.servers.get_mut(&3).unwrap().last_heartbeat =
-            std::time::Instant::now() - std::time::Duration::from_secs(10);
+            std::time::Instant::now() - std::time::Duration::from_secs(30);
 
         let mut dead = reg.detect_dead_servers();
         dead.sort();
@@ -730,13 +770,111 @@ mod tests {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
 
-        // Make it stale
+        // Make it stale (past the 15s timeout)
         reg.servers.get_mut(&1).unwrap().last_heartbeat =
-            std::time::Instant::now() - std::time::Duration::from_secs(10);
+            std::time::Instant::now() - std::time::Duration::from_secs(20);
         assert_eq!(reg.detect_dead_servers().len(), 1);
 
         // Heartbeat refreshes it
         reg.heartbeat(1, 50);
         assert!(reg.detect_dead_servers().is_empty());
     }
+
+    #[test]
+    fn re_register_replaces_dead_connection() {
+        let mut reg = Registry::new();
+        let (tx1, rx1) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx1.clone());
+        assert_eq!(reg.server_count(), 1);
+
+        // Drop the receiver to simulate the old connection dying
+        drop(rx1);
+        assert!(tx1.is_closed());
+
+        // Re-register with the same server_id should succeed
+        let (tx2, _rx2) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx2.clone());
+        assert_eq!(reg.server_count(), 1);
+
+        // The new connection should be active
+        assert!(!tx2.is_closed());
+        // Verify the new tx is the one stored
+        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx2));
+    }
+
+    #[test]
+    fn duplicate_register_with_live_connection_rejected() {
+        let mut reg = Registry::new();
+        let (tx1, _rx1) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx1.clone());
+
+        // Try to register again while the first connection is still alive
+        let (tx2, _rx2) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx2.clone());
+        assert_eq!(reg.server_count(), 1);
+
+        // The original tx should still be the one stored
+        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx1));
+    }
+
+    #[test]
+    fn unregister_if_sender_matches_current() {
+        let mut reg = Registry::new();
+        let (tx1, _rx1) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx1.clone());
+
+        // Unregister with matching sender should succeed
+        assert!(reg.unregister_if_sender_matches(1, &tx1));
+        assert_eq!(reg.server_count(), 0);
+    }
+
+    #[test]
+    fn unregister_if_sender_matches_stale_ignored() {
+        let mut reg = Registry::new();
+        let (tx_old, rx_old) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx_old.clone());
+
+        // Simulate re-registration: drop old rx, register new connection
+        drop(rx_old);
+        let (tx_new, _rx_new) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx_new.clone());
+
+        // Now a stale Disconnected event arrives with the old tx
+        // It should NOT unregister the new connection
+        assert!(!reg.unregister_if_sender_matches(1, &tx_old));
+        assert_eq!(reg.server_count(), 1);
+
+        // The new connection should still be stored
+        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx_new));
+    }
+
+    #[test]
+    fn unregister_if_sender_matches_nonexistent() {
+        let mut reg = Registry::new();
+        let (tx, _rx) = make_tx();
+        assert!(!reg.unregister_if_sender_matches(99, &tx));
+    }
+
+    #[test]
+    fn unregister_drops_channel() {
+        let mut reg = Registry::new();
+        let (tx, mut rx) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx);
+
+        reg.unregister(1);
+        assert_eq!(reg.server_count(), 0);
+
+        // Channel should be closed after entry is dropped
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn heartbeat_from_unregistered_server_is_noop() {
+        // After a server is unregistered via detect_dead_servers, heartbeats
+        // from it should be silently handled (logged, not panicked).
+        let mut reg = Registry::new();
+        reg.heartbeat(99, 100); // server 99 was never registered
+        assert_eq!(reg.server_count(), 0);
+    }
+
 }

@@ -42,6 +42,45 @@ Audited: 2026-04-13
 - **#039 (Drain retransfer loop)**: Remains medium. Unchanged by fixes.
 - **#032 (Chunk total_chunks validation)**: Remains medium. Unchanged by fixes.
 
+## Audit 5: Data Integrity Fix Verification (#021, #022, #025, #027)
+Audited: 2026-04-13
+
+5 new findings (045-049). 1 medium, 4 low.
+
+**Fixes verified**: All four data integrity fixes are correctly implemented.
+
+- **#022 fix (vec3 distance threshold)**: CORRECT. `distance_squared()` is equivalent to per-component for single-axis movement and strictly more permissive for diagonal movement, which is the intended fix. Boundary behavior is identical: 0.01 single-axis movement triggers neither old nor new code. See #045.
+- **#027 fix (delta fallback heuristic)**: CORRECT. Full snapshot sent when >80% entities changed. Baseline is correctly rebuilt via `build_baseline(&entities)` on success. `ticks_since_full` reset to 1. Next tick produces delta. Division-by-zero guarded for 0 entities. See #047.
+- **#021 fix (stale-ACK detection)**: CORRECT. `ACK_STALE_TICKS = 40` (2 seconds). Reads `acked_tick` with Relaxed ordering. Benign race with concurrent ACK writes -- worst case is one extra full snapshot. Recovery tested and verified. See #046.
+- **#025 fix (ACK tick validation)**: CORRECT. Monotonicity in `handle_client` prevents regression. Server tick clamp in `prepare_client_snapshot` prevents future-tick bypass. Neither layer can reject legitimate ACKs. See #048.
+
+**One actionable finding**: #049 (medium) -- `compute_delta` runs before the fallback check and is discarded when >80% entities changed. Wastes O(E) per client per tick in the common all-NPCs-moving case.
+
+## Audit 6: Tick Loop Health Fixes Verification (#003, #009, #013)
+Audited: 2026-04-13
+
+2 new findings (050-051). Both low severity.
+
+**Fixes verified**: All three tick loop health fixes are correctly implemented.
+
+- **#003 fix (std::sync::Mutex swap)**: CORRECT. All `tokio::sync::Mutex` replaced with `std::sync::Mutex` across 6 files. The `.lock().unwrap_or_else(|e| e.into_inner())` pattern correctly recovers from mutex poisoning. No lock is held across an `.await` point -- each lock acquisition is followed by synchronous `push()` or `mem::take()` operations and the guard is dropped before the next `.await`. With the multi-threaded tokio runtime (`#[tokio::main]`), a `std::sync::Mutex` blocked thread cannot deadlock against itself because receiver and game loop tasks run on different worker threads. Critical sections are sub-microsecond (pointer swaps only). This is the correct mutex type for this pattern.
+- **#009 fix (break instead of process::exit)**: CORRECT. `ShutdownRequested` check at `game_loop.rs:377` uses `break` to exit the tick loop. The function returns normally, the `tokio::spawn` JoinHandle resolves, and `tokio::select!` in `main.rs:181` catches the completion. All destructors run. The tokio runtime shuts down gracefully. The one caveat is that other spawned tasks (sender, receiver, WS server) are not explicitly joined -- they are cancelled by runtime shutdown. See #050.
+- **#013 fix (UDP sender task)**: CORRECT. Two separate `tokio::sync::mpsc` channels: replication (capacity 256, best-effort drops) and control (capacity 64, latency-critical). `run_udp_sender` uses `biased` select to drain control messages with priority over replication. The game loop uses `try_send` (non-blocking) for both channels, never blocking the tick loop. Separate drop counters log warnings every 5 seconds. The `biased` select does NOT starve replication under normal conditions because control messages are low-frequency (authority transfers and forwarded inputs happen infrequently relative to per-tick replication). Even under burst conditions (e.g., 50 transfers in one tick), the control channel holds all of them as a single `Batch` message, consuming one slot. The `UdpSocket` is safely shared between the sender task and receiver task via `Arc` -- tokio's `UdpSocket` supports concurrent `send_to` and `recv_from` from different tasks.
+
+**Heartbeat fix verified**: The entity count for heartbeats (`game_loop.rs:238-240`) now uses `Without<TransferOutbound>`, resolving finding #041.
+
+### Deadlock analysis for std::sync::Mutex in async context
+
+The concern: if task A holds the `std::sync::Mutex` and gets descheduled by the tokio runtime, then task B (running on the same worker thread) tries to acquire the same mutex, the worker thread blocks and cannot make progress on either task.
+
+Why this cannot happen in practice:
+1. The `#[tokio::main]` macro creates a multi-threaded runtime (default: one worker per CPU core).
+2. Each lock acquisition is immediately followed by a synchronous operation (`push`, `mem::take`) that completes in nanoseconds. The tokio runtime does not preempt synchronous code -- it only reschedules at `.await` points.
+3. Since the lock is never held across an `.await`, the holder cannot be descheduled while holding the lock. The lock-hold duration equals the synchronous critical section duration.
+4. Even on a single-threaded runtime, this would be safe because the lock is released synchronously before any yield point.
+
+The one theoretical risk would be a panic inside the critical section, which poisons the mutex. The `unwrap_or_else(|e| e.into_inner())` pattern handles this by extracting the data from the poisoned mutex, allowing the system to continue operating.
+
 ---
 
 ## All Findings by Severity
@@ -50,22 +89,22 @@ Audited: 2026-04-13
 |---|----------|----------|-------|--------|--------|
 | [002](002-authority-transfer-fire-and-forget.md) | critical | data-loss | Authority transfer is fire-and-forget over UDP | resolved by two-phase (#028-#033) | medium |
 | [001](001-async-bridge-data-loss-on-overwrite.md) | high | data-loss | Async-bridge swap overwrites unconsumed inbound data | open | small |
-| [003](003-tokio-mutex-awaited-in-tick-loop.md) | high | bottleneck | Tokio mutex awaited inside the 50ms tick loop | open | small |
+| [003](003-tokio-mutex-awaited-in-tick-loop.md) | high | bottleneck | Tokio mutex awaited inside the 50ms tick loop | **resolved** | small |
 | [004](004-entity-lookup-desync-risk.md) | high | race-condition | EntityLookup can desync from ECS world | open | small |
 | [007](007-drain-despawns-during-iteration.md) | high | race-condition | Drain system despawns entities while iterating over handles | open | small |
-| [013](013-udp-send-blocks-game-loop.md) | high | bottleneck | Async UDP sends block the game loop tick | open | medium |
-| [018](018-baseline-drift-on-dropped-frames.md) | high | data-loss | Server baseline advances even when client frame is dropped | open | small |
-| [023](023-client-delta-removal-vs-snapshot-entity-set-race.md) | high | data-loss | Client delta path does not remove ghost entities from baseline drift | open | small |
+| [013](013-udp-send-blocks-game-loop.md) | high | bottleneck | Async UDP sends block the game loop tick | **resolved** | medium |
+| [018](018-baseline-drift-on-dropped-frames.md) | high | data-loss | Server baseline advances even when client frame is dropped | **resolved** | small |
+| [023](023-client-delta-removal-vs-snapshot-entity-set-race.md) | high | data-loss | Client delta path does not remove ghost entities from baseline drift | **resolved** | small |
 | [028](028-dual-authority-during-transfer-window.md) | high | race-condition | Both servers simulate and replicate entity during two-phase ACK window | **resolved** | small |
 | [029](029-chunk-reassembly-memory-leak.md) | high | scalability | Chunk reassembly entries leak memory when peer crashes or chunks are lost | **resolved** | small |
 | [030](030-transfer-retry-uses-stale-state.md) | high | data-loss | Transfer retry re-sends stale entity state from initiation time | **resolved** | small |
 | [031](031-input-loss-during-player-transfer.md) | high | data-loss | Player inputs accepted but lost during two-phase transfer ACK window | **resolved** | small |
 | [033](033-transfer-ack-not-retransmitted.md) | **high** | data-loss | Transfer ACK is single UDP packet, loss causes permanent entity duplication | open (elevated from medium) | small |
-| [040](040-remove-entity-during-transfer-despawns-outbound.md) | **high** | data-loss | RemoveEntity during transfer despawns outbound entity, orphaning it on target | **new** | small |
+| [040](040-remove-entity-during-transfer-despawns-outbound.md) | **high** | data-loss | RemoveEntity during transfer despawns outbound entity, orphaning it on target | open | small |
 | [005](005-client-snapshot-double-iteration.md) | medium | bottleneck | Client snapshot system iterates queries three times | open | small |
 | [006](006-replication-clones-entire-entity-vec.md) | medium | bottleneck | Replication clones entire entity Vec every tick | open | small |
 | [008](008-outbound-vecs-never-shrink.md) | medium | scalability | Outbound Vec buffers grow but never shrink | open | small |
-| [009](009-process-exit-in-game-loop.md) | medium | operational | Game loop calls std::process::exit during drain | open | small |
+| [009](009-process-exit-in-game-loop.md) | medium | operational | Game loop calls std::process::exit during drain | **resolved** | small |
 | [010](010-exclusive-system-access-prevents-parallelism.md) | medium | bottleneck | Exclusive world access prevents ECS system parallelism | open | large |
 | [011](011-no-client-input-rate-limiting.md) | medium | operational | No rate limiting on client input | open | small |
 | [012](012-rebalance-directive-last-writer-wins.md) | medium | data-loss | Multiple rebalance directives overwrite -- only last survives | open | small |
@@ -73,25 +112,32 @@ Audited: 2026-04-13
 | [016](016-bincode-serialization-cost-at-scale.md) | medium | scalability | Bincode serialization cost scales linearly per-peer per-tick | open | medium |
 | [019](019-per-client-memory-unbounded-baselines.md) | medium | scalability | Per-client baseline HashMaps grow unbounded with entity count | open | small |
 | [020](020-delta-computation-cost-per-client.md) | medium | bottleneck | Delta computation runs O(N*E) per tick across all clients | open | medium |
-| [021](021-ack-not-used-for-baseline-confirmation.md) | medium | protocol | Client tick ACKs are stored but never consulted | open | medium |
-| [022](022-change-threshold-suppresses-small-movements.md) | medium | protocol | 0.01 threshold uses per-component comparison, may suppress diagonal motion | open | small |
-| [024](024-full-snapshot-clone-per-client.md) | medium | bottleneck | Full snapshot binary frame cloned N times for N clients | open | small |
+| [021](021-ack-not-used-for-baseline-confirmation.md) | medium | protocol | Client tick ACKs are stored but never consulted | **resolved** | medium |
+| [022](022-change-threshold-suppresses-small-movements.md) | medium | protocol | 0.01 threshold uses per-component comparison, may suppress diagonal motion | **resolved** | small |
+| [024](024-full-snapshot-clone-per-client.md) | medium | bottleneck | Full snapshot binary frame cloned N times for N clients | **resolved** | small |
 | [026](026-registration-snapshot-race.md) | medium | race-condition | Client registration and first snapshot race across tick boundary | open | medium |
-| [027](027-npc-simulation-changes-defeat-delta.md) | medium | bottleneck | NPC movement every tick defeats delta compression savings | open | small |
+| [027](027-npc-simulation-changes-defeat-delta.md) | medium | bottleneck | NPC movement every tick defeats delta compression savings | **resolved** | small |
 | [032](032-chunk-total-mismatch-no-validation.md) | medium | protocol | Chunk reassembly accepts mismatched total_chunks without validation | open | small |
 | [035](035-serialized-msg-memory-overhead.md) | medium | scalability | TransferOutbound stores full serialized message per entity | **resolved** (by #030 fix) | small |
 | [037](037-chunk-size-not-validated-against-udp-limit.md) | medium | scalability | ENTITIES_PER_CHUNK is a guess, not validated against UDP size limit | open | small |
 | [038](038-player-transfer-protocol-unimplemented.md) | medium | protocol | PlayerTransfer protocol handlers are log-only stubs | open | small |
 | [039](039-drain-retransfers-on-every-tick.md) | medium | bottleneck | Drain re-initiates transfers for aborted entities on every tick (infinite loop) | open | small |
-| [041](041-heartbeat-counts-frozen-entities.md) | **medium** | operational | Heartbeat entity count includes frozen TransferOutbound entities | **new** | small |
-| [042](042-transfer-outbound-entity-invisible-to-clients.md) | **medium** | protocol | TransferOutbound entities invisible to source server's clients for 1-3 ticks | **new** | small |
+| [041](041-heartbeat-counts-frozen-entities.md) | medium | operational | Heartbeat entity count includes frozen TransferOutbound entities | **resolved** | small |
+| [042](042-transfer-outbound-entity-invisible-to-clients.md) | medium | protocol | TransferOutbound entities invisible to source server's clients for 1-3 ticks | open | small |
+| [049](049-compute-delta-before-fallback-wastes-cpu.md) | medium | bottleneck | compute_delta runs before fallback check, wasted when >80% changed | **resolved** | small |
 | [014](014-tick-counter-u64-not-synchronized.md) | low | protocol | Tick counter u64 not synchronized across servers | open | small |
 | [017](017-behavioral-divergence-rebalance-ignores-entity-ids.md) | low | protocol | Rebalance directive entity_ids field ignored | open | small |
-| [025](025-ack-parsing-no-validation.md) | low | protocol | Binary ACK parsing accepts any tick value without validation | open | small |
+| [025](025-ack-parsing-no-validation.md) | low | protocol | Binary ACK parsing accepts any tick value without validation | **resolved** | small |
 | [034](034-transfer-timeout-off-by-one.md) | low | protocol | Transfer timeout uses strict > causing 50ms off-by-one | open | small |
 | [036](036-schedule-ordering-acks-before-transfers.md) | low | protocol | Schedule ordering verified correct, documents rationale | open | small |
-| [043](043-global-sweep-stale-threshold-too-low.md) | **low** | scalability | Global reassembly sweep may evict entries from legitimately slow peers | **new** | small |
-| [044](044-transfer-retry-component-access-after-query.md) | **low** | race-condition | Transfer retry uses unwrap on component access after query collection | **new** | small |
+| [043](043-global-sweep-stale-threshold-too-low.md) | low | scalability | Global reassembly sweep may evict entries from legitimately slow peers | open | small |
+| [044](044-transfer-retry-component-access-after-query.md) | low | race-condition | Transfer retry uses unwrap on component access after query collection | open | small |
+| [045](045-vec3-threshold-more-permissive-on-single-axis.md) | low | protocol | vec3 distance_squared equivalent for axis-aligned, more permissive for diagonal | verification | n/a |
+| [046](046-stale-ack-race-with-concurrent-ack.md) | low | race-condition | Stale-ACK check has benign race with concurrent client ACK writes | verification | n/a |
+| [047](047-delta-fallback-baseline-correctly-rebuilt.md) | low | protocol | Delta fallback full snapshot correctly rebuilds baseline | verification | n/a |
+| [048](048-ack-clamp-rejects-legitimate-reordered-acks.md) | low | protocol | ACK validation cannot reject legitimate ACKs; tick wraparound not a concern | verification | n/a |
+| [050](050-sender-drain-cancelled-on-game-loop-exit.md) | **low** | data-loss | UDP sender task drain cancelled by runtime shutdown on game loop exit | **new** | small |
+| [051](051-inbound-swap-holds-mutex-during-ecs-write.md) | **low** | bottleneck | Inbound swap holds shared mutex during ECS resource write (unnecessary) | **new** | small |
 
 ## Re-Audit Fix Verification Detail
 
@@ -159,7 +205,7 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 
 1. **#040** (high) -- Add TransferOutbound check to RemoveEntity handler, forward remove to target (small effort)
 2. **#033** (elevated to high) -- Increase TRANSFER_MAX_RETRIES or implement burst ACKs (small effort)
-3. **#041** (medium) -- Exclude TransferOutbound from heartbeat entity count (small effort)
+3. **#041** (medium) -- Exclude TransferOutbound from heartbeat entity count (small effort) -- **RESOLVED** in #013 fix batch
 4. **#042** (medium) -- Include TransferOutbound entities in client snapshot with target authority (small effort)
 5. **#043** (low) -- Use per-server latest ticks in global sweep instead of global max (small effort)
 6. **#044** (low) -- Replace unwrap with checked access in retry path (small effort)
@@ -176,10 +222,12 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 - **#033** (elevated from medium) TransferAck fire-and-forget -- entity duplication on double packet loss
 - **#040** (new) RemoveEntity during transfer despawns outbound entity, orphaning on target
 
-### Open Medium (3)
+### Open Medium (2)
 - **#032** Chunk total_chunks validation missing
 - **#039** Drain + timeout abort creates infinite retransfer loop
-- **#041** (new) Heartbeat counts frozen entities, distorting rebalance
+
+### Resolved Medium (1)
+- **#041** Heartbeat counts frozen entities -- **RESOLVED** by Without<TransferOutbound> in game_loop.rs:238-240
 
 ### Open Low (3)
 - **#034** Transfer timeout off-by-one
@@ -191,35 +239,43 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 
 ## Delta Compression Findings Detail
 
-### Data Loss (2)
-- **#018** (high) Baseline drift on dropped frames -- server thinks client has entities it never received
-- **#023** (high) Ghost entities on client from baseline/removal mismatch (consequence of #018)
+### Data Loss (2) -- BOTH RESOLVED
+- **#018** (high) Baseline drift on dropped frames -- **RESOLVED**: baseline updated only on successful `try_send`
+- **#023** (high) Ghost entities on client -- **RESOLVED**: server-side by #018 fix, client-side staleness sweep at 6s
 
-### Bottleneck (3)
-- **#020** (medium) O(N*E) delta computation duplicated across clients with identical views
-- **#024** (medium) Full snapshot Vec<u8> cloned per client instead of shared
-- **#027** (medium) All NPCs move every tick, making every delta as large as a full snapshot
+### Bottleneck (3) -- 2 RESOLVED, 1 OPEN + 1 NEW
+- **#020** (medium) O(N*E) delta computation duplicated across clients with identical views -- open
+- **#024** (medium) Full snapshot cloned per client -- **RESOLVED**: `ClientFrame::Shared(Arc<Vec<u8>>)`
+- **#027** (medium) NPC movement defeats delta -- **RESOLVED**: fallback to full snapshot when >80% changed
+- **#049** (medium) compute_delta wasted before fallback check -- **resolved**: pre-loop `change_ratio` probe skips all per-client `compute_delta` when >80% changed
 
 ### Scalability (1)
-- **#019** (medium) Per-client baseline HashMaps: O(N*E) memory, never shrink
+- **#019** (medium) Per-client baseline HashMaps: O(N*E) memory, never shrink -- open
 
-### Protocol (3)
-- **#021** (medium) ACK infrastructure built but unused -- baseline advances optimistically
-- **#022** (medium) Change threshold per-component instead of per-vector
-- **#025** (low) ACK parsing has no tick validation
+### Protocol (3) -- ALL RESOLVED
+- **#021** (medium) ACK infrastructure unused -- **RESOLVED**: stale-ACK detection with `ACK_STALE_TICKS = 40`
+- **#022** (medium) Change threshold per-component -- **RESOLVED**: `distance_squared()` comparison
+- **#025** (low) ACK parsing no validation -- **RESOLVED**: monotonicity check + server tick clamp
 
 ### Race Condition (1)
-- **#026** (medium) Client sees PlayerAssigned before player entity exists in first snapshot
+- **#026** (medium) Client sees PlayerAssigned before player entity exists in first snapshot -- open
+
+## Tick Loop Health Findings Detail
+
+### Resolved (3)
+- **#003** (high) Tokio mutex in tick loop -- **RESOLVED**: replaced with std::sync::Mutex, no deadlock risk
+- **#009** (medium) process::exit in game loop -- **RESOLVED**: replaced with `break`, graceful return
+- **#013** (high) UDP send blocks game loop -- **RESOLVED**: dedicated sender task with dual channels
+
+### New (2)
+- **#050** (low) Sender task drain cancelled on runtime shutdown -- edge case, no impact on coordinator-initiated drain
+- **#051** (low) Inbound swap holds mutex during ECS write -- sub-microsecond waste, cleanup only
 
 ## Recommended Fix Order (Delta Compression)
 
-1. **#018** -- Move baseline update to after successful try_send (prevents data loss, small effort)
-2. **#023** -- Client-side staleness check as defense-in-depth (small effort, pairs with #018)
-3. **#024** -- Use Arc<Vec<u8>> for shared full snapshot frames (small effort, reduces allocations)
-4. **#021** -- Wire ACKs into baseline management OR remove dead code (medium effort, completes the protocol)
-5. **#020** -- Share delta computation across clients with identical views (medium effort)
-6. **#027** -- Add heuristic to skip delta when >80% entities changed (small effort)
-7. **#022** -- Switch to vector distance comparison (small effort)
-8. **#019** -- Reuse baseline HashMap on full snapshot (small effort)
-9. **#025** -- Add ACK tick validation (small effort, only matters after #021)
-10. **#026** -- Accept one-tick gap or defer PlayerAssigned (medium effort, low priority)
+Phase 1 (data integrity) is complete. Remaining items:
+
+1. ~~**#049** -- Skip compute_delta when fallback is likely~~ **resolved**
+2. **#020** -- Share delta computation across clients with identical views (medium effort)
+3. **#019** -- Reuse baseline HashMap on full snapshot (small effort)
+4. **#026** -- Accept one-tick gap or defer PlayerAssigned (medium effort, low priority)
