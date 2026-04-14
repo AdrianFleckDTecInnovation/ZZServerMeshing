@@ -99,6 +99,21 @@ pub async fn run_coordinator_client(
                         let mut q = coord_events.queue.lock().await;
                         q.recover_events.push((dead_server_id, survivors));
                     }
+                    Ok(CoordServerMsg::PlayerTransferResult {
+                        account_id,
+                        success,
+                        error,
+                    }) => {
+                        if success {
+                            tracing::info!(account_id, "Player transfer confirmed by coordinator");
+                        } else {
+                            tracing::warn!(
+                                account_id,
+                                error = error.as_deref().unwrap_or("unknown"),
+                                "Player transfer rejected by coordinator"
+                            );
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!("Bad coordinator message: {e}");
                     }

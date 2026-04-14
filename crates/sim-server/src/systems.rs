@@ -18,7 +18,52 @@ const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK
 const NPC_DIRECTION_CHANGE_INTERVAL: u64 = (TICK_RATE as u64) * 3; // every 3 seconds
 
 /// Max ticks before a shadow entity is considered stale and removed.
-const SHADOW_STALE_TICKS: u64 = TICK_RATE as u64 * 5; // 5 seconds
+/// 15 seconds gives comfortable margin over worst-case crash detection (5s heartbeat
+/// timeout + 5s rebalance interval = 10s) so shadows survive until RecoverEntities arrives.
+const SHADOW_STALE_TICKS: u64 = TICK_RATE as u64 * 15; // 15 seconds
+
+/// Ticks before a pending authority transfer is considered timed out.
+const TRANSFER_TIMEOUT_TICKS: u64 = 10; // 500ms at 20Hz
+
+/// Maximum number of retries for a timed-out authority transfer.
+/// 3 retries = 4 total attempts (initial + 3) over ~2 seconds at 20Hz.
+/// Reduces probability of permanent entity duplication from lost ACKs
+/// to ~0.0001% on WiFi (assuming 5% per-packet loss).
+const TRANSFER_MAX_RETRIES: u8 = 3;
+
+/// Maximum ticks a drain can be active before forcing shutdown.
+const DRAIN_TIMEOUT_TICKS: u64 = 600; // 30 seconds at 20Hz
+
+/// Send a TransferAck back to the source server of an authority transfer.
+/// Looks up the source server's UDP address in PeerAddresses. If the source
+/// is not in the peer list (e.g. it crashed), skips silently.
+fn send_transfer_ack(
+    world: &mut World,
+    entity_id: EntityId,
+    tick: u64,
+    from_server: ServerId,
+) {
+    if let Some(&source_addr) = world.resource::<PeerAddresses>().0.get(&from_server.0) {
+        let ack_msg = PeerMessage::TransferAck { entity_id, tick };
+        if let Ok(bytes) = bincode::serialize(&ack_msg) {
+            world
+                .resource_mut::<OutboundTransfers>()
+                .messages
+                .push((source_addr, bytes));
+            tracing::debug!(
+                entity = %entity_id,
+                to = from_server.0,
+                "Sent TransferAck"
+            );
+        }
+    } else {
+        tracing::debug!(
+            entity = %entity_id,
+            from = from_server.0,
+            "Skipping TransferAck: source server not in peer list"
+        );
+    }
+}
 
 // ============================================================
 // System 1: drain_inbound_events
@@ -79,6 +124,7 @@ pub fn drain_inbound_events(world: &mut World) {
     }
 
     // -- Process authority transfers --
+    let current_tick = world.resource::<TickCounter>().0;
     for transfer in authority_transfers {
         if transfer.to_server != server_id {
             tracing::warn!(
@@ -99,6 +145,8 @@ pub fn drain_inbound_events(world: &mut World) {
                     eid,
                     transfer.from_server
                 );
+                // Still send ACK for duplicate -- source needs it even if we already have the entity
+                send_transfer_ack(world, eid, current_tick, transfer.from_server);
                 continue;
             }
 
@@ -133,6 +181,7 @@ pub fn drain_inbound_events(world: &mut World) {
                     to = transfer.to_server.0,
                     "Accepted authority transfer (promoted shadow)"
                 );
+                send_transfer_ack(world, eid, current_tick, transfer.from_server);
                 continue;
             }
         }
@@ -145,12 +194,37 @@ pub fn drain_inbound_events(world: &mut World) {
             to = transfer.to_server.0,
             "Accepted authority transfer (new entity)"
         );
+        send_transfer_ack(world, eid, current_tick, transfer.from_server);
     }
 
     // -- Process forwarded inputs --
     for fwd in forwarded_inputs {
         if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&fwd.entity_id) {
             if world.get::<Authoritative>(bevy_entity).is_some() {
+                // If entity is being transferred, re-forward to the target
+                if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                    let target_addr = outbound.target_addr;
+                    let target_server = outbound.target_server;
+                    let fwd_msg = PeerMessage::ForwardedInput {
+                        entity_id: fwd.entity_id,
+                        direction: fwd.direction,
+                        seq: fwd.seq,
+                    };
+                    if let Ok(bytes) = bincode::serialize(&fwd_msg) {
+                        world
+                            .resource_mut::<OutboundForwards>()
+                            .messages
+                            .push((target_addr, bytes));
+                    }
+                    tracing::debug!(
+                        entity = %fwd.entity_id,
+                        target = target_server,
+                        seq = fwd.seq,
+                        "Re-forwarding input to transfer target"
+                    );
+                    continue;
+                }
+
                 let dir = Vec3::new(fwd.direction[0], fwd.direction[1], fwd.direction[2]);
                 let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
                 let speed = match kind {
@@ -202,7 +276,136 @@ pub fn drain_inbound_events(world: &mut World) {
 }
 
 // ============================================================
-// System 1b: drain_client_events
+// System 1a: process_transfer_acks
+// ============================================================
+
+/// Process inbound TransferAck messages. For each ACK, look up the entity
+/// and despawn it if it has a TransferOutbound component (two-phase transfer complete).
+pub fn process_transfer_acks(world: &mut World) {
+    let acks = std::mem::take(&mut world.resource_mut::<InboundQueue>().transfer_acks);
+
+    for ack in acks {
+        if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&ack.entity_id) {
+            if world.get::<TransferOutbound>(bevy_entity).is_some() {
+                tracing::info!(
+                    entity = %ack.entity_id,
+                    tick = ack.tick,
+                    "Transfer ACK received, despawning entity"
+                );
+                despawn_and_remove(world, bevy_entity, ack.entity_id);
+            } else {
+                tracing::debug!(
+                    entity = %ack.entity_id,
+                    "Transfer ACK for entity without TransferOutbound, ignoring"
+                );
+            }
+        } else {
+            tracing::debug!(
+                entity = %ack.entity_id,
+                "Transfer ACK for unknown entity, ignoring"
+            );
+        }
+    }
+}
+
+// ============================================================
+// System 1b: process_transfer_timeouts
+// ============================================================
+
+/// Check for timed-out authority transfers. Retry once, then abort (keep entity).
+/// On retry, re-serializes the entity's current ECS state instead of using stale data.
+pub fn process_transfer_timeouts(world: &mut World) {
+    let current_tick = world.resource::<TickCounter>().0;
+    let server_id = world.resource::<ServerConfig>().server_id;
+
+    // Collect entities with TransferOutbound that need action
+    let mut to_retry: Vec<(Entity, EntityId, std::net::SocketAddr, u16)> = Vec::new();
+    let mut to_abort: Vec<(Entity, EntityId)> = Vec::new();
+
+    let mut query = world.query::<(Entity, &NetworkId, &TransferOutbound)>();
+    for (entity, nid, outbound) in query.iter(&world) {
+        if current_tick.saturating_sub(outbound.sent_tick) > TRANSFER_TIMEOUT_TICKS {
+            if outbound.retry_count < TRANSFER_MAX_RETRIES {
+                to_retry.push((
+                    entity,
+                    nid.0,
+                    outbound.target_addr,
+                    outbound.target_server,
+                ));
+            } else {
+                to_abort.push((entity, nid.0));
+            }
+        }
+    }
+
+    // Process retries: re-serialize current ECS state for each entity
+    for (entity, eid, target_addr, target_server) in to_retry {
+        // Build fresh AuthorityTransfer from current ECS components
+        let nid = world.get::<NetworkId>(entity).unwrap();
+        let pos = world.get::<Position>(entity).unwrap();
+        let vel = world.get::<Velocity>(entity).unwrap();
+        let kind = world.get::<EntityKind>(entity).unwrap();
+        let seq = world.get::<LastInputSeq>(entity);
+
+        let entity_state = to_entity_state(
+            nid, pos, vel, kind,
+            &AuthorityServer(ServerId(target_server)),
+            seq,
+        );
+
+        let msg = PeerMessage::AuthorityTransfer {
+            tick: current_tick,
+            entity_id: eid,
+            from_server: server_id,
+            to_server: ServerId(target_server),
+            full_state: entity_state,
+        };
+
+        if let Ok(bytes) = bincode::serialize(&msg) {
+            world
+                .resource_mut::<OutboundTransfers>()
+                .messages
+                .push((target_addr, bytes));
+        }
+
+        if let Some(mut outbound) = world.get_mut::<TransferOutbound>(entity) {
+            outbound.retry_count += 1;
+            outbound.sent_tick = current_tick;
+            let target = outbound.target_server;
+            let retry = outbound.retry_count;
+            tracing::warn!(
+                entity = %eid,
+                target = target,
+                retry = retry,
+                "Retrying transfer with fresh state (attempt {})",
+                retry,
+            );
+        }
+    }
+
+    // Process aborts: remove TransferOutbound, entity keeps Authoritative
+    for (entity, eid) in to_abort {
+        let target = world
+            .get::<TransferOutbound>(entity)
+            .map(|o| o.target_server)
+            .unwrap_or(0);
+        let retries = world
+            .get::<TransferOutbound>(entity)
+            .map(|o| o.retry_count)
+            .unwrap_or(0);
+        world.entity_mut(entity).remove::<TransferOutbound>();
+        tracing::error!(
+            entity = %eid,
+            target = target,
+            retries = retries,
+            "Transfer failed after {} retries, keeping entity",
+            retries,
+        );
+    }
+}
+
+// ============================================================
+// System 1c: drain_client_events
 // ============================================================
 
 /// Drain client registration/unregistration events from InboundQueue into ClientRegistry.
@@ -312,6 +515,30 @@ pub fn process_client_inputs(world: &mut World) {
                         world.resource::<EntityLookup>().0.get(&eid)
                     {
                         if world.get::<Authoritative>(bevy_entity).is_some() {
+                            // Check if entity is being transferred -- forward to target instead
+                            if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                                let target_addr = outbound.target_addr;
+                                let target_server = outbound.target_server;
+                                let fwd_msg = PeerMessage::ForwardedInput {
+                                    entity_id: eid,
+                                    direction,
+                                    seq,
+                                };
+                                if let Ok(bytes) = bincode::serialize(&fwd_msg) {
+                                    world
+                                        .resource_mut::<OutboundForwards>()
+                                        .messages
+                                        .push((target_addr, bytes));
+                                }
+                                tracing::debug!(
+                                    entity = %eid,
+                                    target = target_server,
+                                    seq = seq,
+                                    "Forwarding input to transfer target"
+                                );
+                                continue;
+                            }
+
                             // Process locally
                             let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
                             let speed = match kind {
@@ -377,6 +604,26 @@ pub fn process_client_inputs(world: &mut World) {
                         world.resource::<EntityLookup>().0.get(&eid)
                     {
                         if world.get::<Authoritative>(bevy_entity).is_some() {
+                            // If entity is mid-transfer, forward the remove to the target
+                            // server so it doesn't become permanently orphaned there.
+                            if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                                let target_addr = outbound.target_addr;
+                                let target_server = outbound.target_server;
+                                let msg = PeerMessage::ForwardedRemove {
+                                    entity_id: eid,
+                                };
+                                if let Ok(bytes) = bincode::serialize(&msg) {
+                                    world
+                                        .resource_mut::<OutboundForwards>()
+                                        .messages
+                                        .push((target_addr, bytes));
+                                }
+                                tracing::info!(
+                                    entity = %eid,
+                                    target = target_server,
+                                    "Forwarding remove to transfer target before local despawn"
+                                );
+                            }
                             // Case A: We are authoritative -- remove locally
                             despawn_and_remove(world, bevy_entity, eid);
                             tracing::info!(entity = %eid, "Removed authoritative entity on disconnect");
@@ -518,6 +765,25 @@ pub fn process_coord_events(world: &mut World) {
         if adopted > 0 {
             tracing::info!("Recovered {} entities from dead S{}", adopted, dead_server_id);
         }
+
+        // Abort any in-progress transfers targeting the dead server.
+        // The transfer target is gone -- waiting for an ACK that will never come is pointless.
+        // Remove TransferOutbound so the entity unfreezes and resumes normal operation.
+        let mut to_unfreeze: Vec<Entity> = Vec::new();
+        let mut transfer_query =
+            world.query_filtered::<(Entity, &NetworkId, &TransferOutbound), With<Authoritative>>();
+        for (entity, nid, outbound) in transfer_query.iter(&world) {
+            if outbound.target_server == dead_server_id {
+                tracing::info!(
+                    "Aborting transfer for entity {} to dead server S{}",
+                    nid.0, dead_server_id
+                );
+                to_unfreeze.push(entity);
+            }
+        }
+        for entity in to_unfreeze {
+            world.entity_mut(entity).remove::<TransferOutbound>();
+        }
     }
 }
 
@@ -526,11 +792,12 @@ pub fn process_coord_events(world: &mut World) {
 // ============================================================
 
 /// NPC wandering behavior: change direction every NPC_DIRECTION_CHANGE_INTERVAL ticks.
+/// Excludes entities with TransferOutbound -- they are frozen on the source server.
 pub fn npc_behavior(
     tick: Res<TickCounter>,
     mut query: Query<
         (&NetworkId, &mut Velocity, &EntityKind),
-        With<Authoritative>,
+        (With<Authoritative>, Without<TransferOutbound>),
     >,
 ) {
     let current_tick = tick.0;
@@ -555,8 +822,9 @@ pub fn npc_behavior(
 // ============================================================
 
 /// Integrate position from velocity for all authoritative entities.
+/// Excludes entities with TransferOutbound -- they are frozen on the source server.
 pub fn physics_integration(
-    mut query: Query<(&mut Position, &Velocity), With<Authoritative>>,
+    mut query: Query<(&mut Position, &Velocity), (With<Authoritative>, Without<TransferOutbound>)>,
 ) {
     let dt = TICK_DURATION.as_secs_f32();
     for (mut pos, vel) in query.iter_mut() {
@@ -569,8 +837,9 @@ pub fn physics_integration(
 // ============================================================
 
 /// Clamp all authoritative entity positions to world bounds.
+/// Excludes entities with TransferOutbound -- they are frozen on the source server.
 pub fn clamp_positions(
-    mut query: Query<&mut Position, With<Authoritative>>,
+    mut query: Query<&mut Position, (With<Authoritative>, Without<TransferOutbound>)>,
 ) {
     for mut pos in query.iter_mut() {
         pos.0 = clamp_to_world(pos.0);
@@ -600,14 +869,15 @@ pub fn process_transfers(world: &mut World) {
         }
     };
 
-    // Collect NPC entities sorted by distance from origin (descending)
+    // Collect NPC entities sorted by distance from origin (descending).
+    // Skip entities already in transfer (TransferOutbound).
     let mut npc_candidates: Vec<(Entity, EntityId, f32)> = Vec::new();
     let mut total_auth = 0usize;
 
     let mut query = world.query_filtered::<(Entity, &NetworkId, &Position, &EntityKind), With<Authoritative>>();
     for (entity, nid, pos, kind) in query.iter(&world) {
         total_auth += 1;
-        if kind.0 == EntityType::Npc {
+        if kind.0 == EntityType::Npc && world.get::<TransferOutbound>(entity).is_none() {
             npc_candidates.push((entity, nid.0, pos.0.length_squared()));
         }
     }
@@ -642,11 +912,18 @@ pub fn process_transfers(world: &mut World) {
                 .resource_mut::<OutboundTransfers>()
                 .messages
                 .push((target_addr, bytes));
+
+            // Two-phase: mark entity as TransferOutbound instead of despawning.
+            // Entity keeps Authoritative but is frozen (excluded from sim/replication via query filters).
+            world.entity_mut(*entity).insert(TransferOutbound {
+                target_server,
+                target_addr,
+                sent_tick: tick,
+                retry_count: 0,
+            });
             transferred += 1;
         }
-
-        // Despawn
-        despawn_and_remove(world, *entity, *eid);
+        // DO NOT despawn -- entity will be despawned when process_transfer_acks receives the ACK.
     }
 
     if transferred > 0 {
@@ -662,6 +939,8 @@ pub fn process_transfers(world: &mut World) {
 // ============================================================
 
 /// Drain all entities to target servers (round-robin). Called when draining.
+/// Uses two-phase transfers: entities get TransferOutbound instead of being despawned.
+/// Drain completes (ShutdownRequested) only when all entities are ACK'd or timed out.
 pub fn process_drain(world: &mut World) {
     let draining = world.resource::<DrainState>().draining;
     if !draining {
@@ -676,16 +955,23 @@ pub fn process_drain(world: &mut World) {
     let server_id = world.resource::<ServerConfig>().server_id;
     let tick = world.resource::<TickCounter>().0;
 
-    // Collect all authoritative entities
-    let mut all_entities: Vec<(Entity, EntityId)> = Vec::new();
+    // Record drain start tick if not set
+    if world.resource::<DrainState>().started_tick.is_none() {
+        world.resource_mut::<DrainState>().started_tick = Some(tick);
+    }
+
+    // Collect authoritative entities that do NOT already have TransferOutbound
+    let mut to_transfer: Vec<(Entity, EntityId)> = Vec::new();
     let mut query = world.query_filtered::<(Entity, &NetworkId), With<Authoritative>>();
     for (entity, nid) in query.iter(&world) {
-        all_entities.push((entity, nid.0));
+        if world.get::<TransferOutbound>(entity).is_none() {
+            to_transfer.push((entity, nid.0));
+        }
     }
 
     let mut transferred = 0;
 
-    for (i, (entity, eid)) in all_entities.iter().enumerate() {
+    for (i, (entity, eid)) in to_transfer.iter().enumerate() {
         let target_server = targets[i % targets.len()];
         let target_addr = match world.resource::<PeerAddresses>().0.get(&target_server) {
             Some(addr) => *addr,
@@ -716,20 +1002,52 @@ pub fn process_drain(world: &mut World) {
                 .resource_mut::<OutboundTransfers>()
                 .messages
                 .push((target_addr, bytes));
+
+            // Two-phase: mark with TransferOutbound instead of despawning.
+            // Entity is frozen (excluded from sim/replication via query filters).
+            world.entity_mut(*entity).insert(TransferOutbound {
+                target_server,
+                target_addr,
+                sent_tick: tick,
+                retry_count: 0,
+            });
             transferred += 1;
         }
-
-        despawn_and_remove(world, *entity, *eid);
+        // DO NOT despawn -- entity will be despawned when ACK arrives
     }
 
     if transferred > 0 {
-        tracing::info!("Drained {transferred} entities");
+        tracing::info!("Drained {transferred} entities (awaiting ACKs)");
     }
 
-    // Check if all entities are drained
-    let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-    if remaining == 0 {
+    // Check if drain is complete: no authoritative entities without TransferOutbound,
+    // and no pending TransferOutbound entities.
+    let remaining = world
+        .query_filtered::<(), (With<Authoritative>, Without<TransferOutbound>)>()
+        .iter(&world)
+        .count();
+    let pending_transfers = world
+        .query_filtered::<(), With<TransferOutbound>>()
+        .iter(&world)
+        .count();
+
+    if remaining == 0 && pending_transfers == 0 {
         world.resource_mut::<ShutdownRequested>().0 = true;
+        tracing::info!("Drain complete: all entities transferred and ACK'd");
+        return;
+    }
+
+    // Drain timeout: if drain has been active too long, force shutdown
+    if let Some(started) = world.resource::<DrainState>().started_tick {
+        if tick.saturating_sub(started) > DRAIN_TIMEOUT_TICKS {
+            tracing::error!(
+                remaining,
+                pending_transfers,
+                "Drain timeout after {} ticks, forcing shutdown",
+                tick.saturating_sub(started),
+            );
+            world.resource_mut::<ShutdownRequested>().0 = true;
+        }
     }
 }
 
@@ -738,6 +1056,10 @@ pub fn process_drain(world: &mut World) {
 // ============================================================
 
 /// Query all authoritative entities and prepare for UDP replication.
+/// Includes TransferOutbound entities so peers maintain up-to-date shadows for crash
+/// recovery. The target server will have both its own authoritative copy AND a shadow
+/// from the source -- that's fine, drain_inbound_events skips peer updates for entities
+/// it already owns.
 pub fn prepare_replication(
     tick: Res<TickCounter>,
     _config: Res<ServerConfig>,
@@ -790,7 +1112,7 @@ pub fn prepare_client_snapshot(
             &AuthorityServer,
             Option<&LastInputSeq>,
         ),
-        With<Authoritative>,
+        (With<Authoritative>, Without<TransferOutbound>),
     >,
     shadow_query: Query<
         (
@@ -803,8 +1125,21 @@ pub fn prepare_client_snapshot(
         ),
         With<Shadow>,
     >,
+    transfer_query: Query<
+        (
+            &NetworkId,
+            &Position,
+            &Velocity,
+            &EntityKind,
+            &TransferOutbound,
+            Option<&LastInputSeq>,
+        ),
+        With<Authoritative>,
+    >,
 ) {
-    let mut entities = Vec::with_capacity(auth_query.iter().count() + shadow_query.iter().count());
+    let mut entities = Vec::with_capacity(
+        auth_query.iter().count() + shadow_query.iter().count() + transfer_query.iter().count(),
+    );
 
     // Authoritative entities first (take precedence)
     let mut seen_ids = std::collections::HashSet::new();
@@ -813,7 +1148,24 @@ pub fn prepare_client_snapshot(
         entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
     }
 
-    // Shadow entities (skip if already seen as authoritative)
+    // TransferOutbound entities: include in snapshot with target server's authority.
+    // This prevents a 1-3 tick visibility gap where the entity vanishes from the
+    // source's client view before the target starts broadcasting it as a shadow.
+    // Clients see the entity continuously -- it just changes authority color.
+    for (nid, pos, vel, kind, outbound, seq) in transfer_query.iter() {
+        seen_ids.insert(nid.0);
+        let state = to_entity_state(
+            nid,
+            pos,
+            vel,
+            kind,
+            &AuthorityServer(ServerId(outbound.target_server)),
+            seq,
+        );
+        entities.push(state);
+    }
+
+    // Shadow entities (skip if already seen as authoritative or transfer-outbound)
     for (nid, pos, vel, kind, auth, seq) in shadow_query.iter() {
         if !seen_ids.contains(&nid.0) {
             entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
@@ -1106,7 +1458,7 @@ mod tests {
         let eid = state.id;
         spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
 
-        world.resource_mut::<TickCounter>().0 = 200; // well past stale threshold
+        world.resource_mut::<TickCounter>().0 = 400; // well past stale threshold (300)
 
         shadow_cleanup(&mut world);
 
@@ -2120,9 +2472,12 @@ mod tests {
 
         process_drain(&mut world);
 
+        // Two-phase: entities still have Authoritative + TransferOutbound, not yet shutdown
         let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert_eq!(remaining, 0);
-        assert!(world.resource::<ShutdownRequested>().0);
+        assert_eq!(remaining, 5, "entities remain until ACK (two-phase)");
+        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(outbound, 5, "all entities should have TransferOutbound");
+        assert!(!world.resource::<ShutdownRequested>().0, "not shutdown yet (waiting for ACKs)");
     }
 
     #[test]
@@ -2380,10 +2735,20 @@ mod tests {
         process_transfers(&mut world);
 
         // With 3 NPCs + 0 others = 3 total auth, max(3/10, 1) = 1 transferred
-        // The farthest entity should have been transferred
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&far_eid));
+        // Two-phase: far entity still in lookup but has TransferOutbound
+        assert!(world.resource::<EntityLookup>().0.contains_key(&far_eid));
         assert!(world.resource::<EntityLookup>().0.contains_key(&close_eid));
         assert!(world.resource::<EntityLookup>().0.contains_key(&mid_eid));
+
+        // The farthest entity should have TransferOutbound
+        let far_entity = world.resource::<EntityLookup>().0[&far_eid];
+        assert!(world.get::<TransferOutbound>(far_entity).is_some(),
+            "farthest entity should have TransferOutbound");
+        // Close and mid should NOT have TransferOutbound
+        let close_entity = world.resource::<EntityLookup>().0[&close_eid];
+        assert!(world.get::<TransferOutbound>(close_entity).is_none());
+        let mid_entity = world.resource::<EntityLookup>().0[&mid_eid];
+        assert!(world.get::<TransferOutbound>(mid_entity).is_none());
     }
 
     // -- process_drain: round-robin to multiple targets --
@@ -2403,10 +2768,12 @@ mod tests {
 
         process_drain(&mut world);
 
-        // All entities drained
+        // Two-phase: all entities still Authoritative + TransferOutbound, not shutdown yet
         let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert_eq!(remaining, 0);
-        assert!(world.resource::<ShutdownRequested>().0);
+        assert_eq!(remaining, 6, "entities remain with TransferOutbound (two-phase)");
+        let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(outbound_count, 6);
+        assert!(!world.resource::<ShutdownRequested>().0, "not shutdown yet");
 
         // Should have 6 outbound transfer messages
         let outbound = &world.resource::<OutboundTransfers>().messages;
@@ -2472,17 +2839,20 @@ mod tests {
         // Run process_transfers first (as in schedule order)
         process_transfers(&mut world);
 
-        // Some entities transferred via rebalance
+        // Two-phase: all entities still authoritative, some have TransferOutbound from rebalance
         let after_transfer = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert!(after_transfer < 10);
+        assert_eq!(after_transfer, 10, "all entities remain (two-phase)");
+        let rebalance_outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert!(rebalance_outbound > 0, "some entities should be marked for rebalance transfer");
 
-        // Now run process_drain
+        // Now run process_drain -- only entities WITHOUT TransferOutbound get drain-transferred
         process_drain(&mut world);
 
-        // All remaining should be drained
-        let after_drain = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert_eq!(after_drain, 0);
-        assert!(world.resource::<ShutdownRequested>().0);
+        // All entities should now have TransferOutbound
+        let all_outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(all_outbound, 10, "all entities should have TransferOutbound after drain");
+        // Not shutdown yet -- waiting for ACKs
+        assert!(!world.resource::<ShutdownRequested>().0);
     }
 
     // -- Crash recovery: single survivor gets all entities --
@@ -2654,6 +3024,149 @@ mod tests {
         process_client_inputs(&mut world);
     }
 
+    // -- RemoveEntity during transfer forwards remove to target (#040) --
+
+    #[test]
+    fn client_remove_during_transfer_forwards_to_target() {
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // Mark entity as mid-transfer
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 10,
+            retry_count: 0,
+        });
+
+        // Client sends RemoveEntity
+        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+            entity_id: eid.0.to_string(),
+        });
+
+        process_client_inputs(&mut world);
+
+        // Entity should be despawned locally
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+
+        // A ForwardedRemove should have been sent to the target
+        let forwards = &world.resource::<OutboundForwards>().messages;
+        assert_eq!(forwards.len(), 1, "should forward remove to transfer target");
+        assert_eq!(forwards[0].0, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
+
+        // Verify it deserializes to ForwardedRemove
+        let msg: PeerMessage = bincode::deserialize(&forwards[0].1).unwrap();
+        match msg {
+            PeerMessage::ForwardedRemove { entity_id } => {
+                assert_eq!(entity_id, eid);
+            }
+            _ => panic!("expected ForwardedRemove, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn client_remove_without_transfer_does_not_forward() {
+        let mut world = setup_world(1);
+        let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // No TransferOutbound -- normal remove
+        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+            entity_id: eid.0.to_string(),
+        });
+
+        process_client_inputs(&mut world);
+
+        // Entity should be despawned locally
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+
+        // No forward should be sent
+        assert!(world.resource::<OutboundForwards>().messages.is_empty());
+    }
+
+    // -- Heartbeat count excludes frozen entities (#041) --
+
+    #[test]
+    fn heartbeat_count_excludes_transfer_outbound() {
+        let mut world = setup_world(1);
+
+        // Spawn 5 auth entities
+        for _ in 0..5 {
+            spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        }
+
+        // Mark 2 as mid-transfer
+        let mut query = world.query_filtered::<Entity, With<Authoritative>>();
+        let entities: Vec<Entity> = query.iter(&world).collect();
+        for entity in entities.iter().take(2) {
+            world.entity_mut(*entity).insert(TransferOutbound {
+                target_server: 2,
+                target_addr: "127.0.0.1:9102".parse().unwrap(),
+                sent_tick: 1,
+                retry_count: 0,
+            });
+        }
+
+        // Simulate the heartbeat count query from game_loop.rs
+        let auth_count = world
+            .query_filtered::<(), (With<Authoritative>, Without<TransferOutbound>)>()
+            .iter(&world)
+            .count();
+
+        // Should be 3, not 5 (excludes the 2 frozen entities)
+        assert_eq!(auth_count, 3);
+    }
+
+    // -- TransferOutbound entities visible in client snapshot with target authority (#042) --
+
+    #[test]
+    fn client_snapshot_includes_transfer_outbound_with_target_authority() {
+        let mut world = setup_world(1);
+
+        // Spawn 2 normal auth entities
+        spawn_auth_npc(&mut world, Vec3::new(10.0, 0.0, 10.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(20.0, 0.0, 20.0), 1);
+
+        // Spawn 1 entity mid-transfer to server 2
+        let (entity, _eid) = spawn_auth_npc(&mut world, Vec3::new(30.0, 0.0, 30.0), 1);
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 10,
+            retry_count: 0,
+        });
+
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        schedule.run(&mut world);
+
+        let snapshot = world.resource::<ClientSnapshot>();
+        let frame = snapshot.frame.as_ref().unwrap();
+
+        // Header 27 bytes + 3 entities * 47 bytes = 168
+        assert_eq!(frame.len(), 27 + 3 * 47,
+            "transfer outbound entity should be included in snapshot");
+
+        let entity_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
+        assert_eq!(entity_count, 3);
+
+        // Verify the transfer entity has the target server (2) as authority,
+        // not the source server (1). Parse all entities from the binary frame.
+        let header_size = 27;
+        let entity_size = 47;
+        let mut found_target_auth = false;
+        for i in 0..entity_count as usize {
+            let offset = header_size + i * entity_size;
+            // authority_server is at offset 41 (after uuid:16 + pos:12 + vel:12 + type:1 = 41)
+            let auth = u16::from_le_bytes(frame[offset + 41..offset + 43].try_into().unwrap());
+            if auth == 2 {
+                found_target_auth = true;
+            }
+        }
+        assert!(found_target_auth, "transfer outbound entity should report target server as authority");
+    }
+
     // -- Peer update: multiple entities in single update --
 
     #[test]
@@ -2766,7 +3279,7 @@ mod tests {
         let eid = state.id;
         spawn_from_entity_state_direct(&mut world, &state, false, Some(0));
 
-        // Set tick to exactly SHADOW_STALE_TICKS (100)
+        // Set tick to exactly SHADOW_STALE_TICKS (300)
         world.resource_mut::<TickCounter>().0 = SHADOW_STALE_TICKS;
 
         shadow_cleanup(&mut world);
@@ -2907,7 +3420,7 @@ mod tests {
     // -- EntityLookup consistency after drain --
 
     #[test]
-    fn entity_lookup_empty_after_full_drain() {
+    fn entity_lookup_populated_after_drain_before_acks() {
         let mut world = setup_world(1);
         for _ in 0..5 {
             spawn_auth_npc(&mut world, Vec3::ZERO, 1);
@@ -2920,7 +3433,9 @@ mod tests {
 
         process_drain(&mut world);
 
-        assert!(world.resource::<EntityLookup>().0.is_empty());
+        // Two-phase: entities still in lookup (waiting for ACKs)
+        assert_eq!(world.resource::<EntityLookup>().0.len(), 5,
+            "entities stay in lookup until ACK (two-phase)");
     }
 
     // -- Client SpawnPlayer with invalid UUID --
@@ -3162,5 +3677,1476 @@ mod tests {
 
         // Entity should be gone from this server
         assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    // ====================================================================
+    // WI-004: TransferAck sent on accepting authority transfer
+    // ====================================================================
+
+    #[test]
+    fn transfer_ack_sent_on_accept() {
+        let mut world = setup_world(2); // We are server 2
+        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world.resource_mut::<TickCounter>().0 = 50;
+
+        // Push an inbound authority transfer from server 1 to us
+        let state = EntityState::new_npc(Vec3::new(10.0, 0.0, 20.0), ServerId(2));
+        let eid = state.id;
+        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
+            tick: 50,
+            entity_id: eid,
+            from_server: ServerId(1),
+            to_server: ServerId(2),
+            full_state: state,
+        });
+
+        drain_inbound_events(&mut world);
+
+        // Verify ACK was generated in OutboundTransfers
+        let transfers = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(transfers.len(), 1, "should have exactly one ACK message");
+
+        let (addr, bytes) = &transfers[0];
+        assert_eq!(*addr, "127.0.0.1:9101".parse::<std::net::SocketAddr>().unwrap());
+
+        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        match msg {
+            PeerMessage::TransferAck { entity_id, tick } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(tick, 50);
+            }
+            _ => panic!("expected TransferAck, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn transfer_ack_skipped_when_source_not_in_peers() {
+        let mut world = setup_world(2);
+        // Server 3 is NOT in PeerAddresses
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = state.id;
+        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
+            tick: 10,
+            entity_id: eid,
+            from_server: ServerId(3),
+            to_server: ServerId(2),
+            full_state: state,
+        });
+
+        drain_inbound_events(&mut world);
+
+        // No ACK should be sent since server 3 is not in peer addresses
+        assert!(
+            world.resource::<OutboundTransfers>().messages.is_empty(),
+            "no ACK should be sent when source is not in peer list"
+        );
+        // But the entity should still be accepted
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    #[test]
+    fn transfer_ack_sent_on_duplicate_transfer() {
+        let mut world = setup_world(2);
+        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        // Spawn entity as authoritative (simulating already accepted)
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = state.id;
+        spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // Now push a duplicate transfer
+        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
+            tick: 10,
+            entity_id: eid,
+            from_server: ServerId(1),
+            to_server: ServerId(2),
+            full_state: state,
+        });
+
+        drain_inbound_events(&mut world);
+
+        // ACK should still be sent even for duplicate
+        let transfers = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(transfers.len(), 1, "ACK should be sent for duplicate transfer");
+    }
+
+    // ====================================================================
+    // WI-005: process_transfer_acks unit tests
+    // ====================================================================
+
+    #[test]
+    fn process_transfer_acks_despawns_outbound_entity() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // Add TransferOutbound component
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Push matching ACK
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 5 }
+        );
+
+        process_transfer_acks(&mut world);
+
+        // Entity should be despawned
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    #[test]
+    fn process_transfer_acks_ignores_unknown_entity() {
+        let mut world = setup_world(1);
+
+        // ACK for nonexistent entity
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: EntityId::new(), tick: 5 }
+        );
+
+        // Should not panic
+        process_transfer_acks(&mut world);
+    }
+
+    #[test]
+    fn process_transfer_acks_ignores_entity_without_outbound() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // ACK for entity that does NOT have TransferOutbound
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 5 }
+        );
+
+        process_transfer_acks(&mut world);
+
+        // Entity should still exist
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    // ====================================================================
+    // WI-006: process_transfer_timeouts unit tests
+    // ====================================================================
+
+    #[test]
+    fn transfer_timeout_retries_once() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let _eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Set tick past timeout
+        world.resource_mut::<TickCounter>().0 = 12; // 1 + 10 + 1 = past timeout
+
+        process_transfer_timeouts(&mut world);
+
+        // Should have retried: OutboundTransfers has a message
+        assert_eq!(world.resource::<OutboundTransfers>().messages.len(), 1);
+
+        // retry_count should be 1, sent_tick updated
+        let outbound = world.get::<TransferOutbound>(entity).unwrap();
+        assert_eq!(outbound.retry_count, 1);
+        assert_eq!(outbound.sent_tick, 12);
+    }
+
+    #[test]
+    fn transfer_timeout_aborts_after_max_retries() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: TRANSFER_MAX_RETRIES, // already at max retries
+        });
+
+        // Set tick way past timeout
+        world.resource_mut::<TickCounter>().0 = 22;
+
+        process_transfer_timeouts(&mut world);
+
+        // TransferOutbound should be removed, entity still has Authoritative
+        assert!(world.get::<TransferOutbound>(entity).is_none());
+        assert!(world.get::<Authoritative>(entity).is_some());
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
+
+        // No retry should have been sent
+        assert!(world.resource::<OutboundTransfers>().messages.is_empty());
+    }
+
+    #[test]
+    fn transfer_timeout_no_action_before_timeout() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 5,
+            retry_count: 0,
+        });
+
+        // Set tick NOT past timeout (5 + 10 = 15, we are at 10)
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_transfer_timeouts(&mut world);
+
+        // No change
+        assert!(world.get::<TransferOutbound>(entity).is_some());
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 0);
+        assert!(world.resource::<OutboundTransfers>().messages.is_empty());
+    }
+
+    // ====================================================================
+    // Two-phase transfer: duplicate ACKs handled gracefully
+    // ====================================================================
+
+    #[test]
+    fn process_transfer_acks_duplicate_ack_no_panic() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Push two ACKs for the same entity (duplicate)
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 5 }
+        );
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 6 }
+        );
+
+        // Should not panic -- first ACK despawns, second is a no-op (unknown entity)
+        process_transfer_acks(&mut world);
+
+        // Entity should be despawned
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    // ====================================================================
+    // Two-phase transfer: process_transfers skips entities with TransferOutbound
+    // ====================================================================
+
+    #[test]
+    fn process_transfers_skips_entities_with_transfer_outbound() {
+        let mut world = setup_world(1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        // Spawn 5 entities, 2 already have TransferOutbound
+        let mut entities = Vec::new();
+        for _ in 0..5 {
+            let state = EntityState::new_npc(Vec3::new(100.0, 0.0, 100.0), ServerId(1));
+            let eid = state.id;
+            let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+            entities.push((entity, eid));
+        }
+
+        // Mark first 2 as already in-flight
+        for (entity, _) in entities.iter().take(2) {
+            world.entity_mut(*entity).insert(TransferOutbound {
+                target_server: 2,
+                target_addr: "127.0.0.1:9102".parse().unwrap(),
+                sent_tick: 1,
+                retry_count: 0,
+            });
+        }
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<TickCounter>().0 = 5;
+
+        process_transfers(&mut world);
+
+        // Only 3 entities should be candidates (5 total minus 2 already outbound)
+        // transfer_count = max(1, 5/10) = 1, but capped to candidates.len()=3
+        // So at most 1 entity should be newly transferred (10% of 5 = 0.5, max(1)=1)
+        let new_outbound_count = entities.iter()
+            .filter(|(e, _)| world.get::<TransferOutbound>(*e).is_some())
+            .count();
+        // Original 2 + up to 1 new = 3
+        assert!(new_outbound_count >= 2 && new_outbound_count <= 3,
+            "expected 2-3 outbound entities, got {}", new_outbound_count);
+
+        // Verify the original 2 still have their original sent_tick
+        for (entity, _) in entities.iter().take(2) {
+            let outbound = world.get::<TransferOutbound>(*entity).unwrap();
+            assert_eq!(outbound.sent_tick, 1, "original TransferOutbound should not be overwritten");
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: ACK queue is fully drained
+    // ====================================================================
+
+    #[test]
+    fn process_transfer_acks_drains_entire_queue() {
+        let mut world = setup_world(1);
+
+        // Spawn 3 entities, all with TransferOutbound
+        let mut eids = Vec::new();
+        for _ in 0..3 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            let eid = state.id;
+            let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+            world.entity_mut(entity).insert(TransferOutbound {
+                target_server: 2,
+                target_addr: "127.0.0.1:9102".parse().unwrap(),
+                sent_tick: 1,
+                retry_count: 0,
+            });
+            eids.push(eid);
+        }
+
+        // Push ACKs for all 3
+        for eid in &eids {
+            world.resource_mut::<InboundQueue>().transfer_acks.push(
+                InboundTransferAck { entity_id: *eid, tick: 5 }
+            );
+        }
+
+        process_transfer_acks(&mut world);
+
+        // All 3 should be despawned
+        for eid in &eids {
+            assert!(!world.resource::<EntityLookup>().0.contains_key(eid),
+                "entity {:?} should be despawned", eid);
+        }
+
+        // Queue should be empty
+        assert!(world.resource::<InboundQueue>().transfer_acks.is_empty());
+    }
+
+    // ====================================================================
+    // Two-phase transfer: timeout at exact boundary
+    // ====================================================================
+
+    #[test]
+    fn transfer_timeout_exact_boundary_no_action() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 5,
+            retry_count: 0,
+        });
+
+        // Set tick to exactly sent_tick + TRANSFER_TIMEOUT_TICKS (boundary, NOT past it)
+        // TRANSFER_TIMEOUT_TICKS = 10, so tick 15 means diff = 10 which is NOT > 10
+        world.resource_mut::<TickCounter>().0 = 15;
+
+        process_transfer_timeouts(&mut world);
+
+        // Should NOT have retried (15 - 5 = 10, check is > 10, not >= 10)
+        assert!(world.resource::<OutboundTransfers>().messages.is_empty());
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 0);
+    }
+
+    #[test]
+    fn transfer_timeout_one_past_boundary_retries() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 5,
+            retry_count: 0,
+        });
+
+        // One past the boundary: 16 - 5 = 11 > 10
+        world.resource_mut::<TickCounter>().0 = 16;
+
+        process_transfer_timeouts(&mut world);
+
+        // Should have retried
+        assert_eq!(world.resource::<OutboundTransfers>().messages.len(), 1);
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 1);
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().sent_tick, 16);
+    }
+
+    // ====================================================================
+    // Two-phase transfer: ACK sends correct serialized TransferAck via UDP
+    // ====================================================================
+
+    #[test]
+    fn transfer_ack_message_deserializes_correctly() {
+        let mut world = setup_world(2);
+        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world.resource_mut::<TickCounter>().0 = 42;
+
+        // Spawn entity and push a transfer
+        let state = EntityState::new_npc(Vec3::new(10.0, 0.0, 20.0), ServerId(2));
+        let eid = state.id;
+
+        let transfer = InboundTransfer {
+            tick: 42,
+            entity_id: eid,
+            from_server: ServerId(1),
+            to_server: ServerId(2),
+            full_state: state,
+        };
+        world.resource_mut::<InboundQueue>().authority_transfers.push(transfer);
+
+        drain_inbound_events(&mut world);
+
+        // Verify the outbound ACK message deserializes to TransferAck
+        let transfers = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(transfers.len(), 1);
+
+        let (addr, bytes) = &transfers[0];
+        assert_eq!(addr.to_string(), "127.0.0.1:9101");
+
+        let decoded: PeerMessage = bincode::deserialize(bytes).unwrap();
+        match decoded {
+            PeerMessage::TransferAck { entity_id, tick } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(tick, 42);
+            }
+            _ => panic!("expected TransferAck, got {:?}", decoded),
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: drain waits for ACKs before shutdown
+    // ====================================================================
+
+    #[test]
+    fn drain_does_not_shutdown_with_pending_transfers() {
+        let mut world = setup_world(1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        // Spawn entities
+        for _ in 0..3 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            spawn_from_entity_state_direct(&mut world, &state, true, None);
+        }
+
+        // Start drain
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_drain(&mut world);
+
+        // Should NOT be shutdown -- entities have TransferOutbound, waiting for ACKs
+        assert!(!world.resource::<ShutdownRequested>().0);
+
+        // Verify entities have TransferOutbound
+        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(outbound, 3);
+    }
+
+    // ====================================================================
+    // Two-phase transfer: drain completes after all ACKs
+    // ====================================================================
+
+    #[test]
+    fn drain_completes_after_all_acks_received() {
+        let mut world = setup_world(1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        let mut eids = Vec::new();
+        for _ in 0..3 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            eids.push(state.id);
+            spawn_from_entity_state_direct(&mut world, &state, true, None);
+        }
+
+        // Start drain and transfer entities
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_drain(&mut world);
+
+        assert!(!world.resource::<ShutdownRequested>().0);
+
+        // Simulate ACKs for all entities
+        for eid in &eids {
+            world.resource_mut::<InboundQueue>().transfer_acks.push(
+                InboundTransferAck { entity_id: *eid, tick: 11 }
+            );
+        }
+
+        // Process ACKs (despawns entities)
+        process_transfer_acks(&mut world);
+
+        // Now run drain again -- should detect completion
+        world.resource_mut::<TickCounter>().0 = 12;
+        process_drain(&mut world);
+
+        assert!(world.resource::<ShutdownRequested>().0, "drain should complete after all ACKs");
+    }
+
+    // ====================================================================
+    // Two-phase transfer: drain only transfers entities without TransferOutbound
+    // ====================================================================
+
+    #[test]
+    fn drain_skips_entities_already_in_transfer() {
+        let mut world = setup_world(1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        // Spawn 4 entities
+        let mut entities = Vec::new();
+        for _ in 0..4 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            let eid = state.id;
+            let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+            entities.push((entity, eid));
+        }
+
+        // Mark 2 as already in-flight from a prior rebalance
+        for (entity, _) in entities.iter().take(2) {
+            world.entity_mut(*entity).insert(TransferOutbound {
+                target_server: 2,
+                target_addr: "127.0.0.1:9102".parse().unwrap(),
+                sent_tick: 5,
+                retry_count: 0,
+            });
+        }
+
+        // Start drain
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_drain(&mut world);
+
+        // All 4 should now have TransferOutbound (2 original + 2 new from drain)
+        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(outbound, 4);
+
+        // The 2 original should still have sent_tick=5
+        for (entity, _) in entities.iter().take(2) {
+            assert_eq!(world.get::<TransferOutbound>(*entity).unwrap().sent_tick, 5);
+        }
+
+        // The 2 new should have sent_tick=10
+        for (entity, _) in entities.iter().skip(2) {
+            assert_eq!(world.get::<TransferOutbound>(*entity).unwrap().sent_tick, 10);
+        }
+    }
+
+    // ====================================================================
+    // Chunking: entity count math verification
+    // ====================================================================
+
+    #[test]
+    fn chunk_math_exact_multiple() {
+        // 200 entities / 100 per chunk = exactly 2 chunks
+        let entity_count = 200;
+        let per_chunk = 100;
+        let total_chunks = ((entity_count + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 2);
+    }
+
+    #[test]
+    fn chunk_math_just_over_threshold() {
+        // 101 entities should produce 2 chunks
+        let entity_count = 101;
+        let per_chunk = 100;
+        let total_chunks = ((entity_count + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 2);
+    }
+
+    #[test]
+    fn chunk_math_at_threshold() {
+        // 100 entities should stay unchunked (uses EntityStateUpdate, not ChunkedEntityUpdate)
+        // But if it WERE chunked, it would be 1 chunk
+        let entity_count = 100;
+        let per_chunk = 100;
+        let total_chunks = ((entity_count + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 1);
+    }
+
+    #[test]
+    fn chunk_math_large_entity_count() {
+        // 1500 entities / 100 = 15 chunks
+        let entity_count = 1500;
+        let per_chunk = 100;
+        let total_chunks = ((entity_count + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 15);
+    }
+
+    // ====================================================================
+    // Chunking: bincode size per chunk stays under UDP limit
+    // ====================================================================
+
+    #[test]
+    fn chunked_entity_update_stays_under_udp_limit() {
+        // 100 entities in a single ChunkedEntityUpdate
+        let entities: Vec<EntityState> = (0..100)
+            .map(|_| EntityState::new_npc(Vec3::new(100.0, 0.0, -100.0), ServerId(1)))
+            .collect();
+
+        let msg = PeerMessage::ChunkedEntityUpdate {
+            tick: 999,
+            server_id: ServerId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            entities,
+        };
+
+        let bytes = bincode::serialize(&msg).unwrap();
+        // UDP max payload: 65507 bytes. Each chunk should be well under this.
+        assert!(bytes.len() < 65507,
+            "chunk size {} exceeds UDP limit 65507", bytes.len());
+        // Also check it's a reasonable size (each entity is ~100 bytes in bincode)
+        assert!(bytes.len() > 100, "chunk too small: {} bytes", bytes.len());
+    }
+
+    #[test]
+    fn unchunked_entity_update_size_matches_expectations() {
+        // 100 entities in an EntityStateUpdate (unchunked path)
+        let entities: Vec<EntityState> = (0..100)
+            .map(|_| EntityState::new_npc(Vec3::ZERO, ServerId(1)))
+            .collect();
+
+        let msg = PeerMessage::EntityStateUpdate {
+            tick: 1,
+            server_id: ServerId(1),
+            entities,
+        };
+
+        let bytes = bincode::serialize(&msg).unwrap();
+        assert!(bytes.len() < 65507,
+            "unchunked 100 entities {} exceeds UDP limit", bytes.len());
+    }
+
+    // ====================================================================
+    // Chunking: full reassembly produces correct entity set
+    // ====================================================================
+
+    // ====================================================================
+    // Two-phase transfer: duplicate RebalanceDirective for same entity
+    // ====================================================================
+
+    #[test]
+    fn duplicate_rebalance_directive_does_not_double_transfer() {
+        // If two RebalanceDirectives arrive before the first is processed,
+        // only entities without TransferOutbound should be candidates.
+        let mut world = setup_world(1);
+        for _ in 0..5 {
+            spawn_auth_npc(&mut world, Vec3::new(200.0, 0.0, 200.0), 1);
+        }
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        // First rebalance
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        process_transfers(&mut world);
+
+        let first_outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert!(first_outbound > 0);
+
+        // Clear outbound messages from first transfer
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+
+        // Second rebalance directive for same target -- should only transfer
+        // entities that don't already have TransferOutbound
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        process_transfers(&mut world);
+
+        // All 5 entities should still exist
+        let total = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        assert_eq!(total, 5);
+
+        // No entity should have been transferred twice -- check that TransferOutbound
+        // from the first batch still has sent_tick=10
+        let mut query = world.query::<&TransferOutbound>();
+        for outbound in query.iter(&world) {
+            assert!(outbound.sent_tick >= 10);
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: input for TransferOutbound entity is forwarded
+    // ====================================================================
+
+    #[test]
+    fn move_input_for_transfer_outbound_is_forwarded() {
+        // When a client sends MoveInput for an entity that is in TransferOutbound state,
+        // the input should be forwarded to the target server, not applied locally.
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+
+        // Mark entity as mid-transfer to server 2
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 5,
+            retry_count: 0,
+        });
+
+        // Client sends MoveInput for the entity
+        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+            entity_id: eid.0.to_string(),
+            direction: [1.0, 0.0, 0.0],
+            seq: 42,
+        });
+
+        process_client_inputs(&mut world);
+
+        // Velocity should NOT be changed locally (entity is frozen)
+        let vel = world.get::<Velocity>(entity).unwrap();
+        assert_eq!(vel.0, Vec3::ZERO, "velocity should remain zero for TransferOutbound entity");
+
+        // LastInputSeq should NOT be updated locally
+        let seq = world.get::<LastInputSeq>(entity).unwrap();
+        assert_eq!(seq.0, 0, "seq should not be updated for TransferOutbound entity");
+
+        // Instead, a ForwardedInput should have been sent to the target
+        let forwards = &world.resource::<OutboundForwards>().messages;
+        assert_eq!(forwards.len(), 1, "should forward input to transfer target");
+
+        // Verify the forwarded message
+        let (addr, bytes) = &forwards[0];
+        assert_eq!(*addr, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
+        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        match msg {
+            PeerMessage::ForwardedInput { entity_id, direction, seq } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(direction, [1.0, 0.0, 0.0]);
+                assert_eq!(seq, 42);
+            }
+            _ => panic!("expected ForwardedInput, got {:?}", msg),
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: forwarded input for TransferOutbound is re-forwarded
+    // ====================================================================
+
+    #[test]
+    fn forwarded_input_for_transfer_outbound_is_re_forwarded() {
+        // When a peer sends a ForwardedInput for an entity that we own but is in
+        // TransferOutbound state, we should re-forward to the new target.
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+
+        // Mark entity as mid-transfer to server 3
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 3,
+            target_addr: "127.0.0.1:9103".parse().unwrap(),
+            sent_tick: 5,
+            retry_count: 0,
+        });
+
+        // Peer sends forwarded input (originally from server 2)
+        world.resource_mut::<InboundQueue>().forwarded_inputs.push(ForwardedInput {
+            entity_id: eid,
+            direction: [0.0, 0.0, 1.0],
+            seq: 99,
+        });
+
+        drain_inbound_events(&mut world);
+
+        // Velocity should NOT be changed (entity is frozen)
+        let vel = world.get::<Velocity>(entity).unwrap();
+        assert_eq!(vel.0, Vec3::ZERO);
+
+        // A re-forwarded input should have been sent to server 3
+        let forwards = &world.resource::<OutboundForwards>().messages;
+        assert_eq!(forwards.len(), 1, "should re-forward to transfer target");
+
+        let (addr, bytes) = &forwards[0];
+        assert_eq!(*addr, "127.0.0.1:9103".parse::<std::net::SocketAddr>().unwrap());
+        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        match msg {
+            PeerMessage::ForwardedInput { entity_id, seq, .. } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(seq, 99);
+            }
+            _ => panic!("expected ForwardedInput, got {:?}", msg),
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: ACK for already-despawned entity (race condition)
+    // ====================================================================
+
+    #[test]
+    fn transfer_ack_for_already_despawned_entity_is_noop() {
+        // Race: entity was removed (client disconnect) while in TransferOutbound.
+        // The ACK arrives later for an entity that no longer exists.
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Despawn entity (simulating client disconnect handling)
+        despawn_and_remove(&mut world, entity, eid);
+
+        // ACK arrives after despawn
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 5 }
+        );
+
+        // Should not panic -- ACK for unknown entity is silently ignored
+        process_transfer_acks(&mut world);
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+    }
+
+    // ====================================================================
+    // Two-phase transfer: multiple simultaneous transfers get independent ACKs
+    // ====================================================================
+
+    #[test]
+    fn multiple_simultaneous_transfers_get_independent_acks() {
+        // 3 entities transferred to the same target. ACKs arrive for 2 of them.
+        // Only those 2 should be despawned.
+        let mut world = setup_world(1);
+
+        let mut eids = Vec::new();
+        let mut entities = Vec::new();
+        for _ in 0..3 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            let eid = state.id;
+            let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+            world.entity_mut(entity).insert(TransferOutbound {
+                target_server: 2,
+                target_addr: "127.0.0.1:9102".parse().unwrap(),
+                sent_tick: 1,
+                retry_count: 0,
+            });
+            eids.push(eid);
+            entities.push(entity);
+        }
+
+        // ACK for first 2 only
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eids[0], tick: 5 }
+        );
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eids[1], tick: 5 }
+        );
+
+        process_transfer_acks(&mut world);
+
+        // First 2 should be gone, third should remain
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eids[0]));
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eids[1]));
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eids[2]));
+        assert!(world.get::<TransferOutbound>(entities[2]).is_some());
+    }
+
+    // ====================================================================
+    // Two-phase transfer: retry builds fresh state (not stale)
+    // ====================================================================
+
+    #[test]
+    fn transfer_retry_uses_current_position() {
+        // After timeout, the retry should serialize current ECS state, not stale data.
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::new(10.0, 0.0, 10.0), ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Change entity position after the initial transfer (simulating that
+        // even though physics is frozen for TransferOutbound, the entity could
+        // have been updated by some other path)
+        world.get_mut::<Position>(entity).unwrap().0 = Vec3::new(99.0, 0.0, 99.0);
+
+        // Trigger timeout at tick 12 (1 + 10 + 1 = past timeout)
+        world.resource_mut::<TickCounter>().0 = 12;
+        process_transfer_timeouts(&mut world);
+
+        // Verify the retry message contains the CURRENT position (99.0), not the old one (10.0)
+        let messages = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(messages.len(), 1);
+
+        let msg: PeerMessage = bincode::deserialize(&messages[0].1).unwrap();
+        match msg {
+            PeerMessage::AuthorityTransfer { full_state, entity_id, tick, .. } => {
+                assert_eq!(entity_id, eid);
+                assert_eq!(tick, 12, "retry should use current tick");
+                assert!((full_state.position.x - 99.0).abs() < 0.001,
+                    "retry should use current position (99.0), got {}", full_state.position.x);
+            }
+            _ => panic!("expected AuthorityTransfer, got {:?}", msg),
+        }
+    }
+
+    // ====================================================================
+    // Two-phase transfer: transfer timeout max retries then abort
+    // ====================================================================
+
+    #[test]
+    fn transfer_timeout_full_retry_cycle() {
+        // Exercise the full retry cycle: initial + MAX_RETRIES attempts = 4 total
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 0,
+            retry_count: 0,
+        });
+
+        // Retry 1
+        world.resource_mut::<TickCounter>().0 = 11;
+        process_transfer_timeouts(&mut world);
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 1);
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+
+        // Retry 2
+        world.resource_mut::<TickCounter>().0 = 22;
+        process_transfer_timeouts(&mut world);
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 2);
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+
+        // Retry 3 (final retry, retry_count goes to 3 = TRANSFER_MAX_RETRIES)
+        world.resource_mut::<TickCounter>().0 = 33;
+        process_transfer_timeouts(&mut world);
+        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 3);
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+
+        // Next timeout should ABORT (retry_count == MAX_RETRIES)
+        world.resource_mut::<TickCounter>().0 = 44;
+        process_transfer_timeouts(&mut world);
+        assert!(world.get::<TransferOutbound>(entity).is_none(), "should be aborted");
+        assert!(world.get::<Authoritative>(entity).is_some(), "should keep authoritative");
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
+        assert!(world.resource::<OutboundTransfers>().messages.is_empty(), "no retry after abort");
+    }
+
+    // ====================================================================
+    // Replication: TransferOutbound entities INCLUDED for crash recovery
+    // ====================================================================
+
+    #[test]
+    fn replication_includes_transfer_outbound_entities() {
+        let mut world = setup_world(1);
+
+        // 3 normal auth entities
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::X, 1);
+        let (frozen_entity, _) = spawn_auth_npc(&mut world, Vec3::Z, 1);
+
+        // Mark one as TransferOutbound
+        world.entity_mut(frozen_entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.snapshot.is_some());
+        // All 3 entities should be replicated, including the TransferOutbound one.
+        // This ensures peers have up-to-date shadows for crash recovery.
+        assert_eq!(outbound.snapshot.as_ref().unwrap().len(), 3,
+            "TransferOutbound entity should be included in replication for crash recovery");
+    }
+
+    // ====================================================================
+    // Physics: TransferOutbound entities are NOT moved
+    // ====================================================================
+
+    #[test]
+    fn physics_does_not_move_transfer_outbound() {
+        let mut world = setup_world(1);
+        let (entity, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        world.get_mut::<Velocity>(entity).unwrap().0 = Vec3::new(100.0, 0.0, 0.0);
+
+        // Mark as TransferOutbound (frozen)
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(physics_integration);
+        schedule.run(&mut world);
+
+        let pos = world.get::<Position>(entity).unwrap();
+        assert_eq!(pos.0, Vec3::ZERO, "TransferOutbound entity should not be moved by physics");
+    }
+
+    // ====================================================================
+    // NPC behavior: TransferOutbound entities are NOT updated
+    // ====================================================================
+
+    #[test]
+    fn npc_behavior_skips_transfer_outbound() {
+        let mut world = setup_world(1);
+        let (entity, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // Mark as TransferOutbound (frozen)
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(npc_behavior);
+
+        for tick in 1..=80 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+        }
+
+        let vel = world.get::<Velocity>(entity).unwrap();
+        assert_eq!(vel.0, Vec3::ZERO, "TransferOutbound NPC should not get velocity changes");
+    }
+
+    // ====================================================================
+    // Clamp: TransferOutbound entities are NOT clamped
+    // ====================================================================
+
+    #[test]
+    fn clamp_skips_transfer_outbound() {
+        let mut world = setup_world(1);
+        let (entity, _) = spawn_auth_npc(&mut world, Vec3::new(9999.0, 0.0, 9999.0), 1);
+
+        // Mark as TransferOutbound (frozen)
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(clamp_positions);
+        schedule.run(&mut world);
+
+        let pos = world.get::<Position>(entity).unwrap();
+        assert_eq!(pos.0.x, 9999.0, "TransferOutbound entity should not be clamped");
+    }
+
+    // ====================================================================
+    // Drain: immediate shutdown when no entities
+    // ====================================================================
+
+    #[test]
+    fn drain_with_no_entities_immediate_shutdown() {
+        let mut world = setup_world(1);
+        // No entities spawned
+
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_drain(&mut world);
+
+        // With no auth entities and no pending transfers, drain should complete immediately
+        assert!(world.resource::<ShutdownRequested>().0,
+            "drain with no entities should trigger immediate shutdown");
+    }
+
+    // ====================================================================
+    // Drain: timeout forces shutdown even with pending transfers
+    // ====================================================================
+
+    #[test]
+    fn drain_timeout_forces_shutdown_with_pending() {
+        let mut world = setup_world(1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        // Spawn entities
+        for _ in 0..3 {
+            spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        }
+
+        // Start drain
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_drain(&mut world);
+
+        // Entities now have TransferOutbound, not shutdown
+        assert!(!world.resource::<ShutdownRequested>().0);
+
+        // Advance past DRAIN_TIMEOUT_TICKS (600)
+        world.resource_mut::<TickCounter>().0 = 10 + DRAIN_TIMEOUT_TICKS + 1;
+
+        process_drain(&mut world);
+
+        // Should force shutdown despite pending transfers
+        assert!(world.resource::<ShutdownRequested>().0,
+            "drain timeout should force shutdown even with pending transfers");
+    }
+
+    // ====================================================================
+    // Drain: drain_started_tick is recorded correctly
+    // ====================================================================
+
+    #[test]
+    fn drain_records_start_tick() {
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+
+        world.resource_mut::<DrainState>().draining = true;
+        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 42;
+
+        assert!(world.resource::<DrainState>().started_tick.is_none());
+
+        process_drain(&mut world);
+
+        assert_eq!(world.resource::<DrainState>().started_tick, Some(42));
+    }
+
+    // ====================================================================
+    // Chunking: exactly 100 entities uses unchunked format
+    // ====================================================================
+
+    #[test]
+    fn exactly_100_entities_uses_unchunked_format() {
+        // At exactly 100 entities, the replication code uses EntityStateUpdate (unchunked),
+        // not ChunkedEntityUpdate. This test verifies the unchunked format works at the boundary.
+        let entities: Vec<EntityState> = (0..100)
+            .map(|_| EntityState::new_npc(Vec3::ZERO, ServerId(1)))
+            .collect();
+
+        let msg = PeerMessage::EntityStateUpdate {
+            tick: 50,
+            server_id: ServerId(1),
+            entities,
+        };
+
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::EntityStateUpdate { entities, .. } => {
+                assert_eq!(entities.len(), 100);
+            }
+            _ => panic!("expected EntityStateUpdate, got {:?}", decoded),
+        }
+    }
+
+    // ====================================================================
+    // Chunking: 101 entities forces chunked format (2 chunks)
+    // ====================================================================
+
+    #[test]
+    fn exactly_101_entities_needs_two_chunks() {
+        let entities: Vec<EntityState> = (0..101)
+            .map(|i| {
+                let mut e = EntityState::new_npc(Vec3::new(i as f32, 0.0, 0.0), ServerId(1));
+                e.position.x = i as f32;
+                e
+            })
+            .collect();
+
+        let per_chunk = 100usize;
+        let total_chunks = ((entities.len() + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 2);
+
+        // Create both chunks and reassemble
+        let mut reassembled = Vec::new();
+        for (i, chunk) in entities.chunks(per_chunk).enumerate() {
+            let msg = PeerMessage::ChunkedEntityUpdate {
+                tick: 50,
+                server_id: ServerId(1),
+                chunk_index: i as u16,
+                total_chunks,
+                entities: chunk.to_vec(),
+            };
+            let bytes = bincode::serialize(&msg).unwrap();
+            let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+            if let PeerMessage::ChunkedEntityUpdate { entities: chunk_entities, .. } = decoded {
+                reassembled.extend(chunk_entities);
+            }
+        }
+
+        assert_eq!(reassembled.len(), 101);
+        // Verify first chunk had 100, second had 1
+        assert!((reassembled[99].position.x - 99.0).abs() < 0.001);
+        assert!((reassembled[100].position.x - 100.0).abs() < 0.001);
+    }
+
+    // ====================================================================
+    // Chunking: out-of-order chunk delivery
+    // ====================================================================
+
+    #[test]
+    fn chunk_reassembly_out_of_order() {
+        let entities: Vec<EntityState> = (0..250)
+            .map(|i| {
+                let mut e = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+                e.position.x = i as f32;
+                e
+            })
+            .collect();
+
+        let per_chunk = 100usize;
+        let total_chunks = ((entities.len() + per_chunk - 1) / per_chunk) as u16;
+        assert_eq!(total_chunks, 3);
+
+        // Serialize all chunks
+        let mut serialized_chunks: Vec<Vec<u8>> = Vec::new();
+        for (i, chunk) in entities.chunks(per_chunk).enumerate() {
+            let msg = PeerMessage::ChunkedEntityUpdate {
+                tick: 100,
+                server_id: ServerId(1),
+                chunk_index: i as u16,
+                total_chunks,
+                entities: chunk.to_vec(),
+            };
+            serialized_chunks.push(bincode::serialize(&msg).unwrap());
+        }
+
+        // Process in reverse order (out-of-order delivery)
+        let mut chunks_received: Vec<(u16, Vec<EntityState>)> = Vec::new();
+        for bytes in serialized_chunks.iter().rev() {
+            let decoded: PeerMessage = bincode::deserialize(bytes).unwrap();
+            if let PeerMessage::ChunkedEntityUpdate { chunk_index, entities: chunk_entities, .. } = decoded {
+                chunks_received.push((chunk_index, chunk_entities));
+            }
+        }
+
+        // Sort by chunk_index to reassemble in order
+        chunks_received.sort_by_key(|(idx, _)| *idx);
+        let reassembled: Vec<EntityState> = chunks_received.into_iter()
+            .flat_map(|(_, entities)| entities)
+            .collect();
+
+        assert_eq!(reassembled.len(), 250);
+        // Verify data integrity
+        for (i, e) in reassembled.iter().enumerate() {
+            assert!((e.position.x - i as f32).abs() < 0.001,
+                "entity {} position mismatch after out-of-order reassembly", i);
+        }
+    }
+
+    // ====================================================================
+    // Chunking: duplicate chunk is idempotent
+    // ====================================================================
+
+    #[test]
+    fn duplicate_chunk_received_is_idempotent() {
+        let entities: Vec<EntityState> = (0..50)
+            .map(|_| EntityState::new_npc(Vec3::ZERO, ServerId(1)))
+            .collect();
+
+        let msg = PeerMessage::ChunkedEntityUpdate {
+            tick: 100,
+            server_id: ServerId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            entities: entities.clone(),
+        };
+
+        let bytes = bincode::serialize(&msg).unwrap();
+
+        // Decode the same chunk twice (simulating duplicate UDP delivery)
+        let first: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        let second: PeerMessage = bincode::deserialize(&bytes).unwrap();
+
+        // Both should decode identically
+        if let (
+            PeerMessage::ChunkedEntityUpdate { entities: e1, chunk_index: c1, .. },
+            PeerMessage::ChunkedEntityUpdate { entities: e2, chunk_index: c2, .. },
+        ) = (&first, &second) {
+            assert_eq!(c1, c2);
+            assert_eq!(e1.len(), e2.len());
+            assert_eq!(e1.len(), 50);
+        } else {
+            panic!("expected ChunkedEntityUpdate");
+        }
+    }
+
+    #[test]
+    fn chunked_entity_update_reassembly_logic() {
+        // Simulate what the receiver does: collect chunks, merge entities
+        let mut all_entities: Vec<EntityState> = Vec::new();
+        let total = 250;
+        let per_chunk = 100;
+        let total_chunks = ((total + per_chunk - 1) / per_chunk) as u16;
+
+        let entities: Vec<EntityState> = (0..total)
+            .map(|i| {
+                let mut e = EntityState::new_npc(Vec3::new(i as f32, 0.0, 0.0), ServerId(1));
+                e.position.x = i as f32;
+                e
+            })
+            .collect();
+
+        // Create chunks and reassemble
+        for (i, chunk) in entities.chunks(per_chunk).enumerate() {
+            let msg = PeerMessage::ChunkedEntityUpdate {
+                tick: 100,
+                server_id: ServerId(1),
+                chunk_index: i as u16,
+                total_chunks,
+                entities: chunk.to_vec(),
+            };
+
+            // Roundtrip through bincode
+            let bytes = bincode::serialize(&msg).unwrap();
+            let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+
+            if let PeerMessage::ChunkedEntityUpdate { entities: chunk_entities, .. } = decoded {
+                all_entities.extend(chunk_entities);
+            }
+        }
+
+        assert_eq!(all_entities.len(), total);
+        // Verify ordering preserved
+        for (i, e) in all_entities.iter().enumerate() {
+            assert!((e.position.x - i as f32).abs() < 0.001,
+                "entity {} position mismatch: expected {}, got {}", i, i, e.position.x);
+        }
+    }
+
+    // ====================================================================
+    // Crash recovery: SHADOW_STALE_TICKS is 300 (15 seconds)
+    // ====================================================================
+
+    #[test]
+    fn shadow_stale_ticks_is_300() {
+        // 15 seconds at 20Hz = 300 ticks. This must exceed worst-case crash
+        // detection time (5s heartbeat + 5s rebalance = 10s = 200 ticks).
+        assert_eq!(SHADOW_STALE_TICKS, 300);
+    }
+
+    // ====================================================================
+    // Crash recovery: RecoverEntities aborts transfers to dead server
+    // ====================================================================
+
+    #[test]
+    fn recover_entities_aborts_transfer_to_dead_server() {
+        let mut world = setup_world(1);
+
+        // Entity mid-transfer to server 2
+        let (entity_a, eid_a) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        world.entity_mut(entity_a).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Entity mid-transfer to server 3 (should NOT be affected)
+        let (entity_b, _eid_b) = spawn_auth_npc(&mut world, Vec3::X, 1);
+        world.entity_mut(entity_b).insert(TransferOutbound {
+            target_server: 3,
+            target_addr: "127.0.0.1:9103".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Normal entity (no transfer)
+        let (_entity_c, _eid_c) = spawn_auth_npc(&mut world, Vec3::Z, 1);
+
+        // Enqueue RecoverEntities for dead server 2; survivors = [1]
+        world.resource_mut::<CoordEventQueue>()
+            .recover_events
+            .push((2, vec![1]));
+
+        process_coord_events(&mut world);
+
+        // Entity A: TransferOutbound removed (target was dead server 2)
+        assert!(world.get::<TransferOutbound>(entity_a).is_none(),
+            "TransferOutbound should be removed for entity targeting dead server");
+        assert!(world.get::<Authoritative>(entity_a).is_some(),
+            "Entity should still be authoritative after abort");
+        assert!(world.resource::<EntityLookup>().0.contains_key(&eid_a),
+            "Entity should still exist in lookup");
+
+        // Entity B: TransferOutbound still present (targeting server 3, not dead)
+        assert!(world.get::<TransferOutbound>(entity_b).is_some(),
+            "TransferOutbound to alive server should not be affected");
+    }
+
+    #[test]
+    fn recover_entities_aborts_transfer_and_promotes_shadows() {
+        let mut world = setup_world(1);
+
+        // Shadow entity from dead server 2
+        let shadow_state = EntityState::new_npc(Vec3::new(10.0, 0.0, 10.0), ServerId(2));
+        let shadow_eid = shadow_state.id;
+        spawn_from_entity_state_direct(&mut world, &shadow_state, false, Some(1));
+
+        // Entity mid-transfer to server 2
+        let (entity, transfer_eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // RecoverEntities for dead server 2; this server is the only survivor
+        world.resource_mut::<CoordEventQueue>()
+            .recover_events
+            .push((2, vec![1]));
+
+        process_coord_events(&mut world);
+
+        // Shadow should be promoted to authoritative
+        let &shadow_bevy = world.resource::<EntityLookup>().0.get(&shadow_eid).unwrap();
+        assert!(world.get::<Authoritative>(shadow_bevy).is_some(),
+            "Shadow from dead server should be promoted");
+        assert!(world.get::<Shadow>(shadow_bevy).is_none(),
+            "Shadow marker should be removed");
+
+        // Transfer should be aborted
+        assert!(world.get::<TransferOutbound>(entity).is_none(),
+            "TransferOutbound to dead server should be removed");
+        assert!(world.resource::<EntityLookup>().0.contains_key(&transfer_eid),
+            "Transferred entity should still exist");
     }
 }

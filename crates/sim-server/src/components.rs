@@ -36,6 +36,19 @@ pub struct Shadow {
 #[derive(Component, Debug, Default)]
 pub struct LastInputSeq(pub u32);
 
+/// Marker: this entity is being transferred to another server via two-phase protocol.
+/// The source continues holding it until the ACK arrives or timeout.
+/// While marked, the entity is frozen: excluded from simulation and input processing,
+/// but STILL replicated to peers so shadows remain up-to-date for crash recovery.
+/// Inputs arriving for this entity are forwarded to the target server.
+#[derive(Component, Debug)]
+pub struct TransferOutbound {
+    pub target_server: u16,
+    pub target_addr: std::net::SocketAddr,
+    pub sent_tick: u64,
+    pub retry_count: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +159,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn transfer_outbound_component_query() {
+        let mut world = World::default();
+        let eid = EntityId::new();
+        let entity = world
+            .spawn((
+                NetworkId(eid),
+                Position(Vec3::ZERO),
+                Velocity(Vec3::ZERO),
+                EntityKind(EntityType::Npc),
+                AuthorityServer(ServerId(1)),
+                Authoritative,
+                TransferOutbound {
+                    target_server: 2,
+                    target_addr: "127.0.0.1:9102".parse().unwrap(),
+                    sent_tick: 10,
+                    retry_count: 0,
+                },
+            ))
+            .id();
+
+        let outbound = world.get::<TransferOutbound>(entity).unwrap();
+        assert_eq!(outbound.target_server, 2);
+        assert_eq!(outbound.sent_tick, 10);
+        assert_eq!(outbound.retry_count, 0);
+        assert!(world.get::<Authoritative>(entity).is_some());
     }
 
     #[test]

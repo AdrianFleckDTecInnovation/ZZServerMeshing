@@ -74,6 +74,26 @@ const cliFlags = parseArgs();
 const JSON_OUTPUT = cliFlags.json;
 const NO_COLOR = cliFlags.noColor || JSON_OUTPUT;
 
+// Derive coordinator URL from the server URL (same host, port 7871) or env var
+const coordinatorUrl = process.env.COORDINATOR_URL ||
+  (() => {
+    try {
+      const u = new URL(cliFlags.serverUrl.replace(/^ws/, 'http'));
+      const proto = u.protocol === 'https:' ? 'https' : 'http';
+      return `${proto}://${u.hostname}:7871`;
+    } catch { return 'http://localhost:7871'; }
+  })();
+
+// Build per-server metrics host map from env or coordinator /servers endpoint
+// Format: METRICS_HOSTS="1=192.168.0.15,2=192.168.0.173,3=192.168.0.86"
+const metricsHosts: Record<number, string> = {};
+if (process.env.METRICS_HOSTS) {
+  for (const entry of process.env.METRICS_HOSTS.split(',')) {
+    const [id, host] = entry.split('=');
+    if (id && host) metricsHosts[parseInt(id)] = host;
+  }
+}
+
 const config: RunnerConfig = {
   serverUrl: cliFlags.serverUrl,
   metricsBasePort: cliFlags.metricsBasePort,
@@ -105,7 +125,8 @@ function statusColor(status: string): string {
 
 async function fetchMetrics(serverId: number, basePort: number): Promise<ServerMetrics> {
   const port = basePort + serverId - 1; // server 1 → basePort, server 2 → basePort+1, etc.
-  const url = `http://localhost:${port}/metrics`;
+  const host = metricsHosts[serverId] || 'localhost';
+  const url = `http://${host}:${port}/metrics`;
   const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
   if (!res.ok) throw new Error(`Metrics fetch failed: ${res.status}`);
   return res.json() as Promise<ServerMetrics>;
@@ -298,9 +319,11 @@ function createContext(ws: WebSocket, scenarioName: string, config: RunnerConfig
 
 // ── Main runner ──
 
+const wsOptions = config.serverUrl.startsWith('wss') ? { rejectUnauthorized: false } : {};
+
 async function connectServer(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, wsOptions);
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
   });
@@ -320,10 +343,11 @@ async function cleanupSpawnedEntities(
   // (entities may have been rebalanced to other servers)
   const serverUrls: string[] = [];
   try {
-    const resp = await fetch('http://localhost:7871/servers');
+    const resp = await fetch(`${coordinatorUrl}/servers`);
     const data: { servers: { host: string; ws_port: number }[] } = await resp.json();
+    const wsProto = config.serverUrl.startsWith('wss') ? 'wss' : 'ws';
     for (const s of data.servers) {
-      serverUrls.push(`ws://${s.host}:${s.ws_port}`);
+      serverUrls.push(`${wsProto}://${s.host}:${s.ws_port}`);
     }
   } catch {
     // Can't reach coordinator — just use the local connection
@@ -334,7 +358,7 @@ async function cleanupSpawnedEntities(
   for (const url of serverUrls) {
     try {
       const ws = await new Promise<WebSocket>((resolve, reject) => {
-        const w = new WebSocket(url);
+        const w = new WebSocket(url, wsOptions);
         w.on('open', () => resolve(w));
         w.on('error', reject);
         setTimeout(() => reject(new Error('timeout')), 2000);
@@ -400,9 +424,15 @@ async function main() {
   console.log(color.bold('\n╔══════════════════════════════════════════╗'));
   console.log(color.bold('║    Server Meshing Test Suite              ║'));
   console.log(color.bold('╚══════════════════════════════════════════╝'));
-  console.log(`  Server:  ${config.serverUrl}`);
-  console.log(`  Metrics:  ports ${config.metricsBasePort}-${config.metricsBasePort + config.serverCount - 1}`);
-  console.log(`  Servers:  ${config.serverCount}\n`);
+  console.log(`  Server:       ${config.serverUrl}`);
+  console.log(`  Coordinator:  ${coordinatorUrl}`);
+  if (Object.keys(metricsHosts).length > 0) {
+    const hostList = Object.entries(metricsHosts).map(([id, host]) => `S${id}=${host}`).join(', ');
+    console.log(`  Metrics:      ${hostList} (base port ${config.metricsBasePort})`);
+  } else {
+    console.log(`  Metrics:      localhost ports ${config.metricsBasePort}-${config.metricsBasePort + config.serverCount - 1}`);
+  }
+  console.log(`  Servers:      ${config.serverCount}\n`);
 
   // Verify connectivity
   try {

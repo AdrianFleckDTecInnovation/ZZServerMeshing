@@ -46,17 +46,38 @@ Client ──GET /assign?account=xyz──> Coordinator ──(SQLite)──> pl
 
 ### Authority transfer during drain
 
-- Before transferring a player entity, sim-server sends `PlayerCheckIn` to coordinator
-- Target server receives entity via UDP transfer as today
-- Target server sends `PlayerCheckOut { account_id }` to coordinator to claim ownership
-- Coordinator updates the "checked out to" field
+Authority transfers use the two-phase protocol. The source server atomically updates the coordinator after receiving the ACK:
+
+1. Source server initiates two-phase entity transfer (sends `AuthorityTransfer` via UDP)
+2. Target server accepts the entity and sends `TransferAck` back
+3. Source server receives `TransferAck`, confirming the entity is safely on the target
+4. Source server sends `PlayerTransfer { account_id, from_server, to_server }` to coordinator
+5. Coordinator atomically updates `checked_out_to` from `from_server` to `to_server`:
+   ```sql
+   UPDATE players SET checked_out_to = :to_server
+   WHERE account_id = :account_id AND checked_out_to = :from_server;
+   ```
+6. If the WHERE clause does not match (account already reassigned by crash recovery), coordinator logs an error and returns `PlayerTransferResult { success: false }`. No duplicate login is possible because `checked_out_to` is never NULL during the transfer.
+
+This is a compare-and-swap operation. There is no window where the account is unassigned, eliminating the race condition in the original check-in/check-out flow.
 
 ### Crash recovery
 
 - Coordinator detects dead server, knows which accounts were checked out to it
 - Shadow-based recovery promotes entity on a survivor (existing mechanism)
 - Coordinator updates "checked out to" to the adopting server
-- If no shadow exists, coordinator has the last flushed state (up to 5s old) — can re-spawn on a survivor
+- If no shadow exists, coordinator has the last flushed state (up to 5s old) -- can re-spawn on a survivor
+
+### Startup reconciliation
+
+On coordinator startup, before accepting `/assign` requests:
+
+1. Query `SELECT account_id, checked_out_to FROM players WHERE checked_out_to IS NOT NULL`
+2. For each result, check if the `checked_out_to` server is currently registered
+3. If the server is not registered (dead or not yet reconnected), set `checked_out_to = NULL`
+4. This ensures stale check-outs from previous crashes are cleaned up before any new logins
+
+This runs immediately on startup. If a sim-server registers shortly after and has the player entity, the normal `PlayerFlush` mechanism will re-establish the correct `checked_out_to` value.
 
 ## Schema
 
@@ -116,6 +137,12 @@ CoordClientMsg::PlayerCheckIn {
     position: [f32; 3],
     gameplay_state: String,
 }
+// Atomic player transfer (replaces check-in/check-out during authority transfer)
+CoordClientMsg::PlayerTransfer {
+    account_id: String,
+    from_server: u16,
+    to_server: u16,
+}
 
 // Coordinator -> Sim-Server
 CoordServerMsg::SpawnPlayerDirective {
@@ -123,6 +150,12 @@ CoordServerMsg::SpawnPlayerDirective {
     entity_uuid: String,  // coordinator assigns stable UUID
     position: [f32; 3],
     gameplay_state: String,
+}
+// Response to PlayerTransfer
+CoordServerMsg::PlayerTransferResult {
+    account_id: String,
+    success: bool,
+    error: Option<String>,  // present when success=false
 }
 ```
 
@@ -132,8 +165,10 @@ CoordServerMsg::SpawnPlayerDirective {
 
 - Add `rusqlite` dependency, create DB on startup
 - `/assign` endpoint: look up or create account, return spawn position
-- Handle `PlayerFlush` and `PlayerCheckIn` messages — write to SQLite
+- Handle `PlayerFlush` and `PlayerCheckIn` messages -- write to SQLite
+- Handle `PlayerTransfer` -- atomic `UPDATE ... WHERE checked_out_to = :from_server`
 - On crash recovery: update `checked_out_to` for affected accounts
+- Startup reconciliation: query accounts with non-NULL `checked_out_to`, clear those pointing to unregistered servers
 
 ### Sim-server
 

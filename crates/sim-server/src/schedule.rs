@@ -11,7 +11,9 @@ pub fn build_schedule() -> Schedule {
 
     schedule.add_systems((
         systems::drain_inbound_events,
-        systems::drain_client_events.after(systems::drain_inbound_events),
+        systems::process_transfer_acks.after(systems::drain_inbound_events),
+        systems::process_transfer_timeouts.after(systems::process_transfer_acks),
+        systems::drain_client_events.after(systems::process_transfer_timeouts),
         systems::process_client_inputs.after(systems::drain_client_events),
         systems::process_coord_events.after(systems::drain_inbound_events),
         systems::npc_behavior
@@ -229,10 +231,12 @@ mod tests {
         assert!((vel.0.x - 5.0).abs() < 0.01);
     }
 
-    // -- Schedule integration: entity transferred during tick is not in replication --
+    // -- Schedule integration: entity transferred during tick remains (two-phase) --
 
     #[test]
-    fn transferred_entity_not_in_replication() {
+    fn transferred_entity_remains_until_ack() {
+        use crate::components::TransferOutbound;
+
         let mut world = setup_world(1);
         for _ in 0..10 {
             let state = EntityState::new_npc(Vec3::new(400.0, 0.0, 400.0), ServerId(1));
@@ -246,11 +250,20 @@ mod tests {
         let mut schedule = build_schedule();
         schedule.run(&mut world);
 
-        let remaining_auth = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        // Two-phase: transferred entities keep Authoritative + TransferOutbound
+        let auth_count = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        assert_eq!(auth_count, 10, "all entities should still be authoritative (two-phase)");
+
+        // Some should have TransferOutbound marker
+        let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert!(outbound_count > 0, "some entities should be marked for transfer");
+
+        // Replication output includes TransferOutbound entities so peers maintain
+        // up-to-date shadows for crash recovery.
         let repl = world.resource::<OutboundReplication>();
         if let Some(entities) = &repl.snapshot {
-            // Replication count should equal remaining auth count (transferred entities gone)
-            assert_eq!(entities.len(), remaining_auth);
+            assert_eq!(entities.len(), 10,
+                "all entities including TransferOutbound should be in replication for crash recovery");
         }
     }
 
@@ -265,8 +278,8 @@ mod tests {
         let shadow_eid = shadow.id;
         spawn_from_entity_state_direct(&mut world, &shadow, false, Some(0));
 
-        // Set tick well past stale threshold
-        world.resource_mut::<TickCounter>().0 = 200;
+        // Set tick well past stale threshold (SHADOW_STALE_TICKS = 300)
+        world.resource_mut::<TickCounter>().0 = 400;
 
         let mut schedule = build_schedule();
         schedule.run(&mut world);
@@ -279,6 +292,143 @@ mod tests {
 
         // But after the full schedule run, the shadow should be gone
         assert!(!world.resource::<EntityLookup>().0.contains_key(&shadow_eid));
+    }
+
+    // -- Schedule ordering: process_transfer_acks runs before process_transfer_timeouts --
+
+    #[test]
+    fn ack_processed_before_timeout_in_schedule() {
+        use crate::components::TransferOutbound;
+        use crate::resources::InboundTransferAck;
+
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // Entity is in TransferOutbound state, sent long ago (will trigger timeout)
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // ACK arrives at the same tick as the timeout would fire
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 12 }
+        );
+
+        // Set tick past timeout
+        world.resource_mut::<TickCounter>().0 = 12;
+
+        let mut schedule = build_schedule();
+        schedule.run(&mut world);
+
+        // Because process_transfer_acks runs BEFORE process_transfer_timeouts,
+        // the ACK should have despawned the entity BEFORE timeout had a chance to retry.
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid),
+            "ACK should despawn the entity before timeout can retry it");
+
+        // No retry messages should have been sent
+        assert!(world.resource::<OutboundTransfers>().messages.is_empty(),
+            "no retry should be attempted because ACK was processed first");
+    }
+
+    // -- Schedule ordering: both ack + timeout run after drain_inbound_events --
+
+    #[test]
+    fn transfer_ack_and_timeout_after_inbound_events() {
+        use crate::components::TransferOutbound;
+        use crate::resources::{InboundTransferAck, PeerUpdate};
+
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // Entity is in TransferOutbound state
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // Push both a peer update (inbound event) and a transfer ACK in the same tick
+        let shadow_state = EntityState::new_npc(Vec3::new(50.0, 0.0, 50.0), ServerId(3));
+        let shadow_eid = shadow_state.id;
+        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
+            tick: 12,
+            server_id: ServerId(3),
+            entities: vec![shadow_state],
+        });
+
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 12 }
+        );
+
+        world.resource_mut::<TickCounter>().0 = 12;
+
+        let mut schedule = build_schedule();
+        schedule.run(&mut world);
+
+        // Both should have been processed:
+        // 1. Peer update creates the shadow (drain_inbound_events)
+        assert!(world.resource::<EntityLookup>().0.contains_key(&shadow_eid),
+            "shadow from peer update should exist");
+        // 2. Transfer ACK despawns the entity (process_transfer_acks)
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid),
+            "transfer ACK should have despawned entity");
+    }
+
+    // -- Schedule ordering: drain_client_events runs after transfer systems --
+
+    #[test]
+    fn client_events_processed_after_transfers() {
+        use crate::components::TransferOutbound;
+        use crate::resources::InboundTransferAck;
+
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        // Entity is in TransferOutbound state
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // ACK for the entity
+        world.resource_mut::<InboundQueue>().transfer_acks.push(
+            InboundTransferAck { entity_id: eid, tick: 5 }
+        );
+
+        // Also register a new client (drain_client_events)
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::resources::ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<InboundQueue>().register_clients.push(
+            crate::resources::ClientRegistrationEvent {
+                client_id: 42,
+                tx,
+                acked_tick: acked,
+                player_uuid: uuid::Uuid::new_v4().to_string(),
+            }
+        );
+
+        world.resource_mut::<TickCounter>().0 = 5;
+
+        let mut schedule = build_schedule();
+        schedule.run(&mut world);
+
+        // Transfer ACK processed: entity gone
+        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
+
+        // Client registered (drain_client_events ran after)
+        assert!(world.resource::<crate::resources::ClientRegistry>().clients.contains_key(&42));
     }
 
     // -- Schedule integration: peer update + shadow cleanup race --
@@ -306,12 +456,57 @@ mod tests {
         assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
     }
 
-    // -- Schedule integration: coord drain triggers shutdown --
+    // -- Schedule integration: coord drain with two-phase transfers --
 
     #[test]
-    fn coord_drain_and_shutdown_in_schedule() {
+    fn coord_drain_two_phase_in_schedule() {
+        use crate::components::TransferOutbound;
+        use crate::resources::InboundTransferAck;
+
         let mut world = setup_world(1);
+        let mut eids = Vec::new();
         for _ in 0..3 {
+            let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+            eids.push(state.id);
+            spawn_from_entity_state_direct(&mut world, &state, true, None);
+        }
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![2]);
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = build_schedule();
+        schedule.run(&mut world);
+
+        // After first tick: drain active, entities have TransferOutbound, NOT yet shutdown
+        assert!(world.resource::<DrainState>().draining);
+        let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        assert_eq!(outbound_count, 3, "all 3 entities should have TransferOutbound");
+        assert!(!world.resource::<ShutdownRequested>().0, "should not shutdown yet (waiting for ACKs)");
+
+        // Simulate ACKs arriving for all 3 entities
+        for eid in &eids {
+            world.resource_mut::<InboundQueue>().transfer_acks.push(
+                InboundTransferAck { entity_id: *eid, tick: 2 }
+            );
+        }
+
+        // Tick 2: ACKs processed, entities despawned, drain complete
+        world.resource_mut::<TickCounter>().0 = 2;
+        // Clear outbound from previous tick
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+        schedule.run(&mut world);
+
+        let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        assert_eq!(remaining, 0, "all entities should be despawned after ACKs");
+        assert!(world.resource::<ShutdownRequested>().0, "shutdown should be requested");
+    }
+
+    #[test]
+    fn coord_drain_timeout_forces_shutdown() {
+
+        let mut world = setup_world(1);
+        for _ in 0..2 {
             let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
@@ -323,12 +518,15 @@ mod tests {
         let mut schedule = build_schedule();
         schedule.run(&mut world);
 
-        // Drain state should be active
-        assert!(world.resource::<DrainState>().draining);
-        // All entities should be gone
-        let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert_eq!(remaining, 0);
-        assert!(world.resource::<ShutdownRequested>().0);
+        assert!(!world.resource::<ShutdownRequested>().0);
+
+        // Jump tick far past drain timeout (600 ticks)
+        world.resource_mut::<TickCounter>().0 = 700;
+        world.resource_mut::<OutboundTransfers>().messages.clear();
+        schedule.run(&mut world);
+
+        // Should force shutdown even with pending transfers
+        assert!(world.resource::<ShutdownRequested>().0, "drain timeout should force shutdown");
     }
 
     // -- Schedule: empty world tick does not panic --

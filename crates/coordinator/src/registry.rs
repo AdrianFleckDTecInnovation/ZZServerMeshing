@@ -537,4 +537,206 @@ mod tests {
         assert!(url.starts_with("ws://"), "expected ws:// but got {url}");
         assert_eq!(url, "ws://10.0.0.5:7878");
     }
+
+    // ====================================================================
+    // Additional coordinator tests
+    // ====================================================================
+
+    #[test]
+    fn assign_returns_none_when_no_servers() {
+        let reg = Registry::new();
+        assert!(reg.get_least_loaded_ws_addr(None).is_none());
+    }
+
+    #[test]
+    fn assign_returns_least_loaded_server() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+
+        reg.heartbeat(1, 100);
+        reg.heartbeat(2, 10);  // least loaded
+        reg.heartbeat(3, 50);
+
+        let url = reg.get_least_loaded_ws_addr(None).unwrap();
+        // Server 2 has ws_port = 7878 + 2 - 1 = 7879
+        assert!(url.contains("7879"), "expected ws://...7879 for least loaded S2, got {}", url);
+    }
+
+    #[test]
+    fn assign_localhost_replaced_by_client_host() {
+        let mut reg = Registry::new();
+        let (tx, _rx) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx); // host defaults to 127.0.0.1
+
+        let url = reg.get_least_loaded_ws_addr(Some("192.168.1.50")).unwrap();
+        assert!(url.contains("192.168.1.50"), "expected client_host override, got {}", url);
+        assert!(!url.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn assign_real_host_not_replaced() {
+        let mut reg = Registry::new();
+        let (tx, _rx) = make_tx();
+        reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), false, tx);
+
+        let url = reg.get_least_loaded_ws_addr(Some("192.168.1.50")).unwrap();
+        assert!(url.contains("10.0.0.5"), "real host should not be overridden, got {}", url);
+        assert!(!url.contains("192.168.1.50"));
+    }
+
+    #[test]
+    fn duplicate_register_ignored() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 1); // duplicate, should be ignored
+        assert_eq!(reg.server_count(), 1);
+    }
+
+    #[test]
+    fn server_list_sorted_by_id() {
+        let mut reg = Registry::new();
+        let _rx3 = register_server(&mut reg, 3);
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+
+        let list = reg.get_server_list();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0]["server_id"], 1);
+        assert_eq!(list[1]["server_id"], 2);
+        assert_eq!(list[2]["server_id"], 3);
+    }
+
+    #[test]
+    fn server_list_excludes_gateway() {
+        let mut reg = Registry::new();
+        let (tx0, _rx0) = make_tx();
+        reg.register(0, 0, 4322, None, false, tx0); // gateway
+        let _rx1 = register_server(&mut reg, 1);
+
+        let list = reg.get_server_list();
+        assert_eq!(list.len(), 1, "gateway should not appear in server list");
+        assert_eq!(list[0]["server_id"], 1);
+    }
+
+    #[test]
+    fn server_list_includes_entity_count() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        reg.heartbeat(1, 42);
+
+        let list = reg.get_server_list();
+        assert_eq!(list[0]["entity_count"], 42);
+    }
+
+    #[test]
+    fn server_list_includes_metrics_port() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 3);
+
+        let list = reg.get_server_list();
+        assert_eq!(list[0]["metrics_port"], 8103); // 8100 + server_id
+    }
+
+    #[test]
+    fn rebalance_three_servers_picks_most_and_least() {
+        let mut reg = Registry::new();
+        let mut rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+
+        reg.heartbeat(1, 200); // most loaded
+        reg.heartbeat(2, 100);
+        reg.heartbeat(3, 10);  // least loaded
+
+        assert!(reg.try_rebalance());
+
+        // S1 (most loaded) should get the directive targeting S3 (least loaded)
+        let msg: CoordServerMsg = serde_json::from_str(&rx1.try_recv().unwrap()).unwrap();
+        match msg {
+            CoordServerMsg::RebalanceDirective { target_server, .. } => {
+                assert_eq!(target_server, 3);
+            }
+            _ => panic!("expected RebalanceDirective"),
+        }
+    }
+
+    #[test]
+    fn detect_dead_servers_stale_heartbeat() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+
+        // Manually set stale heartbeat (6 seconds ago, timeout is 5s)
+        reg.servers.get_mut(&1).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+
+        let dead = reg.detect_dead_servers();
+        assert_eq!(dead, vec![1]);
+    }
+
+    #[test]
+    fn detect_dead_servers_mixed_fresh_and_stale() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+
+        // S1 and S3 are stale, S2 is fresh
+        reg.servers.get_mut(&1).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+        reg.servers.get_mut(&3).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(10);
+
+        let mut dead = reg.detect_dead_servers();
+        dead.sort();
+        assert_eq!(dead, vec![1, 3]);
+    }
+
+    #[test]
+    fn recovery_survivors_sorted() {
+        let mut reg = Registry::new();
+        let mut rx3 = register_server(&mut reg, 3);
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+
+        reg.broadcast_recovery(4);
+
+        // All survivors should receive sorted survivor list
+        let msg: CoordServerMsg = serde_json::from_str(&rx3.try_recv().unwrap()).unwrap();
+        match msg {
+            CoordServerMsg::RecoverEntities { survivors, .. } => {
+                assert_eq!(survivors, vec![1, 2, 3], "survivors should be sorted");
+            }
+            _ => panic!("expected RecoverEntities"),
+        }
+    }
+
+    #[test]
+    fn sim_server_ids_excludes_gateway() {
+        let mut reg = Registry::new();
+        let (tx0, _rx0) = make_tx();
+        reg.register(0, 0, 4322, None, false, tx0); // gateway
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+
+        let ids = reg.sim_server_ids();
+        assert_eq!(ids, vec![1, 2]);
+        assert!(!ids.contains(&0));
+    }
+
+    #[test]
+    fn heartbeat_refreshes_stale_server() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+
+        // Make it stale
+        reg.servers.get_mut(&1).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(10);
+        assert_eq!(reg.detect_dead_servers().len(), 1);
+
+        // Heartbeat refreshes it
+        reg.heartbeat(1, 50);
+        assert!(reg.detect_dead_servers().is_empty());
+    }
 }

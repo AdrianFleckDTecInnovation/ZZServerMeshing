@@ -4,6 +4,13 @@ Last updated: 2026-04-13
 
 ## Active
 
+### 003: Critical/High Audit Fixes (Two-Phase Transfer, UDP Chunking, Persistence Race)
+**Status:** Designed, ready for implementation
+**Priority:** Critical/High
+**Design:** `designs/003-critical-high-fixes.md`
+**Work Items:** `work-items/003-critical-high-fixes.md`
+**Summary:** Three fixes from the architecture audit. (1) Two-phase authority transfer with ACK/timeout/retry to prevent entity loss on UDP packet drop -- the most dangerous flaw in the system. (2) UDP replication chunking to break through the 1,000-entity hard wall where replication silently stops. (3) Atomic PlayerTransfer message to fix the race condition in the persistence design where check-in then check-out creates a duplicate-login window. 14 work items, estimated 18-27 hours. Issues are independent and can be parallelized.
+
 ### 002: Delta Compression for Server-to-Client Snapshots
 **Status:** Designed, ready for implementation
 **Design:** `designs/002-delta-compression.md`

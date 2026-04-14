@@ -1,6 +1,10 @@
 use crate::game_loop::SharedInbound;
-use crate::resources::{ForwardedInput, ForwardedRemove, InboundTransfer, PeerUpdate};
+use crate::resources::{
+    ForwardedInput, ForwardedRemove, InboundTransferAck, InboundTransfer, PeerUpdate,
+};
+use shared::entity::EntityState;
 use shared::protocol::PeerMessage;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
@@ -11,7 +15,44 @@ pub async fn run_udp_receiver(
 ) {
     let mut buf = vec![0u8; 65536];
 
+    // Chunk reassembly state for ChunkedEntityUpdate
+    struct ChunkReassembly {
+        total_chunks: u16,
+        received: HashSet<u16>,
+        entities: Vec<EntityState>,
+    }
+    let mut reassembly: HashMap<(u16, u64), ChunkReassembly> = HashMap::new();
+    let mut latest_tick: HashMap<u16, u64> = HashMap::new();
+
+    /// How often (in loop iterations) to run the global reassembly cleanup sweep.
+    const GLOBAL_SWEEP_INTERVAL: u64 = 100;
+    /// Reassembly entries older than this many ticks behind the global max are evicted.
+    const GLOBAL_STALE_TICKS: u64 = 40;
+
+    let mut loop_counter: u64 = 0;
+
     loop {
+        loop_counter += 1;
+
+        // Periodic global sweep: evict stale reassembly entries from ALL servers,
+        // including crashed peers whose ticks never advance.
+        if loop_counter % GLOBAL_SWEEP_INTERVAL == 0 {
+            if let Some(&global_max) = latest_tick.values().max() {
+                let before = reassembly.len();
+                reassembly.retain(|&(_sid, t), _| {
+                    global_max.saturating_sub(t) <= GLOBAL_STALE_TICKS
+                });
+                let evicted = before - reassembly.len();
+                if evicted > 0 {
+                    tracing::debug!(
+                        evicted,
+                        remaining = reassembly.len(),
+                        global_max_tick = global_max,
+                        "Global reassembly sweep evicted stale entries"
+                    );
+                }
+            }
+        }
         let (len, addr) = match udp_socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
@@ -82,6 +123,56 @@ pub async fn run_udp_receiver(
                     entity = %entity_id,
                     "Queued forwarded remove"
                 );
+            }
+            PeerMessage::TransferAck { entity_id, tick } => {
+                let mut q = inbound.queue.lock().await;
+                q.transfer_acks.push(InboundTransferAck { entity_id, tick });
+                tracing::debug!(
+                    entity = %entity_id,
+                    tick,
+                    "Queued transfer ACK"
+                );
+            }
+            PeerMessage::ChunkedEntityUpdate {
+                tick,
+                server_id,
+                chunk_index,
+                total_chunks,
+                entities,
+            } => {
+                let key = (server_id.0, tick);
+
+                // Update latest tick for this server
+                let prev_latest = latest_tick.entry(server_id.0).or_insert(0);
+                if tick > *prev_latest {
+                    *prev_latest = tick;
+                    // Clean up stale reassemblies (more than 2 ticks behind)
+                    reassembly.retain(|&(sid, t), _| sid != server_id.0 || tick - t <= 2);
+                }
+
+                let entry = reassembly.entry(key).or_insert_with(|| ChunkReassembly {
+                    total_chunks,
+                    received: HashSet::new(),
+                    entities: Vec::new(),
+                });
+
+                if entry.received.contains(&chunk_index) {
+                    continue; // duplicate chunk
+                }
+
+                entry.received.insert(chunk_index);
+                entry.entities.extend(entities);
+
+                if entry.received.len() == entry.total_chunks as usize {
+                    // Complete! Push to inbound queue
+                    let complete = reassembly.remove(&key).unwrap();
+                    let mut q = inbound.queue.lock().await;
+                    q.peer_updates.push(PeerUpdate {
+                        tick,
+                        server_id,
+                        entities: complete.entities,
+                    });
+                }
             }
         }
     }

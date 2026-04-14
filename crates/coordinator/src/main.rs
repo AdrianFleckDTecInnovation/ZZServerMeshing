@@ -180,6 +180,20 @@ async fn handle_server_connection(
                 Ok(CoordClientMsg::Draining { server_id: sid }) => {
                     let _ = event_tx.send(RegistryEvent::Draining { server_id: sid });
                 }
+                Ok(CoordClientMsg::PlayerTransfer {
+                    account_id,
+                    from_server,
+                    to_server,
+                }) => {
+                    // Placeholder: log the transfer request. Full implementation
+                    // requires the SQLite persistence layer (not yet built).
+                    tracing::info!(
+                        account_id,
+                        from_server,
+                        to_server,
+                        "Player transfer request (persistence not yet implemented)"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!("Bad message from {addr}: {e}");
                 }

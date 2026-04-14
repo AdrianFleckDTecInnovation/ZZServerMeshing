@@ -26,15 +26,30 @@ export const rebalanceStorm: Scenario = {
     const baselineTotal = baseline.reduce((sum, m) => sum + m.entity_count, 0);
     details.push(`Baseline: ${baselineTotal} entities`);
 
-    // Pick server 1 to overload — connect directly to its WS port
+    // Pick server 1 to overload — get its URL from coordinator or derive from ctx
     const targetServer = 1;
-    const targetWsPort = 7877 + targetServer;
+    const wsProto = ctx.serverUrl.startsWith('wss') ? 'wss' : 'ws';
+    const wsOpts = wsProto === 'wss' ? { rejectUnauthorized: false } : {};
 
-    ctx.log(`Dumping ${DUMP_COUNT} entities on S${targetServer} (ws://localhost:${targetWsPort})...`);
+    // Try to get the actual server URL from coordinator (handles distributed clusters)
+    let directUrl: string;
+    try {
+      const coordUrl = process.env.COORDINATOR_URL ||
+        ctx.serverUrl.replace(/^wss?/, ctx.serverUrl.startsWith('wss') ? 'https' : 'http').replace(/:\d+$/, ':7871');
+      const resp = await fetch(`${coordUrl}/servers`);
+      const data: { servers: { server_id: number; host: string; ws_port: number }[] } = await resp.json();
+      const s1 = data.servers.find(s => s.server_id === targetServer);
+      directUrl = s1 ? `${wsProto}://${s1.host}:${s1.ws_port}` : `${wsProto}://localhost:${7877 + targetServer}`;
+    } catch {
+      const parsedUrl = new URL(ctx.serverUrl.replace(/^ws/, 'http'));
+      directUrl = `${wsProto}://${parsedUrl.hostname}:${7877 + targetServer}`;
+    }
+
+    ctx.log(`Dumping ${DUMP_COUNT} entities on S${targetServer} (${directUrl})...`);
 
     // Connect directly to the sim-server to bypass server round-robin
     const directWs = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:${targetWsPort}`);
+      const ws = new WebSocket(directUrl, wsOpts);
       ws.on('open', () => resolve(ws));
       ws.on('error', reject);
     });

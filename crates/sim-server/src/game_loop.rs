@@ -101,6 +101,7 @@ pub async fn run_game_loop_ecs(
             let unregister_clients = std::mem::take(&mut iq.unregister_clients);
             let client_player_assignments = std::mem::take(&mut iq.client_player_assignments);
             let force_full_snapshot_clients = std::mem::take(&mut iq.force_full_snapshot_clients);
+            let transfer_acks = std::mem::take(&mut iq.transfer_acks);
             drop(ecs_queue);
 
             let mut ecs_queue = world.resource_mut::<InboundQueue>();
@@ -113,6 +114,7 @@ pub async fn run_game_loop_ecs(
             ecs_queue.unregister_clients = unregister_clients;
             ecs_queue.client_player_assignments = client_player_assignments;
             ecs_queue.force_full_snapshot_clients = force_full_snapshot_clients;
+            ecs_queue.transfer_acks = transfer_acks;
         }
         {
             let mut cq = coord_events.queue.lock().await;
@@ -141,9 +143,12 @@ pub async fn run_game_loop_ecs(
         let transfers = std::mem::take(&mut world.resource_mut::<OutboundTransfers>().messages);
         let forwards = std::mem::take(&mut world.resource_mut::<OutboundForwards>().messages);
 
-        // Count entities for heartbeat
+        // Count entities for heartbeat.
+        // Exclude TransferOutbound entities: they are frozen and no longer consume
+        // tick budget on this server. Including them double-counts (target also reports
+        // them) and skews coordinator rebalance decisions.
         let auth_count = world
-            .query_filtered::<(), With<Authoritative>>()
+            .query_filtered::<(), (With<Authoritative>, Without<TransferOutbound>)>()
             .iter(&world)
             .count();
         let shadow_count = world
@@ -154,7 +159,9 @@ pub async fn run_game_loop_ecs(
         let client_count = world.resource::<ClientRegistry>().clients.len();
         entity_count_atomic.store(auth_count as u32, Ordering::Relaxed);
 
-        // -- Phase 4: Send UDP replication to peers --
+        // -- Phase 4: Send UDP replication to peers (chunked for large payloads) --
+        const ENTITIES_PER_CHUNK: usize = 100;
+
         let t2 = Instant::now();
         if let Some(entities) = &repl_data {
             let peer_addrs: Vec<_> = world
@@ -166,25 +173,44 @@ pub async fn run_game_loop_ecs(
 
             if !peer_addrs.is_empty() {
                 let server_id_u16 = world.resource::<ServerConfig>().server_id;
-                let msg = PeerMessage::EntityStateUpdate {
-                    tick: repl_tick,
-                    server_id: server_id_u16,
-                    entities: entities.clone(),
-                };
 
-                if let Ok(bytes) = bincode::serialize(&msg) {
-                    if bytes.len() <= 60_000 {
+                if entities.len() <= ENTITIES_PER_CHUNK {
+                    // Small payload: use unchunked format (backward compatible)
+                    let msg = PeerMessage::EntityStateUpdate {
+                        tick: repl_tick,
+                        server_id: server_id_u16,
+                        entities: entities.clone(),
+                    };
+                    if let Ok(bytes) = bincode::serialize(&msg) {
                         for addr in &peer_addrs {
                             if let Err(e) = udp_socket.send_to(&bytes, addr).await {
                                 tracing::warn!("Failed to send to peer {addr}: {e}");
                             }
                         }
-                    } else {
-                        tracing::warn!(
-                            "Replication packet too large ({} bytes), {} entities",
-                            bytes.len(),
-                            entities.len()
-                        );
+                    }
+                } else {
+                    // Large payload: chunk it
+                    let total_chunks =
+                        ((entities.len() + ENTITIES_PER_CHUNK - 1) / ENTITIES_PER_CHUNK) as u16;
+                    for (i, chunk) in entities.chunks(ENTITIES_PER_CHUNK).enumerate() {
+                        let msg = PeerMessage::ChunkedEntityUpdate {
+                            tick: repl_tick,
+                            server_id: server_id_u16,
+                            chunk_index: i as u16,
+                            total_chunks,
+                            entities: chunk.to_vec(),
+                        };
+                        if let Ok(bytes) = bincode::serialize(&msg) {
+                            for addr in &peer_addrs {
+                                if let Err(e) = udp_socket.send_to(&bytes, addr).await {
+                                    tracing::warn!(
+                                        "Failed to send chunk {}/{} to {addr}: {e}",
+                                        i + 1,
+                                        total_chunks
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }

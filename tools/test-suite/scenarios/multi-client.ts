@@ -38,8 +38,9 @@ function connectAndListen(url: string): Promise<{
   getSnapshot: () => { tick: number; entities: EntityState[] } | null;
   waitReady: () => Promise<void>;
 }> {
+  const opts = url.startsWith('wss') ? { rejectUnauthorized: false } : {};
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, opts);
     let latest: { tick: number; entities: EntityState[] } | null = null;
     let readyResolve: (() => void) | null = null;
 
@@ -84,12 +85,15 @@ export const multiClient: Scenario = {
     ctx.log('Requesting second server assignment from coordinator...');
 
     // Get second server URL from coordinator
+    const wsProto = url1.startsWith('wss') ? 'wss' : 'ws';
     let url2: string;
     try {
-      const resp = await fetch('http://localhost:7871/servers');
+      const coordUrl = process.env.COORDINATOR_URL ||
+        url1.replace(/^wss?/, url1.startsWith('wss') ? 'https' : 'http').replace(/:\d+$/, ':7871');
+      const resp = await fetch(`${coordUrl}/servers`);
       const data: { servers: { server_id: number; host: string; ws_port: number }[] } = await resp.json();
-      // Build ws URLs and find one different from client 1
-      const serverUrls = data.servers.map(s => `ws://${s.host}:${s.ws_port}`);
+      // Build ws/wss URLs and find one different from client 1
+      const serverUrls = data.servers.map(s => `${wsProto}://${s.host}:${s.ws_port}`);
       const other = serverUrls.find(u => u !== url1);
       if (other) {
         url2 = other;

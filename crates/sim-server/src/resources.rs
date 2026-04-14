@@ -73,6 +73,8 @@ pub struct InboundQueue {
     pub client_player_assignments: Vec<(u64, EntityId)>,
     /// Clients requesting a forced full snapshot (RequestSnapshot).
     pub force_full_snapshot_clients: Vec<u64>,
+    /// Acknowledgements of accepted authority transfers from target servers.
+    pub transfer_acks: Vec<InboundTransferAck>,
 }
 
 /// Event pushed by handle_client when a new WebSocket client connects.
@@ -130,6 +132,8 @@ pub struct OutboundForwards {
 pub struct DrainState {
     pub draining: bool,
     pub targets: Option<Vec<u16>>,
+    /// Tick when drain was started. Used for drain timeout.
+    pub started_tick: Option<u64>,
 }
 
 /// Shutdown requested (set when drain completes).
@@ -230,6 +234,12 @@ pub struct ForwardedRemove {
     pub entity_id: EntityId,
 }
 
+/// Inbound acknowledgement that an authority transfer was accepted by the target.
+pub struct InboundTransferAck {
+    pub entity_id: EntityId,
+    pub tick: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +267,7 @@ mod tests {
         assert!(world.resource::<PeerAddresses>().0.is_empty());
         assert!(world.resource::<EntityLookup>().0.is_empty());
         assert!(world.resource::<InboundQueue>().peer_updates.is_empty());
+        assert!(world.resource::<InboundQueue>().transfer_acks.is_empty());
         assert!(world.resource::<CoordEventQueue>().peer_list_updates.is_empty());
         assert!(world.resource::<OutboundReplication>().snapshot.is_none());
         assert!(world.resource::<ClientSnapshot>().frame.is_none());

@@ -44,28 +44,36 @@ export const crashRecovery: Scenario = {
     ctx.log(`Killing sim-server ${targetId}...`);
     const { execSync } = await import('child_process');
 
-    // Try Docker first, then local process kill
+    // Kill the target server: try local process kill first (most common), Docker as fallback
     let killed = false;
+
+    // Local: kill the LISTENING process on the sim-server port.
+    // Must use -sTCP:LISTEN to avoid killing the test runner itself (which has
+    // an established WebSocket connection to this port).
     try {
-      // Docker: stop the container
-      execSync(`docker compose -f docker-compose.test.yml stop sim-server-${targetId} 2>/dev/null`, {
-        timeout: 5000,
-        cwd: process.cwd().replace(/\/tools$/, ''),
-      });
-      killed = true;
-      details.push(`Killed via docker compose stop`);
+      const wsPort = 7877 + targetId;
+      const pids = execSync(`lsof -ti tcp:${wsPort} -sTCP:LISTEN 2>/dev/null || true`).toString().trim();
+      if (pids) {
+        execSync(`kill -9 ${pids.split('\n').join(' ')}`);
+        killed = true;
+        details.push(`Killed via local process signal (port ${wsPort})`);
+      }
     } catch {}
 
+    // Docker fallback: only if local kill didn't find the process
     if (!killed) {
       try {
-        // Local: kill processes by port
-        const wsPort = 7877 + targetId;
-        execSync(`lsof -ti tcp:${wsPort} | xargs kill -9 2>/dev/null || true`);
+        execSync(
+          `docker compose -f docker-compose.test.yml kill sim-server-${targetId} 2>/dev/null`,
+          { timeout: 3000, cwd: process.cwd().replace(/\/tools$/, '') }
+        );
         killed = true;
-        details.push(`Killed via local process signal`);
-      } catch {
-        details.push('Warning: Could not kill server process');
-      }
+        details.push(`Killed via docker compose kill`);
+      } catch {}
+    }
+
+    if (!killed) {
+      details.push('Warning: Could not kill server process');
     }
 
     // Wait for coordinator to detect the crash (5s heartbeat timeout) + recovery
