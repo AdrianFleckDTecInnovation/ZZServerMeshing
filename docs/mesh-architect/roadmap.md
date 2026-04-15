@@ -1,8 +1,29 @@
 # Mesh Architect Roadmap
 
-Last updated: 2026-04-13
+Last updated: 2026-04-15
 
 ## Active
+
+### 010: Tiered AoI-Aware Shadow Replication
+**Status:** Designed, ready for implementation
+**Priority:** High
+**Design:** `designs/010-tiered-aoi-shadow-replication.md`
+**Work Items:** `work-items/010-tiered-aoi-shadow-replication.md`
+**Summary:** Split server-to-server replication into hot tier (20Hz, entities near peer players) and cold tier (5Hz, everything else). Currently all spatially-relevant entities are replicated at 20Hz, wasting bandwidth on entities no player will see. The hot tier uses player shadow positions (not all shadows) and squared distance checks for precise classification. The cold tier replaces the 1-per-second full snapshot for crash recovery. Full snapshots are disabled by default (configurable via --full-snapshot flag), with interval changed from 1s to 30s. Peers without player shadows fall back to the existing PeerBounds approach. 11 work items, estimated 7-8 hours.
+
+### 007: Peer Replication AoI (Spatial Filtering for Server-to-Server UDP)
+**Status:** Implemented
+**Priority:** High
+**Design:** `designs/007-peer-replication-aoi.md`
+**Work Items:** `work-items/007-peer-replication-aoi.md`
+**Summary:** Server-to-server UDP replication currently sends ALL authoritative entities to ALL peers every tick, saturating the UDP channel at ~600-800 entities on the UNO Q boards. This design filters replication per-peer using spatial bounding boxes: each server computes the spatial footprint of each peer's entities (from shadow positions) and only replicates entities within a 750-unit expanded radius of that footprint. Periodic full replication (once per second) ensures crash recovery still has complete shadow state. Uses axis-aligned bounding box checks (4 float comparisons per entity per peer) instead of expensive cell-set expansion. 10 work items across 4 phases, estimated 12-18 hours. Includes a rollback knob (--full-repl-interval 1 disables filtering).
+
+### 006: Area of Interest (AoI) Filtering for Server-to-Client Snapshots
+**Status:** Designed, ready for implementation
+**Priority:** High
+**Design:** `designs/006-aoi-filtering.md`
+**Work Items:** `work-items/006-aoi-filtering.md`
+**Summary:** Binary in/out AoI filter at 500 units for client snapshots. Entities within 500 units of the client's player are included every tick; entities beyond are excluded. No tiers, no variable rates. Prerequisites: expand WORLD_EXTENT from 500 to 5000 (10k x 10k world), update client visuals, update test infrastructure with spawnCluster/spawnAtPositions helpers. The AoI filter integrates with existing delta compression -- entities leaving AoI produce delta removals, entering produces delta updates. Player's own entity always included. No wire format changes. 10 work items across 4 phases, estimated 8-12 hours.
 
 ### 005: Tick Loop Health (Mutex Swap, UDP Sender Task, Clean Exit)
 **Status:** Designed, ready for implementation
@@ -45,7 +66,6 @@ Last updated: 2026-04-13
 
 - Player persistence (design exists in `docs/player-persistence-design.md`, needs work items)
 - Peer health monitoring
-- Interest management (infrastructure exists but disabled, needs redesign for ECS)
 - Shadow extrapolation
 - Smart rebalancing
 - Graceful degradation

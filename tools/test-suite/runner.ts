@@ -24,6 +24,7 @@ import { forwardedInput } from './scenarios/forwarded-input.js';
 import { multiClient } from './scenarios/multi-client.js';
 import { entityLifecycle } from './scenarios/entity-lifecycle.js';
 import { authorityTransfer } from './scenarios/authority-transfer.js';
+import { aoiFiltering } from './scenarios/aoi-filtering.js';
 
 const ALL_SCENARIOS: Scenario[] = [
   spawnBurst,
@@ -40,6 +41,7 @@ const ALL_SCENARIOS: Scenario[] = [
   multiClient,
   entityLifecycle,
   authorityTransfer,
+  aoiFiltering,
 ];
 
 // ── CLI ──
@@ -337,9 +339,9 @@ function createContext(ws: WebSocket, spawnConnections: WebSocket[], scenarioNam
     async spawn(count: number, options?: SpawnOptions): Promise<void> {
       for (let i = 0; i < count; i++) {
         const pos = options?.position ?? [
-          (Math.random() - 0.5) * 800,
+          (Math.random() - 0.5) * 8000,
           0,
-          (Math.random() - 0.5) * 800,
+          (Math.random() - 0.5) * 8000,
         ];
         const msg = JSON.stringify({
           type: 'SpawnEntity',
@@ -352,6 +354,48 @@ function createContext(ws: WebSocket, spawnConnections: WebSocket[], scenarioNam
           target.send(msg);
         } catch {
           // Connection may have died -- fall back to primary
+          ws.send(msg);
+        }
+        spawnRoundRobinIndex++;
+      }
+    },
+
+    async spawnCluster(count: number, center: [number, number, number], radius: number, options?: Omit<SpawnOptions, 'position'>): Promise<void> {
+      for (let i = 0; i < count; i++) {
+        // Uniform random point within a circle of the given radius
+        const angle = Math.random() * 2 * Math.PI;
+        const r = radius * Math.sqrt(Math.random());
+        const pos: [number, number, number] = [
+          center[0] + r * Math.cos(angle),
+          center[1],
+          center[2] + r * Math.sin(angle),
+        ];
+        const msg = JSON.stringify({
+          type: 'SpawnEntity',
+          position: pos,
+          entity_type: options?.entityType ?? 'npc',
+        });
+        const target = spawnTargets[spawnRoundRobinIndex % spawnTargets.length];
+        try {
+          target.send(msg);
+        } catch {
+          ws.send(msg);
+        }
+        spawnRoundRobinIndex++;
+      }
+    },
+
+    async spawnAtPositions(positions: [number, number, number][], options?: Omit<SpawnOptions, 'position'>): Promise<void> {
+      for (const pos of positions) {
+        const msg = JSON.stringify({
+          type: 'SpawnEntity',
+          position: pos,
+          entity_type: options?.entityType ?? 'npc',
+        });
+        const target = spawnTargets[spawnRoundRobinIndex % spawnTargets.length];
+        try {
+          target.send(msg);
+        } catch {
           ws.send(msg);
         }
         spawnRoundRobinIndex++;

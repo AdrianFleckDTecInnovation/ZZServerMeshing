@@ -14,10 +14,11 @@ async function getServerUrl(): Promise<string> {
 
 async function main() {
   const worldView = new WorldView();
+  const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || '';
   const serverUrl = await getServerUrl();
   const network = new NetworkClient(serverUrl, worldView);
   const renderer = new Renderer(worldView, network);
-  const debug = new DebugOverlay(worldView);
+  const debug = new DebugOverlay(worldView, coordinatorUrl);
 
   renderer.onRenderFrame = () => debug.tick();
   await renderer.init();

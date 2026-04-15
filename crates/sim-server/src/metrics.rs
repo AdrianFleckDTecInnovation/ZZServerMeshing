@@ -24,6 +24,16 @@ pub struct MetricsCollector {
     pub shadow_count: usize,
     pub peer_count: usize,
     pub connected_clients: usize,
+    /// Replication mode: "full", "filtered", or "tiered".
+    pub replication_mode: String,
+    /// Total authoritative entities (full replication size).
+    pub replication_full_count: usize,
+    /// Entities actually sent across all peers after filtering.
+    pub replication_sent_count: usize,
+    /// Hot-tier entities sent this tick (near peer players, 20Hz).
+    pub replication_hot_count: usize,
+    /// Cold-tier entities sent this tick (far from players, 5Hz on cold ticks only).
+    pub replication_cold_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +53,16 @@ pub struct MetricsSnapshot {
     pub connected_clients: usize,
     pub tick_budget_pct: f64,
     pub phases: PhaseMetrics,
+    /// Replication mode on the most recent tick: "full", "filtered", or "tiered".
+    pub replication_mode: String,
+    /// Total authoritative entity count (would be sent unfiltered).
+    pub replication_full_count: usize,
+    /// Total entities actually sent across all peers (after filtering).
+    pub replication_sent_count: usize,
+    /// Hot-tier entities sent (near peer players, 20Hz).
+    pub replication_hot_count: usize,
+    /// Cold-tier entities sent (far from players, sent on cold ticks at 5Hz).
+    pub replication_cold_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +85,11 @@ impl MetricsCollector {
             shadow_count: 0,
             peer_count: 0,
             connected_clients: 0,
+            replication_mode: "full".to_string(),
+            replication_full_count: 0,
+            replication_sent_count: 0,
+            replication_hot_count: 0,
+            replication_cold_count: 0,
         }
     }
 
@@ -97,6 +122,11 @@ impl MetricsCollector {
                 shadow_cleanup_ms: self.percentiles(|t| t.shadow_cleanup),
                 total_ms: self.percentiles(|t| t.total),
             },
+            replication_mode: self.replication_mode.clone(),
+            replication_full_count: self.replication_full_count,
+            replication_sent_count: self.replication_sent_count,
+            replication_hot_count: self.replication_hot_count,
+            replication_cold_count: self.replication_cold_count,
         }
     }
 
@@ -248,5 +278,57 @@ mod tests {
         assert!((snap.phases.transfers_ms.p50 - 2.0).abs() < 0.1);
         assert!((snap.phases.replication_ms.p50 - 3.0).abs() < 0.1);
         assert!((snap.phases.shadow_cleanup_ms.p50 - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn snapshot_hot_cold_counts_in_json() {
+        // Verify that replication_hot_count and replication_cold_count
+        // are serialized into the JSON metrics snapshot.
+        let mut c = MetricsCollector::new(1);
+        c.replication_hot_count = 42;
+        c.replication_cold_count = 17;
+        c.replication_mode = "tiered".to_string();
+        c.record(timing(5));
+        let snap = c.snapshot();
+        assert_eq!(snap.replication_hot_count, 42);
+        assert_eq!(snap.replication_cold_count, 17);
+        assert_eq!(snap.replication_mode, "tiered");
+
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"replication_hot_count\":42"),
+            "hot_count missing from JSON: {json}");
+        assert!(json.contains("\"replication_cold_count\":17"),
+            "cold_count missing from JSON: {json}");
+        assert!(json.contains("\"replication_mode\":\"tiered\""),
+            "replication_mode missing from JSON: {json}");
+    }
+
+    #[test]
+    fn snapshot_hot_cold_counts_default_zero() {
+        // Fresh MetricsCollector should have hot/cold counts at 0.
+        let c = MetricsCollector::new(1);
+        let snap = c.snapshot();
+        assert_eq!(snap.replication_hot_count, 0);
+        assert_eq!(snap.replication_cold_count, 0);
+        assert_eq!(snap.replication_mode, "full");
+    }
+
+    #[test]
+    fn snapshot_full_mode_resets_hot_cold() {
+        // When replication_mode is "full", hot/cold counts should reflect
+        // the values set on the collector (which the game_loop sets to 0).
+        let mut c = MetricsCollector::new(1);
+        c.replication_mode = "full".to_string();
+        c.replication_hot_count = 0;
+        c.replication_cold_count = 0;
+        c.replication_full_count = 100;
+        c.replication_sent_count = 200;
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.replication_hot_count, 0);
+        assert_eq!(snap.replication_cold_count, 0);
+        assert_eq!(snap.replication_full_count, 100);
+        assert_eq!(snap.replication_sent_count, 200);
     }
 }

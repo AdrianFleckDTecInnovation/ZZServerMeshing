@@ -18,7 +18,7 @@ const CHANGE_THRESHOLD: f32 = 0.01;
 const CHANGE_THRESHOLD_SQ: f32 = CHANGE_THRESHOLD * CHANGE_THRESHOLD;
 
 /// How often to force a full snapshot regardless of delta state.
-/// 100 ticks = 5 seconds at 20Hz. Matches SHADOW_STALE_TICKS.
+/// 100 ticks = 5 seconds at 20Hz. Well within SHADOW_STALE_TICKS (300 = 15s).
 pub const FULL_SNAPSHOT_INTERVAL: u32 = 100;
 
 /// Compact entity state for baseline comparison.

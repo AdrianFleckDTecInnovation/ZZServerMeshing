@@ -36,8 +36,8 @@ export const meshVerify: Scenario = {
 
     // Ensure there are entities to test with — spawn some if the world is empty
     if (firstSnap.entities.length < 6) {
-      ctx.log('World has few entities, spawning 20 NPCs for verification...');
-      await ctx.spawn(20);
+      ctx.log('World has few entities, spawning 20 NPCs near origin for verification...');
+      await ctx.spawnCluster(20, [0, 0, 0], 200);
       await ctx.sleep(2000);
     }
 

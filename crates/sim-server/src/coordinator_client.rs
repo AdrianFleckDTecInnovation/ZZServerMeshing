@@ -14,7 +14,9 @@ pub async fn run_coordinator_client(
     coord_events: Arc<SharedCoordEvents>,
     advertise_host: Option<String>,
     entity_count: Arc<AtomicU32>,
+    weighted_load: Arc<AtomicU32>,
     tls: bool,
+    coord_outbound: Arc<crate::game_loop::SharedCoordOutbound>,
 ) {
     loop {
         tracing::info!("Connecting to coordinator at {coordinator_addr}...");
@@ -39,22 +41,41 @@ pub async fn run_coordinator_client(
             ws_port,
             host: advertise_host.clone(),
             tls,
+            protocol_version: shared::PROTOCOL_VERSION,
         };
         if let Ok(json) = serde_json::to_string(&reg) {
             let _ = ws_sink.send(Message::Text(json.into())).await;
         }
 
-        // Heartbeat ticker
+        // Heartbeat ticker + outbound coordinator message drain
         let hb_entity_count = Arc::clone(&entity_count);
+        let hb_weighted_load = Arc::clone(&weighted_load);
+        let hb_coord_outbound = Arc::clone(&coord_outbound);
         let mut hb_sink = ws_sink;
         let hb_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
+
+                // Drain any outbound coordinator messages (TransferResult, etc.)
+                let outbound: Vec<CoordClientMsg> = {
+                    let mut q = hb_coord_outbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                    std::mem::take(&mut *q)
+                };
+                for msg in outbound {
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if hb_sink.send(Message::Text(json.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+
                 let count = hb_entity_count.load(Ordering::Relaxed);
+                let wl = hb_weighted_load.load(Ordering::Relaxed);
                 let hb = CoordClientMsg::Heartbeat {
                     server_id,
                     entity_count: count,
+                    weighted_load: wl,
                 };
                 if let Ok(json) = serde_json::to_string(&hb) {
                     if hb_sink.send(Message::Text(json.into())).await.is_err() {
@@ -65,10 +86,10 @@ pub async fn run_coordinator_client(
         });
 
         // Listen for coordinator messages.
-        // 30-second read timeout as defense-in-depth: if the TCP connection is
-        // half-open (no FIN received), we won't block forever waiting for frames.
-        // The coordinator sends PeerList on any topology change and heartbeat
-        // processing is continuous, so 30s of silence indicates a dead connection.
+        // Read timeout as defense-in-depth: if the TCP connection is half-open
+        // (no FIN received), we won't block forever waiting for frames.
+        // The coordinator sends keepalives every 5s on the rebalance interval,
+        // so 30s gives 6 missed keepalives before we consider the connection dead.
         let read_timeout = std::time::Duration::from_secs(30);
         loop {
             let frame = tokio::time::timeout(read_timeout, ws_stream.next()).await;
@@ -138,6 +159,9 @@ pub async fn run_coordinator_client(
                                 "Player transfer rejected by coordinator"
                             );
                         }
+                    }
+                    Ok(CoordServerMsg::Keepalive) => {
+                        // Coordinator is alive — nothing to do, the read timeout is reset
                     }
                     Err(e) => {
                         tracing::warn!("Bad coordinator message: {e}");

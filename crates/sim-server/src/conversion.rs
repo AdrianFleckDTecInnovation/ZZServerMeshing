@@ -1,5 +1,5 @@
 use crate::components::*;
-use crate::resources::EntityLookup;
+use crate::resources::{EntityLookup, EntityOwnership};
 use bevy_ecs::prelude::*;
 use shared::entity::{EntityState, EntityType};
 
@@ -68,6 +68,8 @@ pub fn despawn_and_remove(
     network_id: shared::entity::EntityId,
 ) {
     world.resource_mut::<EntityLookup>().0.remove(&network_id);
+    // Clean up ownership tracking
+    world.resource_mut::<EntityOwnership>().owners.remove(&network_id);
     if world.get_entity(entity).is_ok() {
         world.despawn(entity);
     }
@@ -83,6 +85,7 @@ mod tests {
     fn setup_world() -> World {
         let mut world = World::default();
         world.init_resource::<EntityLookup>();
+        world.init_resource::<EntityOwnership>();
         world
     }
 

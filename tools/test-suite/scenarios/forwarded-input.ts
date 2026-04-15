@@ -52,8 +52,8 @@ export const forwardedInput: Scenario = {
 
     if (shadowEntities.length === 0) {
       // Spawn some entities and wait for them to be distributed and replicated
-      ctx.log('No shadow entities visible — spawning NPCs and waiting for distribution...');
-      await ctx.spawn(30);
+      ctx.log('No shadow entities visible — spawning NPCs near origin and waiting for distribution...');
+      await ctx.spawnCluster(30, [0, 0, 0], 200);
       await ctx.sleep(4000); // let coordinator rebalance + replication propagate
 
       snap = ctx.getLatestSnapshot();
@@ -65,8 +65,8 @@ export const forwardedInput: Scenario = {
 
     if (shadowEntities.length === 0) {
       // Still no shadows — try spawning more and waiting longer
-      ctx.log('Still no shadows. Spawning more and waiting longer...');
-      await ctx.spawn(20);
+      ctx.log('Still no shadows. Spawning more near origin and waiting longer...');
+      await ctx.spawnCluster(20, [0, 0, 0], 200);
       await ctx.sleep(5000);
 
       snap = ctx.getLatestSnapshot();

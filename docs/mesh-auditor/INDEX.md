@@ -83,6 +83,51 @@ The one theoretical risk would be a panic inside the critical section, which poi
 
 ---
 
+## Audit 7: Area of Interest (AoI) Filtering v2
+Audited: 2026-04-14
+
+6 new findings (052-057). 1 high, 3 medium, 1 low. Plus verification of the 3 previous-attempt failure modes.
+
+**Implementation verification**: The v2 AoI implementation correctly avoids all three failure modes from the previous attempt:
+1. **No tiered filtering** -- CORRECT. The filter is binary in/out at 500 units. No variable update rates, no partial updates. The `in_aoi()` function returns a simple bool. No tiered logic exists anywhere in the codebase.
+2. **prepare_client_snapshot is still a regular Bevy system** -- CORRECT. The system signature at `systems.rs:1107` uses standard `Res`, `ResMut`, and `Query` parameters. It is not an exclusive system. It does not take `&mut World`.
+3. **No EntityLookup HashMap clone** -- CORRECT. Player positions are looked up by scanning the already-built `entities` Vec (O(C*E) worst case with C clients). The `EntityLookup` resource is not used by this system.
+
+**One high-severity issue**: #052 -- the pre-loop `force_full` probe compares the full unfiltered entity list against AoI-filtered baselines, causing delta compression to be permanently disabled whenever a client's AoI covers less than 20% of total entities. This defeats the bandwidth savings that AoI is supposed to provide.
+
+**AoI + delta interaction**: The delta compression interaction works correctly in principle (entities entering/exiting AoI produce clean add/remove deltas), but the force_full probe bug (#052) means deltas are never used in practice for AoI clients in a large world.
+
+**Test coverage**: 7 new unit tests cover AoI filtering, boundary behavior, delta interaction (enter/leave/no-flicker), and forced full snapshot filtering. The tests are well-designed and pass. However, they use small entity counts (2-3 entities) where the force_full bug does not trigger because all entities are within or very close to the 80% threshold.
+
+---
+
+## Audit 8: Tiered AoI-Aware Shadow Replication (Design 010)
+Audited: 2026-04-15
+
+10 new findings (058-067). 2 high, 4 medium, 2 low, plus 2 verification-level findings.
+
+**Implementation overview**: Peer replication is now split into hot (20Hz, within 750 units of peer Player shadows) and cold (5Hz, all other entities sent every 4th tick) tiers. Full snapshots are disabled by default (behind `--full-snapshot` flag). The tiered classification logic in `prepare_replication` is correct, well-tested (15+ unit tests), and the distance-check math is sound.
+
+**Two high-severity issues**:
+
+1. **#058 -- Backpressure skips cold ticks with no recovery path**: When UDP backpressure is active, ALL per-peer replication is blocked -- including cold ticks. With full snapshots disabled by default, there is no fallback to keep shadows alive during backpressure. After 15 seconds (SHADOW_STALE_TICKS=300), all shadows from the overloaded server are cleaned up on every peer. This can also create a self-reinforcing deadlock: no shadows means `prepare_replication` returns early, which means no replication, which means no shadows.
+
+2. **#059 -- No-shadows early return prevents replication bootstrapping**: When a peer has zero shadow entities on this server (new peer, post-backpressure recovery, shadow cleanup), `prepare_replication` returns early with empty data. This creates a chicken-and-egg deadlock: Server A cannot replicate to Server B because it has no shadows from B, and Server B cannot replicate to A for the same reason. Currently masked by startup timing but becomes likely with simultaneous server restarts or post-backpressure recovery.
+
+**These two findings interact**: #058 causes shadow loss under backpressure, and #059 prevents recovery after backpressure clears. Together they create a permanent replication blackout that requires server restarts to resolve.
+
+**Stale comment found**: The backpressure comment at `game_loop.rs:417-418` says "rely on the 1/sec full snapshot for shadow recovery" -- but the 1/sec full snapshot no longer exists by default.
+
+**Design doc error found**: #062 -- The design doc claims SHADOW_STALE_TICKS is 100 (5 seconds) but the code has 300 (15 seconds). The safety analysis in the design doc is based on incorrect values.
+
+**Scalability assessment**: The O(E_auth * P_players_per_peer * N_peers) distance check (#060) is negligible at current scale (~0.1ms with 500 entities) but approaches tick budget concerns at 5000+ entities with 5+ players per peer. The cold-tick burst pattern (#066) is more immediately concerning: at 2500+ entities with 3 peers, every cold tick overflows the 256-slot replication channel, triggering the backpressure cascade from #058.
+
+**Metrics correctness**: hot_count and cold_count are internally consistent and tested (#063). The semantics are: hot_count = entities within PEER_AOI_RADIUS, cold_count = entities outside that were included because cold tick. This is correct but may be slightly confusing on dashboards.
+
+**Test coverage**: 15+ unit tests cover all major paths (hot-only ticks, cold ticks, full cycle, per-peer splits, edge cases including tick 0, no shadows, no players, PeerBounds fallback, boundary precision). The tests are thorough. One gap: no test for the backpressure interaction (#058) or the bootstrapping deadlock (#059), because those require the game_loop integration which unit tests do not exercise.
+
+---
+
 ## All Findings by Severity
 
 | # | Severity | Category | Title | Status | Effort |
@@ -101,6 +146,9 @@ The one theoretical risk would be a panic inside the critical section, which poi
 | [031](031-input-loss-during-player-transfer.md) | high | data-loss | Player inputs accepted but lost during two-phase transfer ACK window | **resolved** | small |
 | [033](033-transfer-ack-not-retransmitted.md) | **high** | data-loss | Transfer ACK is single UDP packet, loss causes permanent entity duplication | open (elevated from medium) | small |
 | [040](040-remove-entity-during-transfer-despawns-outbound.md) | **high** | data-loss | RemoveEntity during transfer despawns outbound entity, orphaning it on target | open | small |
+| [052](052-force-full-probe-uses-unfiltered-entities.md) | **high** | bottleneck | force_full probe compares unfiltered entities against AoI-filtered baselines, permanently disabling delta compression | open | small |
+| [058](058-backpressure-skips-cold-ticks-no-recovery.md) | **high** | data-loss | Backpressure blocks all per-peer replication including cold ticks, no recovery path without full snapshots | **new** | small |
+| [059](059-no-shadows-skips-replication-bootstrapping-failure.md) | **high** | data-loss | No-shadows early return prevents replication bootstrapping, creates permanent deadlock with #058 | **new** | small |
 | [005](005-client-snapshot-double-iteration.md) | medium | bottleneck | Client snapshot system iterates queries three times | open | small |
 | [006](006-replication-clones-entire-entity-vec.md) | medium | bottleneck | Replication clones entire entity Vec every tick | open | small |
 | [008](008-outbound-vecs-never-shrink.md) | medium | scalability | Outbound Vec buffers grow but never shrink | open | small |
@@ -125,6 +173,14 @@ The one theoretical risk would be a panic inside the critical section, which poi
 | [041](041-heartbeat-counts-frozen-entities.md) | medium | operational | Heartbeat entity count includes frozen TransferOutbound entities | **resolved** | small |
 | [042](042-transfer-outbound-entity-invisible-to-clients.md) | medium | protocol | TransferOutbound entities invisible to source server's clients for 1-3 ticks | open | small |
 | [049](049-compute-delta-before-fallback-wastes-cpu.md) | medium | bottleneck | compute_delta runs before fallback check, wasted when >80% changed | **resolved** | small |
+| [053](053-backward-compat-full-frame-wasted-every-tick.md) | medium | bottleneck | Unfiltered full snapshot encoded every tick for unused ClientSnapshot resource | open | small |
+| [054](054-entities-clone-for-no-aoi-clients.md) | medium | bottleneck | Full entity Vec cloned every tick for clients without AoI position | open | small |
+| [055](055-coordinator-read-timeout-120s-too-long.md) | medium | operational | 120s coordinator read timeout delays crash detection and reconnection | open | small |
+| [056](056-npc-scatter-defeats-aoi-benefit.md) | medium | scalability | NPC spawn range scales with WORLD_EXTENT, scattering entities beyond AoI | open | small |
+| [060](060-cold-tier-quadratic-per-entity-per-player.md) | **medium** | scalability | O(E_auth * P_players * N_peers) distance checks per tick, concerning at 5000+ entities | **new** | small |
+| [061](061-cold-tick-entities-clone-per-peer.md) | **medium** | bottleneck | Cold tick clones full entity Vec per peer, ~288KB at 2000 entities with 3 peers | **new** | small |
+| [062](062-design-doc-shadow-stale-ticks-mismatch.md) | **medium** | operational | Design doc claims SHADOW_STALE_TICKS=100 but code uses 300, safety analysis based on wrong values | **new** | small |
+| [066](066-cold-tick-burst-amplifies-udp-chunking.md) | **medium** | bottleneck | Cold tick sends 4-10x more UDP chunks than hot ticks, overflows replication channel at 2500+ entities | **new** | medium |
 | [014](014-tick-counter-u64-not-synchronized.md) | low | protocol | Tick counter u64 not synchronized across servers | open | small |
 | [017](017-behavioral-divergence-rebalance-ignores-entity-ids.md) | low | protocol | Rebalance directive entity_ids field ignored | open | small |
 | [025](025-ack-parsing-no-validation.md) | low | protocol | Binary ACK parsing accepts any tick value without validation | **resolved** | small |
@@ -136,8 +192,13 @@ The one theoretical risk would be a panic inside the critical section, which poi
 | [046](046-stale-ack-race-with-concurrent-ack.md) | low | race-condition | Stale-ACK check has benign race with concurrent client ACK writes | verification | n/a |
 | [047](047-delta-fallback-baseline-correctly-rebuilt.md) | low | protocol | Delta fallback full snapshot correctly rebuilds baseline | verification | n/a |
 | [048](048-ack-clamp-rejects-legitimate-reordered-acks.md) | low | protocol | ACK validation cannot reject legitimate ACKs; tick wraparound not a concern | verification | n/a |
-| [050](050-sender-drain-cancelled-on-game-loop-exit.md) | **low** | data-loss | UDP sender task drain cancelled by runtime shutdown on game loop exit | **new** | small |
-| [051](051-inbound-swap-holds-mutex-during-ecs-write.md) | **low** | bottleneck | Inbound swap holds shared mutex during ECS resource write (unnecessary) | **new** | small |
+| [050](050-sender-drain-cancelled-on-game-loop-exit.md) | low | data-loss | UDP sender task drain cancelled by runtime shutdown on game loop exit | open | small |
+| [051](051-inbound-swap-holds-mutex-during-ecs-write.md) | low | bottleneck | Inbound swap holds shared mutex during ECS resource write (unnecessary) | open | small |
+| [057](057-per-client-aoi-filter-clone-cost.md) | low | bottleneck | AoI filter clones EntityState for every in-range entity per client per tick | accepted tradeoff | medium |
+| [063](063-metrics-hot-cold-double-counted-on-cold-ticks.md) | **low** | operational | hot_count metric semantics may confuse dashboard readers on cold ticks | **new** | small |
+| [064](064-fallback-peerbounds-no-cold-tier.md) | **medium** | scalability | PeerBounds fallback sends at 20Hz with no cold-tier distinction | **new** | small |
+| [065](065-shadow-positions-one-tick-stale-for-hot-classification.md) | **low** | race-condition | Shadow player positions 1 tick stale for hot classification, absorbed by 250-unit margin | **new** (accepted) | small |
+| [067](067-transfer-outbound-entities-replicated-at-full-rate.md) | **low** | bottleneck | Frozen TransferOutbound entities replicated at full rate despite unchanged state | **new** | small |
 
 ## Re-Audit Fix Verification Detail
 
@@ -210,6 +271,19 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 5. **#043** (low) -- Use per-server latest ticks in global sweep instead of global max (small effort)
 6. **#044** (low) -- Replace unwrap with checked access in retry path (small effort)
 
+## Recommended Fix Order (Tiered Replication)
+
+1. **#058** (high, small effort) -- Cold ticks bypass backpressure gate. One-line change: `(!repl_backpressure || is_cold_tick)`. **Must fix to prevent shadow cascade under load.**
+2. **#059** (high, small effort) -- Bootstrap replication to peers with no shadows. Send all entities to shadowless peers on cold ticks. Prevents permanent replication deadlock.
+3. **#066** (medium, medium effort) -- Spread cold entities across phases to prevent burst overflow. Reduces peak channel utilization by 4x.
+4. **#064** (medium, small effort) -- Apply cold-tier rate to PeerBounds fallback path (skip non-cold ticks for peers without players).
+5. **#062** (medium, small effort) -- Fix design doc SHADOW_STALE_TICKS value and delta.rs comment.
+6. **#061** (medium, small effort) -- Skip filter on cold ticks (all entities pass), avoid per-peer clone when possible.
+7. **#060** (medium, small effort) -- Skip distance checks on cold ticks where all entities are included anyway.
+8. **#067** (low, small effort) -- Consider excluding TransferOutbound from replication (optional, low impact).
+9. **#065** (low, n/a) -- Document margin rationale in code comment (accepted design tradeoff).
+10. **#063** (low, small effort) -- Add total_sent_count metric or document hot/cold semantics.
+
 ## Two-Phase Transfer Findings Detail
 
 ### Resolved (4)
@@ -270,6 +344,29 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 ### New (2)
 - **#050** (low) Sender task drain cancelled on runtime shutdown -- edge case, no impact on coordinator-initiated drain
 - **#051** (low) Inbound swap holds mutex during ECS write -- sub-microsecond waste, cleanup only
+
+## AoI Filtering Findings Detail
+
+### High (1)
+- **#052** force_full probe uses unfiltered entities against AoI-filtered baselines -- delta compression permanently disabled for AoI clients
+
+### Medium (4)
+- **#053** Backward-compat full snapshot encoded every tick for unused resource -- wasted CPU/memory
+- **#054** Full entity Vec cloned for clients without player position -- triggered during authority transfer
+- **#055** 120s coordinator read timeout -- delays crash detection by 2 minutes
+- **#056** NPC spawn range scales with WORLD_EXTENT -- entities scatter beyond AoI, world appears empty
+
+### Low (1)
+- **#057** Per-client AoI filter clones EntityState per entity -- accepted tradeoff, quantified for future reference
+
+## Recommended Fix Order (AoI Filtering)
+
+1. **#052** (high, small effort) -- Move force_full probe inside per-client loop, compare against filtered `client_entities`. **Must fix before AoI provides any bandwidth benefit.**
+2. **#053** (medium, small effort) -- Remove backward-compat `ClientSnapshot.frame` encoding, update tests to use per-client channels
+3. **#056** (medium, small effort) -- Adjust NPC spawn range to cluster near origin or use `AOI_RADIUS` instead of `WORLD_EXTENT`
+4. **#054** (medium, small effort) -- Cache last known AoI center on `ClientHandle`, use as fallback when player position unavailable
+5. **#055** (medium, small effort) -- Reduce coordinator read timeout to 30-60s, optionally add coordinator-side keepalive
+6. **#057** (low, future) -- Index-based AoI filtering to avoid per-entity clones (only if profiling shows clone is significant)
 
 ## Recommended Fix Order (Delta Compression)
 

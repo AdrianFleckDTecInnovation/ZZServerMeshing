@@ -26,32 +26,52 @@ pub async fn run_udp_receiver(
 
     /// How often (in loop iterations) to run the global reassembly cleanup sweep.
     const GLOBAL_SWEEP_INTERVAL: u64 = 100;
-    /// Reassembly entries older than this many ticks behind the global max are evicted.
+    /// Reassembly entries older than this many ticks behind the per-server latest are evicted.
     const GLOBAL_STALE_TICKS: u64 = 40;
+    /// Maximum number of reassembly entries before forced eviction.
+    /// Prevents unbounded memory growth from crashed peers that never complete chunks.
+    const MAX_REASSEMBLY_ENTRIES: usize = 1000;
 
     let mut loop_counter: u64 = 0;
 
     loop {
         loop_counter += 1;
 
-        // Periodic global sweep: evict stale reassembly entries from ALL servers,
-        // including crashed peers whose ticks never advance.
+        // Periodic sweep: evict stale reassembly entries using per-server latest tick.
+        // Uses per-server tick instead of global max to avoid evicting entries from
+        // legitimately slow peers (e.g., newly joined server at tick 0).
         if loop_counter % GLOBAL_SWEEP_INTERVAL == 0 {
-            if let Some(&global_max) = latest_tick.values().max() {
-                let before = reassembly.len();
-                reassembly.retain(|&(_sid, t), _| {
-                    global_max.saturating_sub(t) <= GLOBAL_STALE_TICKS
-                });
-                let evicted = before - reassembly.len();
-                if evicted > 0 {
-                    tracing::debug!(
-                        evicted,
-                        remaining = reassembly.len(),
-                        global_max_tick = global_max,
-                        "Global reassembly sweep evicted stale entries"
-                    );
+            let before = reassembly.len();
+            reassembly.retain(|&(sid, t), _| {
+                if let Some(&server_latest) = latest_tick.get(&sid) {
+                    server_latest.saturating_sub(t) <= GLOBAL_STALE_TICKS
+                } else {
+                    true // no tick info for this server yet, keep it
                 }
+            });
+            let evicted = before - reassembly.len();
+            if evicted > 0 {
+                tracing::debug!(
+                    evicted,
+                    remaining = reassembly.len(),
+                    "Per-server reassembly sweep evicted stale entries"
+                );
             }
+        }
+
+        // Hard cap: if reassembly map exceeds limit, evict oldest entries first.
+        if reassembly.len() > MAX_REASSEMBLY_ENTRIES {
+            let mut entries: Vec<(u16, u64)> = reassembly.keys().copied().collect();
+            entries.sort_by_key(|&(_sid, tick)| tick);
+            let to_evict = reassembly.len() - MAX_REASSEMBLY_ENTRIES;
+            for key in entries.into_iter().take(to_evict) {
+                reassembly.remove(&key);
+            }
+            tracing::warn!(
+                evicted = to_evict,
+                remaining = reassembly.len(),
+                "Reassembly map exceeded {MAX_REASSEMBLY_ENTRIES} entries, evicted oldest"
+            );
         }
         let (len, addr) = match udp_socket.recv_from(&mut buf).await {
             Ok(v) => v,
@@ -61,7 +81,22 @@ pub async fn run_udp_receiver(
             }
         };
 
-        let msg: PeerMessage = match bincode::deserialize(&buf[..len]) {
+        // Check protocol version prefix (first 2 bytes)
+        if len < 2 {
+            tracing::warn!("UDP packet too short from {addr}: {len} bytes");
+            continue;
+        }
+        let wire_version = u16::from_le_bytes([buf[0], buf[1]]);
+        if wire_version != shared::PROTOCOL_VERSION {
+            tracing::warn!(
+                wire_version,
+                expected = shared::PROTOCOL_VERSION,
+                "UDP protocol version mismatch from {addr}, dropping packet"
+            );
+            continue;
+        }
+
+        let msg: PeerMessage = match bincode::deserialize(&buf[2..len]) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Failed to deserialize UDP from {addr}: {e}");

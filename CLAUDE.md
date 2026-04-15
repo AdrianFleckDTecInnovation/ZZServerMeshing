@@ -307,4 +307,4 @@ Ship the current branch to main — commit, PR, merge, new branch.
 - TypeScript: strict mode, ES2022 target
 - Entity IDs are UUIDs, Server IDs are u16 starting at 1
 - Server IDs are u16, starting at 1 (0 was historically reserved for the gateway, now removed)
-- World bounds: -500 to 500 on X and Z axes
+- World bounds: -5000 to 5000 on X and Z axes

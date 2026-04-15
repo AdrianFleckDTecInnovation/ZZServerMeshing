@@ -18,6 +18,8 @@ pub enum ServerMessage {
     /// Sent to a client on connect to assign their player entity.
     PlayerAssigned {
         player_id: String,
+        #[serde(default)]
+        protocol_version: u16,
     },
     /// Instruct the client to reconnect to a different sim-server.
     Reconnect {
@@ -113,10 +115,17 @@ pub enum CoordClientMsg {
         /// Whether this server's WebSocket listener uses TLS (wss://).
         #[serde(default)]
         tls: bool,
+        /// Wire protocol version. Coordinator logs mismatches.
+        #[serde(default)]
+        protocol_version: u16,
     },
     Heartbeat {
         server_id: u16,
         entity_count: u32,
+        /// Weighted load: players count 3x, NPCs count 1x.
+        /// Used by the coordinator for smarter rebalance decisions.
+        #[serde(default)]
+        weighted_load: u32,
     },
     /// Server wants to leave gracefully — drain all entities first.
     Draining {
@@ -128,6 +137,13 @@ pub enum CoordClientMsg {
         account_id: String,
         from_server: u16,
         to_server: u16,
+    },
+    /// Report the outcome of an authority transfer back to the coordinator.
+    /// Enables closed-loop rebalancing (coordinator knows what happened).
+    TransferResult {
+        entity_id: String,
+        target_server: u16,
+        success: bool,
     },
 }
 
@@ -161,6 +177,9 @@ pub enum CoordServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Periodic keepalive from coordinator. Prevents sim-server read timeout
+    /// on stable clusters where no topology changes occur.
+    Keepalive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,12 +352,13 @@ mod tests {
             ws_port: 7878,
             host: Some("10.0.0.1".to_string()),
             tls: false,
+            protocol_version: 1,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"Register\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::Register { server_id, udp_port, ws_port, host, tls } => {
+            CoordClientMsg::Register { server_id, udp_port, ws_port, host, tls, .. } => {
                 assert_eq!(server_id, 1);
                 assert_eq!(udp_port, 9101);
                 assert_eq!(ws_port, 7878);
@@ -358,6 +378,7 @@ mod tests {
             ws_port: 7879,
             host: None,
             tls: false,
+            protocol_version: 1,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("host"));
@@ -388,6 +409,7 @@ mod tests {
             ws_port: 7878,
             host: None,
             tls: true,
+            protocol_version: 1,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"tls\":true"));
@@ -874,14 +896,16 @@ mod tests {
         let msg = CoordClientMsg::Heartbeat {
             server_id: 2,
             entity_count: 150,
+            weighted_load: 180,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"Heartbeat\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::Heartbeat { server_id, entity_count } => {
+            CoordClientMsg::Heartbeat { server_id, entity_count, weighted_load } => {
                 assert_eq!(server_id, 2);
                 assert_eq!(entity_count, 150);
+                assert_eq!(weighted_load, 180);
             }
             _ => panic!("wrong variant"),
         }
@@ -950,12 +974,13 @@ mod tests {
     fn server_message_player_assigned_roundtrip() {
         let msg = ServerMessage::PlayerAssigned {
             player_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            protocol_version: 1,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"PlayerAssigned\""));
         let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ServerMessage::PlayerAssigned { player_id } => {
+            ServerMessage::PlayerAssigned { player_id, .. } => {
                 assert_eq!(player_id, "550e8400-e29b-41d4-a716-446655440000");
             }
             _ => panic!("wrong variant"),

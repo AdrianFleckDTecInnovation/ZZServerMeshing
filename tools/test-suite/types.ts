@@ -79,6 +79,10 @@ export interface TestContext {
   sleep(ms: number): Promise<void>;
   /** Spawn entities via the server */
   spawn(count: number, options?: SpawnOptions): Promise<void>;
+  /** Spawn `count` entities clustered within `radius` of `center`. */
+  spawnCluster(count: number, center: [number, number, number], radius: number, options?: Omit<SpawnOptions, 'position'>): Promise<void>;
+  /** Spawn entities at exact positions. */
+  spawnAtPositions(positions: [number, number, number][], options?: Omit<SpawnOptions, 'position'>): Promise<void>;
   /** Get the latest snapshot */
   getLatestSnapshot(): WorldSnapshot | null;
   /** Log a message with scenario prefix */

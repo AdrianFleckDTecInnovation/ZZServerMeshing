@@ -53,6 +53,7 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
+        world.init_resource::<ReplicationConfig>();
         world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
@@ -61,6 +62,8 @@ mod tests {
         world.init_resource::<ShutdownRequested>();
         world.init_resource::<TimingAccumulator>();
         world.init_resource::<ClientRegistry>();
+        world.init_resource::<OutboundCoordMessages>();
+        world.init_resource::<EntityOwnership>();
         world
     }
 
@@ -89,8 +92,8 @@ mod tests {
 
         // Replication output should have the entity
         let outbound = world.resource::<OutboundReplication>();
-        assert!(outbound.snapshot.is_some());
-        let entities = outbound.snapshot.as_ref().unwrap();
+        assert!(outbound.full_snapshot.is_some());
+        let entities = outbound.full_snapshot.as_ref().unwrap();
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].id, eid);
 
@@ -112,7 +115,8 @@ mod tests {
         for tick in 1..=10 {
             world.resource_mut::<TickCounter>().0 = tick;
             // Clear outputs from previous tick
-            world.resource_mut::<OutboundReplication>().snapshot = None;
+            world.resource_mut::<OutboundReplication>().full_snapshot = None;
+            world.resource_mut::<OutboundReplication>().per_peer.clear();
             world.resource_mut::<ClientSnapshot>().frame = None;
             world.resource_mut::<OutboundTransfers>().messages.clear();
             world.resource_mut::<OutboundForwards>().messages.clear();
@@ -153,12 +157,12 @@ mod tests {
     fn client_input_in_schedule() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(
+        world.resource_mut::<InboundQueue>().client_inputs.push((0,
             shared::protocol::ClientMessage::SpawnEntity {
                 position: [10.0, 0.0, 10.0],
                 entity_type: "npc".to_string(),
             },
-        );
+        ));
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -185,8 +189,8 @@ mod tests {
 
         // Replication: only authoritative
         let repl = world.resource::<OutboundReplication>();
-        assert!(repl.snapshot.is_some());
-        assert_eq!(repl.snapshot.as_ref().unwrap().len(), 1);
+        assert!(repl.full_snapshot.is_some());
+        assert_eq!(repl.full_snapshot.as_ref().unwrap().len(), 1);
 
         // Client snapshot: both auth + shadow
         let snap = world.resource::<ClientSnapshot>();
@@ -203,19 +207,19 @@ mod tests {
         let uuid = uuid::Uuid::new_v4();
 
         // Queue both spawn and move for same entity on same tick
-        world.resource_mut::<InboundQueue>().client_inputs.push(
+        world.resource_mut::<InboundQueue>().client_inputs.push((0,
             shared::protocol::ClientMessage::SpawnPlayer {
                 player_id: uuid.to_string(),
                 position: [0.0, 0.0, 0.0],
             },
-        );
-        world.resource_mut::<InboundQueue>().client_inputs.push(
+        ));
+        world.resource_mut::<InboundQueue>().client_inputs.push((0,
             shared::protocol::ClientMessage::MoveInput {
                 entity_id: uuid.to_string(),
                 direction: [1.0, 0.0, 0.0],
                 seq: 1,
             },
-        );
+        ));
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -261,7 +265,7 @@ mod tests {
         // Replication output includes TransferOutbound entities so peers maintain
         // up-to-date shadows for crash recovery.
         let repl = world.resource::<OutboundReplication>();
-        if let Some(entities) = &repl.snapshot {
+        if let Some(entities) = &repl.full_snapshot {
             assert_eq!(entities.len(), 10,
                 "all entities including TransferOutbound should be in replication for crash recovery");
         }
@@ -540,7 +544,7 @@ mod tests {
         schedule.run(&mut world);
 
         // Replication should be None (no entities)
-        assert!(world.resource::<OutboundReplication>().snapshot.is_none());
+        assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
         // Client snapshot should still produce a valid frame (0 entities)
         let frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
         assert_eq!(frame[0], 0x01);

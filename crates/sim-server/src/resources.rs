@@ -14,6 +14,9 @@ use crate::delta::CompactEntityState;
 #[derive(Debug)]
 pub enum ClientFrame {
     /// Full snapshot shared across all clients via Arc (zero-copy).
+    /// Retained for backwards compatibility; currently AoI filtering
+    /// produces per-client Owned frames instead.
+    #[allow(dead_code)]
     Shared(Arc<Vec<u8>>),
     /// Per-client delta frame (unique content).
     Owned(Vec<u8>),
@@ -63,7 +66,9 @@ pub struct InboundQueue {
     pub peer_updates: Vec<PeerUpdate>,
     pub authority_transfers: Vec<InboundTransfer>,
     pub forwarded_inputs: Vec<ForwardedInput>,
-    pub client_inputs: Vec<shared::protocol::ClientMessage>,
+    /// Client inputs paired with the client_id that sent them.
+    /// client_id of 0 means server-initiated (e.g., auto-spawn on connect).
+    pub client_inputs: Vec<(u64, shared::protocol::ClientMessage)>,
     pub forwarded_removes: Vec<ForwardedRemove>,
     /// Client registrations from handle_client tasks.
     pub register_clients: Vec<ClientRegistrationEvent>,
@@ -94,12 +99,57 @@ pub struct CoordEventQueue {
     pub recover_events: Vec<(u16, Vec<u16>)>,
 }
 
+/// Full replication interval in ticks. Every FULL_REPL_INTERVAL ticks,
+/// send ALL authoritative entities to ALL peers (unfiltered broadcast).
+/// At 20Hz, 600 ticks = 30 seconds. With the cold tier at 5Hz refreshing
+/// all entities every 200ms, this is a rarely-needed fallback.
+/// Configurable via --full-repl-interval. Only used when --full-snapshot is enabled.
+pub const FULL_REPL_INTERVAL: u64 = 600;
+
 /// Outbound replication data, written by prepare_replication system,
 /// consumed by the async UDP sender task.
+///
+/// On full-replication ticks (tick % full_interval == 0), `full_snapshot` is
+/// populated and `per_peer` is empty -- all entities go to all peers.
+/// On normal ticks, `per_peer` contains spatially filtered entity lists
+/// per peer, and `full_snapshot` is None.
 #[derive(Resource, Default)]
 pub struct OutboundReplication {
-    pub snapshot: Option<Vec<EntityState>>,
+    /// Per-peer filtered entity lists. Key is peer server_id (u16).
+    /// On hot-only ticks, contains only hot-tier entities.
+    /// On cold ticks (tick % 4 == 0), contains hot + cold (all entities).
+    pub per_peer: HashMap<u16, Vec<EntityState>>,
+    /// Full entity list for broadcast. Set on full-replication ticks (if enabled)
+    /// or when filtering provides no benefit (e.g., no shadows to compute bounds from).
+    pub full_snapshot: Option<Vec<EntityState>>,
     pub tick: u64,
+    /// Count of hot-tier entities sent this tick (sum across all peers).
+    pub hot_count: usize,
+    /// Count of cold-tier entities sent this tick (sum across all peers, 0 on non-cold ticks).
+    pub cold_count: usize,
+}
+
+/// Runtime configuration for replication filtering.
+/// Inserted as an ECS resource; read by prepare_replication.
+#[derive(Resource)]
+pub struct ReplicationConfig {
+    /// How often to send a full (unfiltered) replication to all peers.
+    /// Default: FULL_REPL_INTERVAL (600 ticks = 30s at 20Hz).
+    /// Only used when `full_snapshot_enabled` is true.
+    /// Set to 1 to disable filtering entirely (every tick is full).
+    pub full_interval: u64,
+    /// Whether periodic full snapshots are enabled. Default: false.
+    /// The cold tier at 5Hz makes full snapshots redundant for crash recovery.
+    pub full_snapshot_enabled: bool,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            full_interval: FULL_REPL_INTERVAL,
+            full_snapshot_enabled: false,
+        }
+    }
 }
 
 /// Outbound client snapshot, written by prepare_client_snapshot system,
@@ -139,6 +189,21 @@ pub struct DrainState {
 /// Shutdown requested (set when drain completes).
 #[derive(Resource, Default)]
 pub struct ShutdownRequested(pub bool);
+
+/// Outbound messages to send to the coordinator (e.g., TransferResult).
+/// Pushed by ECS systems, drained by the coordinator_client async task.
+#[derive(Resource, Default)]
+pub struct OutboundCoordMessages {
+    pub messages: Vec<shared::protocol::CoordClientMsg>,
+}
+
+/// Tracks which client spawned which entity. Used to validate RemoveEntity
+/// so one client can't delete another's entities. Server-to-server removes
+/// (ForwardedRemove) bypass this check.
+#[derive(Resource, Default)]
+pub struct EntityOwnership {
+    pub owners: HashMap<EntityId, u64>,
+}
 
 /// Per-tick timing accumulator for metrics (reserved for future per-system timing).
 #[derive(Resource, Default)]
@@ -263,6 +328,7 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
+        world.init_resource::<ReplicationConfig>();
         world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
@@ -277,7 +343,10 @@ mod tests {
         assert!(world.resource::<InboundQueue>().peer_updates.is_empty());
         assert!(world.resource::<InboundQueue>().transfer_acks.is_empty());
         assert!(world.resource::<CoordEventQueue>().peer_list_updates.is_empty());
-        assert!(world.resource::<OutboundReplication>().snapshot.is_none());
+        assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
+        assert!(world.resource::<OutboundReplication>().per_peer.is_empty());
+        assert_eq!(world.resource::<OutboundReplication>().hot_count, 0);
+        assert_eq!(world.resource::<OutboundReplication>().cold_count, 0);
         assert!(world.resource::<ClientSnapshot>().frame.is_none());
         assert!(world.resource::<PendingTransfers>().transfers.is_none());
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
@@ -336,5 +405,27 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].seq, 5);
         assert!(world.resource::<InboundQueue>().forwarded_inputs.is_empty());
+    }
+
+    #[test]
+    fn replication_config_default_full_interval_600() {
+        let config = ReplicationConfig::default();
+        assert_eq!(config.full_interval, 600);
+    }
+
+    #[test]
+    fn replication_config_default_full_snapshot_disabled() {
+        let config = ReplicationConfig::default();
+        assert!(!config.full_snapshot_enabled);
+    }
+
+    #[test]
+    fn replication_config_full_snapshot_enabled() {
+        let config = ReplicationConfig {
+            full_interval: 100,
+            full_snapshot_enabled: true,
+        };
+        assert!(config.full_snapshot_enabled);
+        assert_eq!(config.full_interval, 100);
     }
 }

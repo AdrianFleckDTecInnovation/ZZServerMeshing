@@ -51,6 +51,7 @@ enum RegistryEvent {
     Heartbeat {
         server_id: u16,
         entity_count: u32,
+        weighted_load: u32,
     },
     Disconnected {
         server_id: u16,
@@ -60,6 +61,11 @@ enum RegistryEvent {
     },
     Draining {
         server_id: u16,
+    },
+    TransferResult {
+        server_id: u16,
+        target_server: u16,
+        success: bool,
     },
 }
 
@@ -158,7 +164,16 @@ async fn handle_server_connection(
                     ws_port,
                     host,
                     tls,
+                    protocol_version,
                 }) => {
+                    if protocol_version != shared::PROTOCOL_VERSION && protocol_version != 0 {
+                        tracing::warn!(
+                            server_id = sid,
+                            wire = protocol_version,
+                            expected = shared::PROTOCOL_VERSION,
+                            "Protocol version mismatch from S{sid}"
+                        );
+                    }
                     // Use advertised host if provided, otherwise use the peer's source IP
                     let resolved_host = host.unwrap_or_else(|| addr.ip().to_string());
                     server_id = Some(sid);
@@ -174,14 +189,29 @@ async fn handle_server_connection(
                 Ok(CoordClientMsg::Heartbeat {
                     server_id: sid,
                     entity_count,
+                    weighted_load,
                 }) => {
                     let _ = event_tx.send(RegistryEvent::Heartbeat {
                         server_id: sid,
                         entity_count,
+                        weighted_load,
                     });
                 }
                 Ok(CoordClientMsg::Draining { server_id: sid }) => {
                     let _ = event_tx.send(RegistryEvent::Draining { server_id: sid });
+                }
+                Ok(CoordClientMsg::TransferResult {
+                    entity_id: _,
+                    target_server,
+                    success,
+                }) => {
+                    if let Some(sid) = server_id {
+                        let _ = event_tx.send(RegistryEvent::TransferResult {
+                            server_id: sid,
+                            target_server,
+                            success,
+                        });
+                    }
                 }
                 Ok(CoordClientMsg::PlayerTransfer {
                     account_id,
@@ -237,12 +267,15 @@ async fn run_registry(
                         );
                         reg.broadcast_peer_list();
                     }
-                    RegistryEvent::Heartbeat { server_id, entity_count } => {
-                        reg.heartbeat(server_id, entity_count);
+                    RegistryEvent::Heartbeat { server_id, entity_count, weighted_load } => {
+                        reg.heartbeat(server_id, entity_count, weighted_load);
                     }
                     RegistryEvent::Draining { server_id } => {
                         tracing::info!("S{server_id} requesting graceful drain");
                         reg.drain_server(server_id);
+                    }
+                    RegistryEvent::TransferResult { server_id, target_server, success } => {
+                        reg.record_transfer_result(server_id, target_server, success);
                     }
                     RegistryEvent::Disconnected { server_id, reply_tx } => {
                         // Only unregister if this disconnect is from the current connection,
@@ -264,6 +297,8 @@ async fn run_registry(
             }
             _ = rebalance_interval.tick() => {
                 let mut reg = registry.write().await;
+                // Send keepalive to all servers (prevents read timeout on stable clusters)
+                reg.broadcast_keepalive();
                 // Check for dead servers
                 let dead = reg.detect_dead_servers();
                 for sid in dead {
@@ -609,7 +644,9 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
-                         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Cache-Control: no-cache, no-store, must-revalidate\r\n\
+                         Content-Length: {}\r\n\
                          Connection: close\r\n\r\n",
                         body.len()
                     );
@@ -621,6 +658,7 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     if let Ok(body) = tokio::fs::read(&index).await {
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                             Cache-Control: no-cache, no-store, must-revalidate\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );

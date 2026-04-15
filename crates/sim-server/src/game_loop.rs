@@ -19,6 +19,16 @@ use tokio::sync::mpsc::error::TrySendError;
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
 
+/// Serialize a PeerMessage with protocol version prefix (2 bytes LE).
+/// All UDP datagrams use this format so the receiver can reject version mismatches.
+pub fn serialize_versioned(msg: &PeerMessage) -> Option<Vec<u8>> {
+    let payload = bincode::serialize(msg).ok()?;
+    let mut buf = Vec::with_capacity(2 + payload.len());
+    buf.extend_from_slice(&shared::PROTOCOL_VERSION.to_le_bytes());
+    buf.extend_from_slice(&payload);
+    Some(buf)
+}
+
 /// Capacity for the UDP replication channel. Bulk entity-state updates are
 /// best-effort: drops lose one tick of shadow freshness but are harmless.
 /// 256 slots gives ~12 ticks of headroom at 20 Hz with 2 peers.
@@ -109,6 +119,11 @@ pub struct SharedCoordEvents {
     pub queue: std::sync::Mutex<CoordEventQueue>,
 }
 
+/// Shared outbound buffer for ECS → coordinator messages (e.g., TransferResult).
+pub struct SharedCoordOutbound {
+    pub queue: std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>,
+}
+
 /// Run the new ECS-based game loop.
 pub async fn run_game_loop_ecs(
     server_id: ServerId,
@@ -119,6 +134,10 @@ pub async fn run_game_loop_ecs(
     udp_ctrl_tx: tokio::sync::mpsc::Sender<UdpOutbound>,
     metrics: Arc<std::sync::Mutex<MetricsCollector>>,
     entity_count_atomic: Arc<AtomicU32>,
+    weighted_load_atomic: Arc<AtomicU32>,
+    full_repl_interval: u64,
+    full_snapshot_enabled: bool,
+    coord_outbound: Arc<SharedCoordOutbound>,
 ) {
     // -- Create ECS World --
     let mut world = bevy_ecs::world::World::default();
@@ -131,6 +150,10 @@ pub async fn run_game_loop_ecs(
     world.init_resource::<InboundQueue>();
     world.init_resource::<CoordEventQueue>();
     world.init_resource::<OutboundReplication>();
+    world.insert_resource(ReplicationConfig {
+        full_interval: full_repl_interval,
+        full_snapshot_enabled,
+    });
     world.init_resource::<ClientSnapshot>();
     world.init_resource::<PendingTransfers>();
     world.init_resource::<OutboundTransfers>();
@@ -139,15 +162,20 @@ pub async fn run_game_loop_ecs(
     world.init_resource::<ShutdownRequested>();
     world.init_resource::<TimingAccumulator>();
     world.init_resource::<ClientRegistry>();
+    world.init_resource::<OutboundCoordMessages>();
+    world.init_resource::<EntityOwnership>();
 
-    // Spawn initial NPCs
+    // Spawn initial NPCs. Use a capped range (±800) so NPCs cluster near the
+    // origin where players spawn. With AoI filtering (500 unit radius), spreading
+    // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
     {
         let mut rng = rand::thread_rng();
+        let spawn_range = 400.0_f32;
         for _ in 0..initial_npcs {
             let pos = Vec3::new(
-                rng.gen_range(-WORLD_EXTENT * 0.8..WORLD_EXTENT * 0.8),
+                rng.gen_range(-spawn_range..spawn_range),
                 0.0,
-                rng.gen_range(-WORLD_EXTENT * 0.8..WORLD_EXTENT * 0.8),
+                rng.gen_range(-spawn_range..spawn_range),
             );
             let state = EntityState::new_npc(pos, server_id);
             spawn_from_entity_state_direct(&mut world, &state, true, None);
@@ -170,9 +198,21 @@ pub async fn run_game_loop_ecs(
     let mut udp_repl_closed = false;
     let mut udp_ctrl_closed = false;
 
+    // UDP backpressure: when the replication channel is saturated, skip non-full
+    // replication ticks to cut outbound bandwidth. This breaks the feedback loop
+    // where dropped packets → shadow loss → full replication → more drops.
+    let mut repl_backpressure = false;
+    let mut repl_drops_this_tick: u64 = 0;
+
     loop {
         interval.tick().await;
         let tick_start = Instant::now();
+        // Per-tick tracing span with server_id and tick for structured log correlation.
+        // Scope is limited to the synchronous ECS phases (before any await points)
+        // because entered spans are not Send across await boundaries.
+        let current_tick = world.resource::<TickCounter>().0;
+        let tick_span = tracing::info_span!("tick", server = server_id.0, tick = current_tick);
+        let _tick_guard = tick_span.enter();
 
         // -- Phase 1: Swap inbound data from async buffers into ECS resources --
         let t0 = Instant::now();
@@ -222,6 +262,9 @@ pub async fn run_game_loop_ecs(
         schedule.run(&mut world);
         let sim_dur = t1.elapsed();
 
+        // Drop the tracing span guard before yielding (entered spans are not Send)
+        drop(_tick_guard);
+
         // Yield to the tokio scheduler after the ECS schedule run.
         // The game loop uses std::sync::Mutex which blocks the runtime thread.
         // Without yield points, other tokio tasks (heartbeat sender, UDP
@@ -230,10 +273,20 @@ pub async fn run_game_loop_ecs(
         tokio::task::yield_now().await;
 
         // -- Phase 3: Extract outbound data --
-        let repl_data = world.resource_mut::<OutboundReplication>().snapshot.take();
+        let repl_full = world.resource_mut::<OutboundReplication>().full_snapshot.take();
+        let repl_per_peer = std::mem::take(&mut world.resource_mut::<OutboundReplication>().per_peer);
         let repl_tick = world.resource::<OutboundReplication>().tick;
+        let repl_hot_count = world.resource::<OutboundReplication>().hot_count;
+        let repl_cold_count = world.resource::<OutboundReplication>().cold_count;
         let transfers = std::mem::take(&mut world.resource_mut::<OutboundTransfers>().messages);
         let forwards = std::mem::take(&mut world.resource_mut::<OutboundForwards>().messages);
+        let coord_msgs = std::mem::take(&mut world.resource_mut::<OutboundCoordMessages>().messages);
+
+        // Push coordinator-bound messages to the shared outbound queue
+        if !coord_msgs.is_empty() {
+            let mut q = coord_outbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.extend(coord_msgs);
+        }
 
         // Count entities for heartbeat.
         // Exclude TransferOutbound entities: they are frozen and no longer consume
@@ -251,8 +304,25 @@ pub async fn run_game_loop_ecs(
         let client_count = world.resource::<ClientRegistry>().clients.len();
         entity_count_atomic.store(auth_count as u32, Ordering::Relaxed);
 
+        // Weighted load: players cost 3x, NPCs cost 1x.
+        // Used by coordinator for smarter rebalance decisions.
+        let mut weighted = 0u32;
+        for kind in world
+            .query_filtered::<&EntityKind, (With<Authoritative>, Without<TransferOutbound>)>()
+            .iter(&world)
+        {
+            weighted += match kind.0 {
+                shared::entity::EntityType::Player => 3,
+                shared::entity::EntityType::Npc => 1,
+            };
+        }
+        weighted_load_atomic.store(weighted, Ordering::Relaxed);
+
         // -- Phase 4: Enqueue UDP replication for sender task (no awaits) --
-        const ENTITIES_PER_CHUNK: usize = 100;
+        // Keep each UDP packet under ~1400 bytes to avoid IP fragmentation.
+        // Each entity is ~47 bytes (bincode), plus ~60 bytes message overhead.
+        // (1400 - 60) / 47 ≈ 28 entities per chunk.
+        const ENTITIES_PER_CHUNK: usize = 28;
 
         /// Try to send a UdpOutbound message. Returns true if the channel is closed
         /// (sender task has crashed). On Full, increments the drop counter.
@@ -276,61 +346,96 @@ pub async fn run_game_loop_ecs(
             }
         }
 
+        /// Serialize and enqueue entity replication to a single peer address.
+        /// Handles chunking when entity count exceeds ENTITIES_PER_CHUNK.
+        fn enqueue_entities_to_peer(
+            entities: &[EntityState],
+            tick: u64,
+            server_id: ServerId,
+            addr: SocketAddr,
+            tx: &tokio::sync::mpsc::Sender<UdpOutbound>,
+            drops: &mut u64,
+            closed: &mut bool,
+        ) {
+            if entities.is_empty() {
+                return;
+            }
+            if entities.len() <= ENTITIES_PER_CHUNK {
+                let msg = PeerMessage::EntityStateUpdate {
+                    tick,
+                    server_id,
+                    entities: entities.to_vec(),
+                };
+                if let Some(bytes) = serialize_versioned(&msg) {
+                    try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed);
+                }
+            } else {
+                let total_chunks =
+                    ((entities.len() + ENTITIES_PER_CHUNK - 1) / ENTITIES_PER_CHUNK) as u16;
+                for (i, chunk) in entities.chunks(ENTITIES_PER_CHUNK).enumerate() {
+                    let msg = PeerMessage::ChunkedEntityUpdate {
+                        tick,
+                        server_id,
+                        chunk_index: i as u16,
+                        total_chunks,
+                        entities: chunk.to_vec(),
+                    };
+                    if let Some(bytes) = serialize_versioned(&msg) {
+                        try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed);
+                    }
+                }
+            }
+        }
+
         let t2 = Instant::now();
-        if let Some(entities) = &repl_data {
+        let server_id_u16 = world.resource::<ServerConfig>().server_id;
+        repl_drops_this_tick = 0;
+
+        if let Some(entities) = &repl_full {
+            // Full replication tick: ALWAYS broadcast (1/sec crash recovery).
+            // These go through even under backpressure.
             let peer_addrs: Vec<_> = world
                 .resource::<PeerAddresses>()
                 .0
                 .values()
                 .copied()
                 .collect();
-
-            if !peer_addrs.is_empty() {
-                let server_id_u16 = world.resource::<ServerConfig>().server_id;
-
-                if entities.len() <= ENTITIES_PER_CHUNK {
-                    // Small payload: use unchunked format (backward compatible)
-                    let msg = PeerMessage::EntityStateUpdate {
-                        tick: repl_tick,
-                        server_id: server_id_u16,
-                        entities: entities.clone(),
-                    };
-                    if let Ok(bytes) = bincode::serialize(&msg) {
-                        for addr in &peer_addrs {
-                            try_enqueue(
-                                &udp_repl_tx,
-                                UdpOutbound::Send { addr: *addr, data: bytes.clone() },
-                                &mut udp_repl_drops,
-                                &mut udp_repl_closed,
-                            );
-                        }
-                    }
-                } else {
-                    // Large payload: chunk it
-                    let total_chunks =
-                        ((entities.len() + ENTITIES_PER_CHUNK - 1) / ENTITIES_PER_CHUNK) as u16;
-                    for (i, chunk) in entities.chunks(ENTITIES_PER_CHUNK).enumerate() {
-                        let msg = PeerMessage::ChunkedEntityUpdate {
-                            tick: repl_tick,
-                            server_id: server_id_u16,
-                            chunk_index: i as u16,
-                            total_chunks,
-                            entities: chunk.to_vec(),
-                        };
-                        if let Ok(bytes) = bincode::serialize(&msg) {
-                            for addr in &peer_addrs {
-                                try_enqueue(
-                                    &udp_repl_tx,
-                                    UdpOutbound::Send { addr: *addr, data: bytes.clone() },
-                                    &mut udp_repl_drops,
-                                    &mut udp_repl_closed,
-                                );
-                            }
-                        }
-                    }
+            for addr in &peer_addrs {
+                enqueue_entities_to_peer(
+                    entities,
+                    repl_tick,
+                    server_id_u16,
+                    *addr,
+                    &udp_repl_tx,
+                    &mut udp_repl_drops,
+                    &mut udp_repl_closed,
+                );
+            }
+        } else if !repl_per_peer.is_empty() {
+            // Filtered replication: always attempt to send. Cold entities are
+            // phase-spread (~25% per tick), so per-tick payload is bounded.
+            // The try_send drop mechanism handles channel saturation naturally.
+            // No boolean backpressure gate needed — phase spreading already
+            // limits bandwidth, and blocking all replication would starve
+            // shadows with no recovery path (audit #058, #066).
+            let peer_addrs_map = &world.resource::<PeerAddresses>().0;
+            for (peer_id, entities) in &repl_per_peer {
+                if let Some(&addr) = peer_addrs_map.get(peer_id) {
+                    enqueue_entities_to_peer(
+                        entities,
+                        repl_tick,
+                        server_id_u16,
+                        addr,
+                        &udp_repl_tx,
+                        &mut udp_repl_drops,
+                        &mut udp_repl_closed,
+                    );
                 }
             }
         }
+
+        // Track per-tick drops for backpressure detection
+        repl_drops_this_tick = udp_repl_drops;
 
         // Enqueue authority transfers (control channel -- latency-critical)
         if !transfers.is_empty() {
@@ -370,6 +475,20 @@ pub async fn run_game_loop_ecs(
             m.shadow_count = shadow_count;
             m.peer_count = peer_count;
             m.connected_clients = client_count;
+            // Replication filtering metrics
+            if repl_full.is_some() {
+                m.replication_mode = "full".to_string();
+                m.replication_full_count = repl_full.as_ref().map_or(0, |e| e.len());
+                m.replication_sent_count = repl_full.as_ref().map_or(0, |e| e.len()) * peer_count;
+                m.replication_hot_count = 0;
+                m.replication_cold_count = 0;
+            } else {
+                m.replication_mode = "tiered".to_string();
+                m.replication_full_count = auth_count;
+                m.replication_sent_count = repl_per_peer.values().map(|v| v.len()).sum();
+                m.replication_hot_count = repl_hot_count;
+                m.replication_cold_count = repl_cold_count;
+            }
             m.record(TickTimings {
                 input_drain: input_drain_dur,
                 simulation: sim_dur,
@@ -397,14 +516,25 @@ pub async fn run_game_loop_ecs(
                 client_count,
             );
 
-            // Rate-limited UDP sender drop logging (WI-036)
+            // Rate-limited UDP sender drop logging + backpressure control
             if udp_repl_drops > 0 {
-                tracing::warn!(
-                    drops = udp_repl_drops,
-                    "UDP replication channel full: {} drops in last 5s",
-                    udp_repl_drops
-                );
+                if !repl_backpressure {
+                    tracing::warn!(
+                        drops = udp_repl_drops,
+                        "UDP replication saturated, enabling backpressure (skipping per-tick replication)"
+                    );
+                } else {
+                    tracing::warn!(
+                        drops = udp_repl_drops,
+                        "UDP replication still saturated: {} drops in last 5s",
+                        udp_repl_drops
+                    );
+                }
+                repl_backpressure = true;
                 udp_repl_drops = 0;
+            } else if repl_backpressure {
+                tracing::info!("UDP replication recovered, disabling backpressure");
+                repl_backpressure = false;
             }
             if udp_ctrl_drops > 0 {
                 tracing::warn!(
@@ -445,6 +575,7 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
+        world.init_resource::<ReplicationConfig>();
         world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
@@ -597,6 +728,10 @@ mod tests {
             q.drain_directives.push(vec![2]); // target server 2 (no peer needed with 0 entities)
         }
 
+        let weighted_load = Arc::new(AtomicU32::new(0));
+        let coord_outbound = Arc::new(SharedCoordOutbound {
+            queue: std::sync::Mutex::new(Vec::new()),
+        });
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0, // no initial NPCs -- drain will find zero entities
@@ -606,6 +741,10 @@ mod tests {
             udp_ctrl_tx,
             metrics,
             entity_count,
+            weighted_load,
+            FULL_REPL_INTERVAL,
+            false,
+            coord_outbound,
         ));
 
         // The game loop should exit cleanly (break, not process::exit).
@@ -977,6 +1116,10 @@ mod tests {
         }
 
         // Start with 0 NPCs so drain completes immediately (no entities to transfer).
+        let weighted_load = Arc::new(AtomicU32::new(0));
+        let coord_outbound = Arc::new(SharedCoordOutbound {
+            queue: std::sync::Mutex::new(Vec::new()),
+        });
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0,
@@ -986,6 +1129,10 @@ mod tests {
             udp_ctrl_tx,
             Arc::clone(&metrics),
             entity_count.clone(),
+            weighted_load,
+            FULL_REPL_INTERVAL,
+            false,
+            coord_outbound,
         ));
 
         // The loop should complete (drain with 0 entities = immediate shutdown).
@@ -1025,8 +1172,8 @@ mod tests {
 
         // Verify replication output
         let repl = world.resource::<OutboundReplication>();
-        assert!(repl.snapshot.is_some());
-        let entities = repl.snapshot.as_ref().unwrap();
+        assert!(repl.full_snapshot.is_some());
+        let entities = repl.full_snapshot.as_ref().unwrap();
         assert_eq!(entities.len(), 3);
 
         // Verify all entities have correct server ID

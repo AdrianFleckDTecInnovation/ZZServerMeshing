@@ -100,7 +100,8 @@ Verify: `cargo build` for Rust, `cd client && npx tsc --noEmit` for TypeScript.
 |------|-------|-------|
 | `TICK_RATE` | 20 Hz | `shared/tick.rs` |
 | `TICK_DURATION_MS` | 50 ms | `shared/tick.rs` |
-| `WORLD_EXTENT` | 500 | `shared/spatial.rs` — bounds are [-500, 500] |
+| `WORLD_EXTENT` | 5000 | `shared/spatial.rs` — bounds are [-5000, 5000] |
+| `AOI_RADIUS` | 500 | `shared/spatial.rs` — client AoI filter radius |
 | `CELL_SIZE` | 50 | `shared/spatial.rs` — spatial grid |
 | `SHADOW_STALE_TICKS` | 100 (5s) | `sim-server` — shadow cleanup |
 | Rebalance interval | 5s | `coordinator/main.rs` |

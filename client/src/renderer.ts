@@ -26,6 +26,9 @@ export class Renderer {
   private npcMeshPool: THREE.Mesh[] = [];
   private playerMeshPool: THREE.Mesh[] = [];
 
+  // AoI radius circle
+  private aoiCircle!: THREE.Mesh;
+
   private raycaster = new THREE.Raycaster();
   private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private mouse = new THREE.Vector2();
@@ -34,7 +37,7 @@ export class Renderer {
   private keys = new Set<string>();
   followPlayer = true;
   onRenderFrame: (() => void) | null = null;
-  private cameraOffset = new THREE.Vector3(0, 200, 200);
+  private cameraOffset = new THREE.Vector3(0, 600, 0);
 
   constructor(worldView: WorldView, network: NetworkClient) {
     this.worldView = worldView;
@@ -46,9 +49,10 @@ export class Renderer {
     this.scene.background = new THREE.Color(0x1a1a2e);
 
     this.camera = new THREE.PerspectiveCamera(
-      60, window.innerWidth / window.innerHeight, 0.1, 2000
+      90, window.innerWidth / window.innerHeight, 0.1, 20000
     );
-    this.camera.position.set(0, 200, 200);
+    this.camera.position.set(0, 2000, 0);
+    this.camera.up.set(0, 0, -1); // Z-forward as "up" so lookAt points straight down
     this.camera.lookAt(0, 0, 0);
 
     this.renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -57,19 +61,16 @@ export class Renderer {
     document.body.appendChild(this.renderer.domElement);
     await this.renderer.init();
 
+    // OrbitControls only active in free camera mode (press F)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.1;
-    this.controls.maxPolarAngle = Math.PI / 2.2;
-    this.controls.minDistance = 30;
-    this.controls.maxDistance = 1000;
+    this.controls.enabled = false;
 
     this.scene.add(new THREE.AmbientLight(0x606080, 2));
     const dir = new THREE.DirectionalLight(0xffffff, 3);
     dir.position.set(200, 400, 200);
     this.scene.add(dir);
 
-    const groundGeom = new THREE.PlaneGeometry(1000, 1000);
+    const groundGeom = new THREE.PlaneGeometry(10000, 10000);
     const groundMat = new THREE.MeshStandardNodeMaterial();
     groundMat.color = new THREE.Color(0x1a2a1a);
     const ground = new THREE.Mesh(groundGeom, groundMat);
@@ -77,16 +78,29 @@ export class Renderer {
     ground.position.y = -0.5;
     this.scene.add(ground);
 
-    this.scene.add(new THREE.GridHelper(1000, 20, 0x333333, 0x222222));
+    this.scene.add(new THREE.GridHelper(10000, 20, 0x333333, 0x222222));
 
-    const boundsEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1000, 10, 1000));
+    const boundsEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(10000, 10, 10000));
     const boundsLine = new THREE.LineSegments(boundsEdges, new THREE.LineBasicMaterial({ color: 0x444444 }));
     boundsLine.position.y = 5;
     this.scene.add(boundsLine);
 
+    // AoI radius ring (500 units) — rendered as a thin ring mesh since WebGPU doesn't support lines well
+    const aoiRadius = 500;
+    const aoiRingGeom = new THREE.RingGeometry(aoiRadius - 3, aoiRadius + 3, 64);
+    const aoiRingMat = new THREE.MeshBasicNodeMaterial();
+    aoiRingMat.color = new THREE.Color(0x00ff00);
+    aoiRingMat.opacity = 0.4;
+    aoiRingMat.transparent = true;
+    aoiRingMat.side = THREE.DoubleSide;
+    this.aoiCircle = new THREE.Mesh(aoiRingGeom, aoiRingMat);
+    this.aoiCircle.rotation.x = -Math.PI / 2; // lay flat on ground
+    this.aoiCircle.position.y = 0.5;
+    this.scene.add(this.aoiCircle);
+
     // Shared geometries
-    this.npcGeometry = new THREE.SphereGeometry(4, 16, 12);
-    this.playerGeometry = new THREE.BoxGeometry(6, 10, 6);
+    this.npcGeometry = new THREE.SphereGeometry(12, 16, 12);
+    this.playerGeometry = new THREE.BoxGeometry(16, 16, 16);
 
     // Pre-create shared materials
     for (let i = 0; i < SERVER_COLORS.length; i++) {
@@ -156,15 +170,18 @@ export class Renderer {
     this.syncMeshes();
 
     if (this.followPlayer && this.worldView.localPlayerId) {
+      this.controls.enabled = false;
       const player = this.worldView.entities.get(this.worldView.localPlayerId);
       if (player) {
-        const target = player.position.clone().add(this.cameraOffset);
-        this.camera.position.lerp(target, 0.05);
-        this.controls.target.lerp(player.position, 0.05);
+        this.camera.position.set(player.position.x, 2000, player.position.z);
+        this.camera.up.set(0, 0, -1);
+        this.camera.lookAt(player.position.x, 0, player.position.z);
+        this.aoiCircle.position.set(player.position.x, 1, player.position.z);
       }
+    } else {
+      this.controls.enabled = true;
+      this.controls.update();
     }
-
-    this.controls.update();
     this.renderer.render(this.scene, this.camera);
     this.onRenderFrame?.();
   }
@@ -198,7 +215,8 @@ export class Renderer {
         this.entityMeshes.set(entity.id, mesh);
       }
 
-      const yOffset = entity.entityType === 'Player' ? 5 : 4;
+      // Stack entities vertically by server ID so overlapping ones are all visible from top-down
+      const yOffset = entity.entityType === 'Player' ? 20 : (entity.authorityServer * 8);
       mesh.position.set(entity.position.x, entity.position.y + yOffset, entity.position.z);
 
       // Swap material if authority changed (skip local player)

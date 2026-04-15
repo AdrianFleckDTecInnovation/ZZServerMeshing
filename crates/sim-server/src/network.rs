@@ -14,6 +14,44 @@ use tokio_tungstenite::WebSocketStream;
 /// handle_client task to ensure uniqueness without needing shared mutable state.
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Maximum movement/action inputs per second per client.
+const INPUT_RATE_LIMIT: u32 = 30;
+/// Maximum spawn requests per second per client.
+const SPAWN_RATE_LIMIT: u32 = 5;
+/// Rate limiter window duration.
+const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Simple sliding-window rate limiter.
+struct RateLimiter {
+    limit: u32,
+    count: u32,
+    window_start: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            count: 0,
+            window_start: std::time::Instant::now(),
+        }
+    }
+
+    /// Returns true if the action is allowed, false if rate-limited.
+    fn check(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start) >= RATE_WINDOW {
+            self.count = 0;
+            self.window_start = now;
+        }
+        if self.count >= self.limit {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+}
+
 pub async fn run_websocket_server(
     port: u16,
     inbound: Arc<SharedInbound>,
@@ -97,10 +135,10 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let player_uuid = uuid::Uuid::new_v4();
     {
         let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push(ClientMessage::SpawnPlayer {
+        q.client_inputs.push((client_id, ClientMessage::SpawnPlayer {
             player_id: player_uuid.to_string(),
             position: [0.0, 0.0, 0.0],
-        });
+        }));
         // Register this client in the ECS via the inbound queue
         q.register_clients.push(ClientRegistrationEvent {
             client_id,
@@ -113,14 +151,15 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // Send PlayerAssigned as JSON text frame
     let assign_msg = ServerMessage::PlayerAssigned {
         player_id: player_uuid.to_string(),
+        protocol_version: shared::PROTOCOL_VERSION,
     };
     if let Ok(json) = serde_json::to_string(&assign_msg) {
         if ws_sink.send(Message::Text(json.into())).await.is_err() {
             // Client disconnected during assignment -- remove the player
             let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-            q.client_inputs.push(ClientMessage::RemoveEntity {
+            q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
                 entity_id: player_uuid.to_string(),
-            });
+            }));
             q.unregister_clients.push(client_id);
             return;
         }
@@ -131,6 +170,9 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         "Assigned player {} to client {addr}",
         &player_uuid.to_string()[..8]
     );
+
+    let mut input_limiter = RateLimiter::new(INPUT_RATE_LIMIT);
+    let mut spawn_limiter = RateLimiter::new(SPAWN_RATE_LIMIT);
 
     loop {
         tokio::select! {
@@ -155,13 +197,29 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(ClientMessage::RequestSnapshot) => {
-                                // Route directly to force_full_snapshot_clients with client_id
                                 let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                                 q.force_full_snapshot_clients.push(client_id);
                             }
+                            Ok(msg @ (ClientMessage::SpawnEntity { .. } | ClientMessage::SpawnPlayer { .. })) => {
+                                if spawn_limiter.check() {
+                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    q.client_inputs.push((client_id, msg));
+                                } else {
+                                    tracing::warn!(client_id, "Spawn rate limited for client {addr}");
+                                }
+                            }
+                            Ok(msg @ ClientMessage::MoveInput { .. }) => {
+                                if input_limiter.check() {
+                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    q.client_inputs.push((client_id, msg));
+                                }
+                                // Silently drop excess move inputs (too noisy to log)
+                            }
                             Ok(input) => {
-                                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-                                q.client_inputs.push(input);
+                                if input_limiter.check() {
+                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    q.client_inputs.push((client_id, input));
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Invalid client message: {e}");
@@ -201,9 +259,9 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // Client disconnected -- push RemoveEntity and unregister
     {
         let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push(ClientMessage::RemoveEntity {
+        q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
             entity_id: player_uuid.to_string(),
-        });
+        }));
         q.unregister_clients.push(client_id);
     }
     tracing::info!(

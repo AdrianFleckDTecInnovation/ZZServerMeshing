@@ -9,8 +9,16 @@ pub struct ServerEntry {
     pub host: String,
     pub tls: bool,
     pub entity_count: u32,
+    /// Weighted load: players count 3x, NPCs count 1x.
+    /// Falls back to entity_count if not provided (backward compat).
+    pub weighted_load: u32,
     pub reply_tx: mpsc::UnboundedSender<String>,
     pub last_heartbeat: std::time::Instant,
+    /// When this server registered. Used for join grace period.
+    pub registered_at: std::time::Instant,
+    /// Number of in-flight transfers originating from this server.
+    /// Incremented when a RebalanceDirective is sent, decremented on TransferResult.
+    pub in_flight_transfers: u32,
 }
 
 pub struct Registry {
@@ -47,6 +55,7 @@ impl Registry {
                 return;
             }
         }
+        let now = std::time::Instant::now();
         self.servers.insert(
             server_id,
             ServerEntry {
@@ -56,8 +65,11 @@ impl Registry {
                 host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
                 tls,
                 entity_count: 0,
+                weighted_load: 0,
                 reply_tx,
-                last_heartbeat: std::time::Instant::now(),
+                last_heartbeat: now,
+                registered_at: now,
+                in_flight_transfers: 0,
             },
         );
     }
@@ -92,9 +104,11 @@ impl Registry {
         false
     }
 
-    pub fn heartbeat(&mut self, server_id: u16, entity_count: u32) {
+    pub fn heartbeat(&mut self, server_id: u16, entity_count: u32, weighted_load: u32) {
         if let Some(entry) = self.servers.get_mut(&server_id) {
             entry.entity_count = entity_count;
+            // Use weighted_load if provided (>0), otherwise fall back to entity_count
+            entry.weighted_load = if weighted_load > 0 { weighted_load } else { entity_count };
             entry.last_heartbeat = std::time::Instant::now();
         } else {
             tracing::warn!(
@@ -157,38 +171,89 @@ impl Registry {
         }
     }
 
+    /// Record the result of an authority transfer.
+    /// Decrements in-flight counter on the source server.
+    pub fn record_transfer_result(&mut self, source_server: u16, target_server: u16, success: bool) {
+        if let Some(entry) = self.servers.get_mut(&source_server) {
+            entry.in_flight_transfers = entry.in_flight_transfers.saturating_sub(1);
+        }
+        if success {
+            tracing::debug!(
+                source = source_server,
+                target = target_server,
+                "Transfer completed successfully"
+            );
+        } else {
+            tracing::warn!(
+                source = source_server,
+                target = target_server,
+                "Transfer failed (entity kept on source)"
+            );
+        }
+    }
+
+    /// Grace period after registration before a server is eligible as a rebalance target.
+    const JOIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// Check load balance and issue rebalance directives if needed.
     /// Returns true if a rebalance was triggered.
-    pub fn try_rebalance(&self) -> bool {
-        let sim_servers: Vec<&ServerEntry> = self
-            .servers
-            .values()
+    pub fn try_rebalance(&mut self) -> bool {
+        let now = std::time::Instant::now();
+
+        // Collect server snapshots to avoid holding borrows on self.servers
+        struct ServerSnap {
+            id: u16,
+            entity_count: u32,
+            weighted_load: u32,
+            in_flight: u32,
+            registered_at: std::time::Instant,
+        }
+        let snaps: Vec<ServerSnap> = self.servers.values()
             .filter(|s| s.server_id > 0)
+            .map(|s| ServerSnap {
+                id: s.server_id,
+                entity_count: s.entity_count,
+                weighted_load: s.weighted_load,
+                in_flight: s.in_flight_transfers,
+                registered_at: s.registered_at,
+            })
             .collect();
 
-        if sim_servers.len() < 2 {
+        if snaps.len() < 2 {
             return false;
         }
 
-        let total_entities: u32 = sim_servers.iter().map(|s| s.entity_count).sum();
-        if total_entities == 0 {
+        let total_load: u32 = snaps.iter().map(|s| s.weighted_load).sum();
+        if total_load == 0 {
             return false;
         }
 
-        let counts: Vec<String> = sim_servers.iter()
-            .map(|s| format!("S{}:{}", s.server_id, s.entity_count))
+        let counts: Vec<String> = snaps.iter()
+            .map(|s| format!("S{}:{}(w{})", s.id, s.entity_count, s.weighted_load))
             .collect();
-        tracing::debug!("Rebalance check: {} | total={total_entities}", counts.join(" "));
+        tracing::debug!("Rebalance check: {} | total_weighted={total_load}", counts.join(" "));
 
-        let avg = total_entities as f32 / sim_servers.len() as f32;
+        let avg = total_load as f32 / snaps.len() as f32;
 
-        // Find most overloaded and most underloaded
-        let overloaded = sim_servers.iter().max_by_key(|s| s.entity_count).unwrap();
-        let underloaded = sim_servers.iter().min_by_key(|s| s.entity_count).unwrap();
+        // Find most overloaded (must not already have in-flight transfers)
+        let overloaded = snaps.iter()
+            .filter(|s| s.in_flight == 0)
+            .max_by_key(|s| s.weighted_load);
+        let Some(overloaded) = overloaded else { return false };
 
-        let diff = overloaded.entity_count as i32 - underloaded.entity_count as i32;
+        // Find most underloaded (must have passed join grace period)
+        let underloaded = snaps.iter()
+            .filter(|s| now.duration_since(s.registered_at) >= Self::JOIN_GRACE_PERIOD)
+            .min_by_key(|s| s.weighted_load);
+        let Some(underloaded) = underloaded else { return false };
 
-        // Rebalance if diff > 20% of average and at least 10 entities apart
+        if overloaded.id == underloaded.id {
+            return false;
+        }
+
+        let diff = overloaded.weighted_load as i32 - underloaded.weighted_load as i32;
+
+        // Rebalance if diff > 20% of average and at least 10 weighted units apart
         if diff < 10 || (diff as f32) < avg * 0.2 {
             return false;
         }
@@ -198,22 +263,31 @@ impl Registry {
 
         tracing::info!(
             "Rebalancing: S{} ({} entities) -> S{} ({} entities), transferring {}",
-            overloaded.server_id,
+            overloaded.id,
             overloaded.entity_count,
-            underloaded.server_id,
+            underloaded.id,
             underloaded.entity_count,
             transfer_count,
         );
 
+        let overloaded_id = overloaded.id;
+        let underloaded_id = underloaded.id;
+
         // Tell the overloaded server to transfer N entities to the underloaded server.
-        // The server will pick which entities to transfer (it knows positions for clustering).
         let msg = CoordServerMsg::RebalanceDirective {
             entity_ids: Vec::new(), // empty = server picks
-            target_server: underloaded.server_id,
+            target_server: underloaded_id,
         };
 
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = overloaded.reply_tx.send(json);
+        if let Some(entry) = self.servers.get(&overloaded_id) {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = entry.reply_tx.send(json);
+            }
+        }
+
+        // Track in-flight transfers on the source server
+        if let Some(entry) = self.servers.get_mut(&overloaded_id) {
+            entry.in_flight_transfers += 1;
         }
 
         true
@@ -227,7 +301,7 @@ impl Registry {
         self.servers
             .values()
             .filter(|s| s.server_id > 0)
-            .min_by_key(|s| s.entity_count)
+            .min_by_key(|s| s.weighted_load)
             .map(|s| {
                 let host = if s.host == "127.0.0.1" {
                     client_host.unwrap_or(&s.host)
@@ -298,6 +372,16 @@ impl Registry {
             }
         }
     }
+
+    /// Send a keepalive to every connected server. Prevents sim-server read
+    /// timeouts on stable clusters where no topology changes occur.
+    pub fn broadcast_keepalive(&self) {
+        if let Ok(json) = serde_json::to_string(&CoordServerMsg::Keepalive) {
+            for entry in self.servers.values() {
+                let _ = entry.reply_tx.send(json.clone());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,14 +428,14 @@ mod tests {
     fn heartbeat_updates_entity_count() {
         let mut reg = Registry::new();
         let _rx = register_server(&mut reg, 1);
-        reg.heartbeat(1, 42);
+        reg.heartbeat(1, 42, 0);
         assert_eq!(reg.servers.get(&1).unwrap().entity_count, 42);
     }
 
     #[test]
     fn heartbeat_nonexistent_server_is_noop() {
         let mut reg = Registry::new();
-        reg.heartbeat(99, 100); // should not panic
+        reg.heartbeat(99, 100, 0); // should not panic
     }
 
     #[test]
@@ -381,7 +465,7 @@ mod tests {
     fn rebalance_requires_two_servers() {
         let mut reg = Registry::new();
         let _rx = register_server(&mut reg, 1);
-        reg.heartbeat(1, 100);
+        reg.heartbeat(1, 100, 0);
         assert!(!reg.try_rebalance()); // need at least 2 servers
     }
 
@@ -399,8 +483,8 @@ mod tests {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
         let _rx2 = register_server(&mut reg, 2);
-        reg.heartbeat(1, 50);
-        reg.heartbeat(2, 50);
+        reg.heartbeat(1, 50, 0);
+        reg.heartbeat(2, 50, 0);
         assert!(!reg.try_rebalance()); // balanced — no rebalance
     }
 
@@ -409,10 +493,18 @@ mod tests {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
         let _rx2 = register_server(&mut reg, 2);
-        reg.heartbeat(1, 12);
-        reg.heartbeat(2, 5);
+        reg.heartbeat(1, 12, 0);
+        reg.heartbeat(2, 5, 0);
         // diff = 7, which is less than 10 minimum
         assert!(!reg.try_rebalance());
+    }
+
+    /// Backdate all servers' registered_at to bypass the join grace period in tests.
+    fn age_all_servers(reg: &mut Registry) {
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        for entry in reg.servers.values_mut() {
+            entry.registered_at = past;
+        }
     }
 
     #[test]
@@ -420,8 +512,9 @@ mod tests {
         let mut reg = Registry::new();
         let mut rx1 = register_server(&mut reg, 1);
         let _rx2 = register_server(&mut reg, 2);
-        reg.heartbeat(1, 100);
-        reg.heartbeat(2, 20);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 20, 0);
         // diff = 80, avg = 60, 20% of avg = 12 — both thresholds met
         assert!(reg.try_rebalance());
 
@@ -595,9 +688,9 @@ mod tests {
         let _rx2 = register_server(&mut reg, 2);
         let _rx3 = register_server(&mut reg, 3);
 
-        reg.heartbeat(1, 100);
-        reg.heartbeat(2, 10);  // least loaded
-        reg.heartbeat(3, 50);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);  // least loaded
+        reg.heartbeat(3, 50, 0);
 
         let url = reg.get_least_loaded_ws_addr(None).unwrap();
         // Server 2 has ws_port = 7878 + 2 - 1 = 7879
@@ -664,7 +757,7 @@ mod tests {
     fn server_list_includes_entity_count() {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
-        reg.heartbeat(1, 42);
+        reg.heartbeat(1, 42, 0);
 
         let list = reg.get_server_list();
         assert_eq!(list[0]["entity_count"], 42);
@@ -685,10 +778,11 @@ mod tests {
         let mut rx1 = register_server(&mut reg, 1);
         let _rx2 = register_server(&mut reg, 2);
         let _rx3 = register_server(&mut reg, 3);
+        age_all_servers(&mut reg);
 
-        reg.heartbeat(1, 200); // most loaded
-        reg.heartbeat(2, 100);
-        reg.heartbeat(3, 10);  // least loaded
+        reg.heartbeat(1, 200, 0); // most loaded
+        reg.heartbeat(2, 100, 0);
+        reg.heartbeat(3, 10, 0);  // least loaded
 
         assert!(reg.try_rebalance());
 
@@ -776,7 +870,7 @@ mod tests {
         assert_eq!(reg.detect_dead_servers().len(), 1);
 
         // Heartbeat refreshes it
-        reg.heartbeat(1, 50);
+        reg.heartbeat(1, 50, 0);
         assert!(reg.detect_dead_servers().is_empty());
     }
 
@@ -873,7 +967,7 @@ mod tests {
         // After a server is unregistered via detect_dead_servers, heartbeats
         // from it should be silently handled (logged, not panicked).
         let mut reg = Registry::new();
-        reg.heartbeat(99, 100); // server 99 was never registered
+        reg.heartbeat(99, 100, 0); // server 99 was never registered
         assert_eq!(reg.server_count(), 0);
     }
 

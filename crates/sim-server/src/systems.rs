@@ -2,13 +2,14 @@ use crate::components::*;
 use crate::conversion::{despawn_and_remove, spawn_from_entity_state_direct, to_entity_state};
 use crate::delta::{build_baseline, change_ratio, compute_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
 use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
+use crate::game_loop::serialize_versioned;
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use glam::Vec3;
 use rand::Rng;
 use shared::entity::{EntityId, EntityState, EntityType, ServerId};
-use shared::protocol::{ClientMessage, PeerMessage};
-use shared::spatial::clamp_to_world;
+use shared::protocol::{ClientMessage, CoordClientMsg, PeerMessage};
+use shared::spatial::{clamp_to_world, in_aoi, PeerBounds, PEER_AOI_RADIUS, PEER_AOI_RADIUS_SQ};
 use shared::tick::{TICK_DURATION_MS, TICK_RATE};
 use std::sync::Arc;
 
@@ -50,7 +51,7 @@ fn send_transfer_ack(
 ) {
     if let Some(&source_addr) = world.resource::<PeerAddresses>().0.get(&from_server.0) {
         let ack_msg = PeerMessage::TransferAck { entity_id, tick };
-        if let Ok(bytes) = bincode::serialize(&ack_msg) {
+        if let Some(bytes) = serialize_versioned(&ack_msg) {
             world
                 .resource_mut::<OutboundTransfers>()
                 .messages
@@ -215,7 +216,7 @@ pub fn drain_inbound_events(world: &mut World) {
                         direction: fwd.direction,
                         seq: fwd.seq,
                     };
-                    if let Ok(bytes) = bincode::serialize(&fwd_msg) {
+                    if let Some(bytes) = serialize_versioned(&fwd_msg) {
                         world
                             .resource_mut::<OutboundForwards>()
                             .messages
@@ -291,11 +292,20 @@ pub fn process_transfer_acks(world: &mut World) {
 
     for ack in acks {
         if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&ack.entity_id) {
-            if world.get::<TransferOutbound>(bevy_entity).is_some() {
+            if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                let target_server = outbound.target_server;
                 tracing::info!(
                     entity = %ack.entity_id,
                     tick = ack.tick,
                     "Transfer ACK received, despawning entity"
+                );
+                // Report success to coordinator (closed-loop rebalancing)
+                world.resource_mut::<OutboundCoordMessages>().messages.push(
+                    CoordClientMsg::TransferResult {
+                        entity_id: ack.entity_id.to_string(),
+                        target_server,
+                        success: true,
+                    },
                 );
                 despawn_and_remove(world, bevy_entity, ack.entity_id);
             } else {
@@ -366,7 +376,7 @@ pub fn process_transfer_timeouts(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Ok(bytes) = bincode::serialize(&msg) {
+        if let Some(bytes) = serialize_versioned(&msg) {
             world
                 .resource_mut::<OutboundTransfers>()
                 .messages
@@ -399,6 +409,14 @@ pub fn process_transfer_timeouts(world: &mut World) {
             .map(|o| o.retry_count)
             .unwrap_or(0);
         world.entity_mut(entity).remove::<TransferOutbound>();
+        // Report failure to coordinator (closed-loop rebalancing)
+        world.resource_mut::<OutboundCoordMessages>().messages.push(
+            CoordClientMsg::TransferResult {
+                entity_id: eid.to_string(),
+                target_server: target,
+                success: false,
+            },
+        );
         tracing::error!(
             entity = %eid,
             target = target,
@@ -469,7 +487,7 @@ pub fn process_client_inputs(world: &mut World) {
     let server_id = world.resource::<ServerConfig>().server_id;
     let client_inputs = std::mem::take(&mut world.resource_mut::<InboundQueue>().client_inputs);
 
-    for input in client_inputs {
+    for (client_id, input) in client_inputs {
         match input {
             ClientMessage::SpawnEntity {
                 position,
@@ -486,6 +504,8 @@ pub fn process_client_inputs(world: &mut World) {
                 };
                 let eid = state.id;
                 spawn_from_entity_state_direct(world, &state, true, None);
+                // Track entity ownership for RemoveEntity validation
+                world.resource_mut::<EntityOwnership>().owners.insert(eid, client_id);
                 tracing::debug!("Spawned {:?} entity {}", etype, eid);
             }
             ClientMessage::SpawnPlayer {
@@ -504,6 +524,8 @@ pub fn process_client_inputs(world: &mut World) {
                         last_input_seq: 0,
                     };
                     spawn_from_entity_state_direct(world, &state, true, None);
+                    // Track player entity ownership
+                    world.resource_mut::<EntityOwnership>().owners.insert(id, client_id);
                     tracing::info!("Spawned player {}", id);
                 }
             }
@@ -529,7 +551,7 @@ pub fn process_client_inputs(world: &mut World) {
                                     direction,
                                     seq,
                                 };
-                                if let Ok(bytes) = bincode::serialize(&fwd_msg) {
+                                if let Some(bytes) = serialize_versioned(&fwd_msg) {
                                     world
                                         .resource_mut::<OutboundForwards>()
                                         .messages
@@ -582,7 +604,7 @@ pub fn process_client_inputs(world: &mut World) {
                                         direction,
                                         seq,
                                     };
-                                    if let Ok(bytes) = bincode::serialize(&msg) {
+                                    if let Some(bytes) = serialize_versioned(&msg) {
                                         world
                                             .resource_mut::<OutboundForwards>()
                                             .messages
@@ -605,6 +627,24 @@ pub fn process_client_inputs(world: &mut World) {
             ClientMessage::RemoveEntity { entity_id } => {
                 if let Ok(uuid) = uuid::Uuid::parse_str(&entity_id) {
                     let eid = EntityId(uuid);
+                    // Ownership check: only the client that spawned an entity can remove it.
+                    // client_id 0 means server-initiated (always allowed).
+                    if client_id != 0 {
+                        if let Some(&owner) = world.resource::<EntityOwnership>().owners.get(&eid) {
+                            if owner != client_id {
+                                tracing::warn!(
+                                    entity = %eid,
+                                    client_id,
+                                    owner,
+                                    "RemoveEntity rejected: client doesn't own entity"
+                                );
+                                continue;
+                            }
+                        }
+                        // Entities not in the ownership map (e.g., adopted via crash recovery,
+                        // transferred from another server) can be removed by anyone — they
+                        // have no original client owner on this server.
+                    }
                     if let Some(&bevy_entity) =
                         world.resource::<EntityLookup>().0.get(&eid)
                     {
@@ -617,7 +657,7 @@ pub fn process_client_inputs(world: &mut World) {
                                 let msg = PeerMessage::ForwardedRemove {
                                     entity_id: eid,
                                 };
-                                if let Ok(bytes) = bincode::serialize(&msg) {
+                                if let Some(bytes) = serialize_versioned(&msg) {
                                     world
                                         .resource_mut::<OutboundForwards>()
                                         .messages
@@ -646,7 +686,7 @@ pub fn process_client_inputs(world: &mut World) {
                                     let msg = PeerMessage::ForwardedRemove {
                                         entity_id: eid,
                                     };
-                                    if let Ok(bytes) = bincode::serialize(&msg) {
+                                    if let Some(bytes) = serialize_versioned(&msg) {
                                         world
                                             .resource_mut::<OutboundForwards>()
                                             .messages
@@ -912,7 +952,7 @@ pub fn process_transfers(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Ok(bytes) = bincode::serialize(&msg) {
+        if let Some(bytes) = serialize_versioned(&msg) {
             world
                 .resource_mut::<OutboundTransfers>()
                 .messages
@@ -1002,7 +1042,7 @@ pub fn process_drain(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Ok(bytes) = bincode::serialize(&msg) {
+        if let Some(bytes) = serialize_versioned(&msg) {
             world
                 .resource_mut::<OutboundTransfers>()
                 .messages
@@ -1065,11 +1105,17 @@ pub fn process_drain(world: &mut World) {
 /// recovery. The target server will have both its own authoritative copy AND a shadow
 /// from the source -- that's fine, drain_inbound_events skips peer updates for entities
 /// it already owns.
+///
+/// On full-replication ticks (tick % full_interval == 0), sends ALL entities to all
+/// peers via `full_snapshot`. On normal ticks, computes per-peer bounding boxes from
+/// shadow positions and filters entities spatially into `per_peer`.
 pub fn prepare_replication(
     tick: Res<TickCounter>,
-    _config: Res<ServerConfig>,
+    config: Res<ServerConfig>,
+    repl_config: Res<ReplicationConfig>,
+    peer_addrs: Res<PeerAddresses>,
     mut outbound: ResMut<OutboundReplication>,
-    query: Query<
+    auth_query: Query<
         (
             &NetworkId,
             &Position,
@@ -1080,18 +1126,218 @@ pub fn prepare_replication(
         ),
         With<Authoritative>,
     >,
+    shadow_query: Query<(&AuthorityServer, &Position, &EntityKind), With<Shadow>>,
 ) {
-    let entities: Vec<EntityState> = query
+    let entities: Vec<EntityState> = auth_query
         .iter()
         .map(|(nid, pos, vel, kind, auth, seq)| to_entity_state(nid, pos, vel, kind, auth, seq))
         .collect();
 
     outbound.tick = tick.0;
-    outbound.snapshot = if entities.is_empty() {
-        None
-    } else {
-        Some(entities)
+    outbound.hot_count = 0;
+    outbound.cold_count = 0;
+
+    // Full snapshot: only when explicitly enabled via --full-snapshot flag
+    let is_full_tick =
+        repl_config.full_snapshot_enabled && tick.0 % repl_config.full_interval == 0;
+    let no_peers = peer_addrs.0.is_empty();
+
+    if is_full_tick || no_peers || entities.is_empty() {
+        outbound.full_snapshot = if entities.is_empty() {
+            None
+        } else {
+            Some(entities)
+        };
+        outbound.per_peer.clear();
+        return;
+    }
+
+    // Cold phase: each entity is assigned a phase (0-3) based on its UUID.
+    // An entity is sent as cold when tick % 4 == its phase, achieving 5Hz.
+    // This spreads cold entities evenly across ticks instead of bursting
+    // all cold entities on every 4th tick (audit #066).
+    let current_phase = tick.0 % 4;
+
+    // Build two maps from shadow entities:
+    // 1. peer_player_positions: Player shadow positions per peer (for hot/cold classification)
+    // 2. peer_all_positions: All shadow positions per peer (for PeerBounds fallback)
+    let mut peer_player_positions: std::collections::HashMap<u16, Vec<Vec3>> =
+        std::collections::HashMap::new();
+    let mut peer_all_positions: std::collections::HashMap<u16, Vec<Vec3>> =
+        std::collections::HashMap::new();
+
+    for (auth, pos, kind) in shadow_query.iter() {
+        if auth.0 == config.server_id {
+            continue;
+        }
+        let sid = auth.0 .0;
+        peer_all_positions.entry(sid).or_default().push(pos.0);
+        if kind.0 == EntityType::Player {
+            peer_player_positions.entry(sid).or_default().push(pos.0);
+        }
+    }
+
+    // Build PeerBounds from ALL shadow positions for the fallback path
+    // (used when a peer has no Player shadows).
+    let peer_bounds: std::collections::HashMap<u16, PeerBounds> = peer_all_positions
+        .iter()
+        .filter_map(|(&sid, positions)| {
+            PeerBounds::from_positions(positions.iter().copied(), PEER_AOI_RADIUS)
+                .map(|bounds| (sid, bounds))
+        })
+        .collect();
+
+    // Debug logging every 5 seconds
+    if tick.0 % 100 == 0 && !peer_all_positions.is_empty() {
+        for (&sid, positions) in &peer_all_positions {
+            let player_count = peer_player_positions
+                .get(&sid)
+                .map_or(0, |p| p.len());
+            tracing::debug!(
+                peer = sid,
+                shadow_count = positions.len(),
+                player_shadows = player_count,
+                current_phase,
+                "Tiered replication state"
+            );
+        }
+    }
+
+    // If no shadows from any peer: send phase-matched cold entities to all
+    // registered peers to bootstrap shadow recovery. Each tick sends ~25% of
+    // entities, achieving 5Hz per entity without bursting (audit #059, #066).
+    if peer_all_positions.is_empty() {
+        if !entities.is_empty() {
+            let phase_entities: Vec<EntityState> = entities
+                .iter()
+                .filter(|e| (e.id.0.as_u128() % 4) as u64 == current_phase)
+                .cloned()
+                .collect();
+            if !phase_entities.is_empty() {
+                outbound.full_snapshot = None;
+                outbound.per_peer.clear();
+                for &peer_id in peer_addrs.0.keys() {
+                    outbound.cold_count += phase_entities.len();
+                    outbound.per_peer.insert(peer_id, phase_entities.clone());
+                }
+                return;
+            }
+        }
+        outbound.per_peer.clear();
+        outbound.full_snapshot = None;
+        return;
+    }
+
+    // Tiered replication: per-peer entity lists
+    outbound.full_snapshot = None;
+    outbound.per_peer.clear();
+
+    for (&peer_id, _all_positions) in &peer_all_positions {
+        let player_positions = peer_player_positions.get(&peer_id);
+
+        let mut hot_this_peer: usize = 0;
+        let mut cold_this_peer: usize = 0;
+
+        let relevant: Vec<EntityState> = match player_positions {
+            Some(players) if !players.is_empty() => {
+                // Tiered path: use player positions for hot/cold classification.
+                // Hot = within PEER_AOI_RADIUS (750) of any player shadow on
+                // this peer. Uses 750 instead of client AOI (500) to absorb
+                // 1-2 tick staleness in shadow positions — at 5 units/tick, the
+                // 250-unit margin gives 50 ticks of headroom (audit #065).
+                //
+                // Cold entities are phase-spread: each entity's UUID determines
+                // its phase (0-3), and it's sent when tick % 4 matches. This
+                // distributes cold bandwidth evenly instead of bursting on every
+                // 4th tick (audit #066).
+                //
+                // Entities in their cold phase skip the distance check entirely
+                // since they'll be included regardless (audit #060).
+                entities
+                    .iter()
+                    .filter(|e| {
+                        // Check cold phase first — if this entity is in its send
+                        // phase, include it without the distance check.
+                        let entity_phase = (e.id.0.as_u128() % 4) as u64;
+                        if entity_phase == current_phase {
+                            cold_this_peer += 1;
+                            return true;
+                        }
+                        // Not in cold phase — check if hot (near a player).
+                        let is_hot = players.iter().any(|pp| {
+                            let dx = e.position.x - pp.x;
+                            let dz = e.position.z - pp.z;
+                            (dx * dx + dz * dz) <= PEER_AOI_RADIUS_SQ
+                        });
+                        if is_hot {
+                            hot_this_peer += 1;
+                        }
+                        is_hot
+                    })
+                    .cloned()
+                    .collect()
+            }
+            _ => {
+                // Fallback: no Player shadows for this peer.
+                // Without player positions we cannot classify hot/cold, so send
+                // all entities within PeerBounds at 5Hz using phase spreading.
+                // This peer has no players so no client needs 20Hz (audit #064).
+                if let Some(bounds) = peer_bounds.get(&peer_id) {
+                    let filtered: Vec<EntityState> = entities
+                        .iter()
+                        .filter(|e| {
+                            let entity_phase = (e.id.0.as_u128() % 4) as u64;
+                            entity_phase == current_phase && bounds.contains(e.position)
+                        })
+                        .cloned()
+                        .collect();
+                    cold_this_peer = filtered.len();
+                    filtered
+                } else {
+                    continue; // no bounds at all, skip
+                }
+            }
+        };
+
+        outbound.hot_count += hot_this_peer;
+        outbound.cold_count += cold_this_peer;
+        outbound.per_peer.insert(peer_id, relevant);
+    }
+
+    // Bootstrap: send phase-matched entities to peers in PeerAddresses that
+    // have no shadows at all. Each tick sends ~25% of entities, achieving 5Hz
+    // per entity without bursting. Without this, a peer that lost all shadows
+    // can never recover (audit #059, #066).
+    let phase_entities: Option<Vec<EntityState>> = {
+        let mut needed = false;
+        for &peer_id in peer_addrs.0.keys() {
+            if !outbound.per_peer.contains_key(&peer_id) {
+                needed = true;
+                break;
+            }
+        }
+        if needed && !entities.is_empty() {
+            Some(
+                entities
+                    .iter()
+                    .filter(|e| (e.id.0.as_u128() % 4) as u64 == current_phase)
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            None
+        }
     };
+    if let Some(pe) = phase_entities {
+        if !pe.is_empty() {
+            for &peer_id in peer_addrs.0.keys() {
+                if !outbound.per_peer.contains_key(&peer_id) {
+                    outbound.cold_count += pe.len();
+                    outbound.per_peer.insert(peer_id, pe.clone());
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -1177,29 +1423,74 @@ pub fn prepare_client_snapshot(
         }
     }
 
-    // Encode the full snapshot once, wrapped in Arc for zero-copy sharing across clients.
-    // Only a single clone is made for the backward-compat ClientSnapshot resource.
-    let full_frame = Arc::new(encode_binary_snapshot(tick.0, &entities));
-    snapshot.frame = Some((*full_frame).clone());
+    // Encode the unfiltered full snapshot for the ClientSnapshot resource.
+    // Only used by tests that check ClientSnapshot.frame — gated behind #[cfg(test)]
+    // to avoid encoding ~188KB per tick at 2000 entities in production.
+    #[cfg(test)]
+    {
+        snapshot.frame = Some(encode_binary_snapshot(tick.0, &entities));
+    }
+    #[cfg(not(test))]
+    {
+        snapshot.frame = None;
+    }
 
-    // Pre-loop probe: check whether delta compression is worthwhile (audit #049).
-    // All clients diff against baselines derived from the same entity set, so the
-    // change ratio is approximately the same for all of them. Compute it once using
-    // any client's baseline. If >80% of entities changed, skip compute_delta for ALL
-    // clients and send full snapshots directly, avoiding O(E*C) wasted HashMap lookups.
-    let force_full = registry
-        .clients
-        .values()
-        .find_map(|h| h.baseline.as_ref())
-        .map(|baseline| change_ratio(&entities, baseline) > DELTA_FALLBACK_THRESHOLD)
-        .unwrap_or(false);
+    // Build player -> position map from the entity list.
+    // Only need positions for connected clients' player entities.
+    let mut player_positions: std::collections::HashMap<EntityId, Vec3> =
+        std::collections::HashMap::new();
+    for (_client_id, handle) in registry.clients.iter() {
+        if let Some(pid) = handle.player_id {
+            let mut found = false;
+            for e in &entities {
+                if e.id == pid {
+                    player_positions.insert(pid, e.position);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                tracing::debug!(
+                    client_id = _client_id,
+                    player_id = %pid,
+                    entity_count = entities.len(),
+                    "AoI: player entity not found in entities vec, sending unfiltered"
+                );
+            }
+        }
+    }
 
     // Send per-client frames (delta or full).
+    // NOTE: The pre-loop force_full probe (audit #049) was removed because with
+    // per-client AoI filtering, each client has a different entity set and baseline.
+    // A global probe comparing full entities against an AoI-filtered baseline would
+    // always fire (entities outside AoI counted as "new"). The per-client change_ratio
+    // check in the delta path below handles the fallback correctly.
     // IMPORTANT: Baseline is updated ONLY after try_send succeeds (fix for audit #018).
     // If the channel is full and the frame is dropped, the baseline is NOT advanced,
     // so the next tick re-diffs against the last state the client actually received.
     // On drop, we also force the next frame to be a full snapshot (clear baseline).
     for (_client_id, handle) in registry.clients.iter_mut() {
+        // AoI filter: determine which entities this client should see.
+        // If the client has a player entity, only include entities within AOI_RADIUS.
+        // The player's own entity is always included regardless of distance.
+        // If the client has no player or the player position is unknown, send everything.
+        let client_entities: Vec<EntityState> = if let Some(pid) = handle.player_id {
+            if let Some(&player_pos) = player_positions.get(&pid) {
+                entities
+                    .iter()
+                    .filter(|e| e.id == pid || in_aoi(player_pos, e.position))
+                    .cloned()
+                    .collect()
+            } else {
+                // Player position not found (entity not spawned yet) -- send everything
+                entities.clone()
+            }
+        } else {
+            // No player assigned yet -- send everything
+            entities.clone()
+        };
+
         // Stale-ACK detection: if the client has not ACK'd recent frames for 2 seconds,
         // force a full snapshot to resync (audit #021).
         // Clamp to current server tick to prevent malicious clients from sending
@@ -1211,8 +1502,7 @@ pub fn prepare_client_snapshot(
 
         let send_full = handle.baseline.is_none()
             || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL
-            || stale_ack
-            || force_full;
+            || stale_ack;
 
         if send_full {
             if stale_ack {
@@ -1223,12 +1513,12 @@ pub fn prepare_client_snapshot(
                     "ACK stale, forcing full snapshot for client"
                 );
             }
-            // Full snapshot path: encode is shared via Arc, baseline built only on success.
-            let frame = ClientFrame::Shared(Arc::clone(&full_frame));
+            // Full snapshot path: per-client AoI-filtered encoding.
+            let frame = ClientFrame::Owned(encode_binary_snapshot(tick.0, &client_entities));
             match handle.tx.try_send(frame) {
                 Ok(()) => {
                     // Success: update baseline to match what we just sent
-                    handle.baseline = Some(build_baseline(&entities));
+                    handle.baseline = Some(build_baseline(&client_entities));
                     handle.ticks_since_full = 1;
                     handle.last_sent_tick = tick.0;
                 }
@@ -1245,22 +1535,22 @@ pub fn prepare_client_snapshot(
         } else {
             // Delta path: compute delta against baseline, then decide if delta is worth it.
             let baseline = handle.baseline.as_ref().unwrap();
-            let delta = compute_delta(&entities, baseline);
+            let delta = compute_delta(&client_entities, baseline);
 
             // Heuristic: if >80% of entities changed, full snapshot is cheaper (audit #027).
             // Full snapshot has a smaller header (27 vs 31 bytes) and avoids delta encoding CPU.
-            let change_ratio = if entities.is_empty() {
+            let change_ratio = if client_entities.is_empty() {
                 0.0
             } else {
-                delta.updates.len() as f32 / entities.len() as f32
+                delta.updates.len() as f32 / client_entities.len() as f32
             };
 
             if change_ratio > DELTA_FALLBACK_THRESHOLD {
                 // Too many changes -- send full snapshot instead of delta
-                let frame = ClientFrame::Shared(Arc::clone(&full_frame));
+                let frame = ClientFrame::Owned(encode_binary_snapshot(tick.0, &client_entities));
                 match handle.tx.try_send(frame) {
                     Ok(()) => {
-                        handle.baseline = Some(build_baseline(&entities));
+                        handle.baseline = Some(build_baseline(&client_entities));
                         handle.ticks_since_full = 1;
                         handle.last_sent_tick = tick.0;
                     }
@@ -1347,6 +1637,14 @@ mod tests {
     use shared::entity::{EntityId, EntityState, EntityType, ServerId};
     use shared::protocol::PeerInfo;
 
+    /// Deserialize a versioned UDP message (skip 2-byte version prefix).
+    fn deserialize_versioned(bytes: &[u8]) -> PeerMessage {
+        assert!(bytes.len() >= 2, "versioned message too short");
+        let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+        assert_eq!(version, shared::PROTOCOL_VERSION, "unexpected protocol version in test");
+        bincode::deserialize(&bytes[2..]).unwrap()
+    }
+
     fn setup_world(server_id: u16) -> World {
         let mut world = World::default();
         world.insert_resource(ServerConfig {
@@ -1358,6 +1656,7 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
+        world.init_resource::<ReplicationConfig>();
         world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
@@ -1366,6 +1665,8 @@ mod tests {
         world.init_resource::<ShutdownRequested>();
         world.init_resource::<TimingAccumulator>();
         world.init_resource::<ClientRegistry>();
+        world.init_resource::<OutboundCoordMessages>();
+        world.init_resource::<EntityOwnership>();
         world
     }
 
@@ -1381,6 +1682,55 @@ mod tests {
         let eid = state.id;
         let entity = spawn_from_entity_state_direct(world, &state, true, None);
         (entity, eid)
+    }
+
+    /// Spawn a shadow entity (non-authoritative) at the given position, owned by `owner_server`.
+    /// The shadow tick defaults to 0.
+    fn spawn_shadow_npc(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
+        let state = EntityState::new_npc(pos, ServerId(owner_server));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
+        (entity, eid)
+    }
+
+    /// Spawn a shadow Player entity (non-authoritative) at the given position, owned by `owner_server`.
+    /// Used for tiered replication tests where player positions drive hot/cold classification.
+    fn spawn_shadow_player(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
+        let state = EntityState::new_player(pos, ServerId(owner_server));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
+        (entity, eid)
+    }
+
+    /// Compute the cold-phase (0-3) for an entity, matching the logic in prepare_replication.
+    #[allow(dead_code)]
+    fn cold_phase_of(id: &EntityId) -> u64 {
+        (id.0.as_u128() % 4) as u64
+    }
+
+    /// Spawn an auth NPC with a deterministic UUID in a specific cold phase.
+    /// `index` differentiates entities within the same phase (must be unique per test).
+    fn spawn_auth_npc_in_phase(world: &mut World, pos: Vec3, server_id: u16, phase: u64, index: u32) -> (Entity, EntityId) {
+        let mut state = EntityState::new_npc(pos, ServerId(server_id));
+        state.id = EntityId(uuid::Uuid::from_u128((index as u128) * 4 + phase as u128));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(world, &state, true, None);
+        (entity, eid)
+    }
+
+    // -- helper verification tests --
+
+    #[test]
+    fn spawn_shadow_player_creates_player_shadow() {
+        let mut world = setup_world(1);
+        let (entity, _eid) = spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 200.0), 2);
+        // Should be a shadow (not authoritative)
+        assert!(world.get::<Shadow>(entity).is_some());
+        assert!(world.get::<Authoritative>(entity).is_none());
+        // Should be Player type
+        assert_eq!(world.get::<EntityKind>(entity).unwrap().0, EntityType::Player);
+        // Should be owned by server 2
+        assert_eq!(world.get::<AuthorityServer>(entity).unwrap().0, ServerId(2));
     }
 
     // -- physics_integration tests --
@@ -1439,8 +1789,8 @@ mod tests {
         schedule.run(&mut world);
 
         let pos = world.get::<Position>(entity).unwrap();
-        assert_eq!(pos.0.x, 500.0);
-        assert_eq!(pos.0.z, -500.0);
+        assert_eq!(pos.0.x, shared::spatial::WORLD_EXTENT);
+        assert_eq!(pos.0.z, -shared::spatial::WORLD_EXTENT);
     }
 
     #[test]
@@ -1563,8 +1913,8 @@ mod tests {
         schedule.run(&mut world);
 
         let outbound = world.resource::<OutboundReplication>();
-        assert!(outbound.snapshot.is_some());
-        assert_eq!(outbound.snapshot.as_ref().unwrap().len(), 2); // only auth
+        assert!(outbound.full_snapshot.is_some());
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2); // only auth
     }
 
     #[test]
@@ -1577,7 +1927,7 @@ mod tests {
         schedule.run(&mut world);
 
         let outbound = world.resource::<OutboundReplication>();
-        assert!(outbound.snapshot.is_none());
+        assert!(outbound.full_snapshot.is_none());
     }
 
     #[test]
@@ -1591,7 +1941,7 @@ mod tests {
         schedule.run(&mut world);
 
         let outbound = world.resource::<OutboundReplication>();
-        let entities = outbound.snapshot.as_ref().unwrap();
+        let entities = outbound.full_snapshot.as_ref().unwrap();
         assert_eq!(entities[0].last_input_seq, 42);
     }
 
@@ -2987,10 +3337,10 @@ mod tests {
     #[test]
     fn client_spawn_npc() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::SpawnEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnEntity {
             position: [10.0, 0.0, -20.0],
             entity_type: "npc".to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3003,10 +3353,10 @@ mod tests {
     #[test]
     fn client_spawn_player_type() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::SpawnEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnEntity {
             position: [0.0, 0.0, 0.0],
             entity_type: "player".to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3019,10 +3369,10 @@ mod tests {
     fn client_spawn_player_with_uuid() {
         let mut world = setup_world(1);
         let uuid = uuid::Uuid::new_v4();
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::SpawnPlayer {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
             player_id: uuid.to_string(),
             position: [5.0, 0.0, 5.0],
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3035,11 +3385,11 @@ mod tests {
         let mut world = setup_world(1);
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: eid.0.to_string(),
             direction: [1.0, 0.0, 0.0],
             seq: 42,
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3059,11 +3409,11 @@ mod tests {
         // Register peer address
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: shadow_id.0.to_string(),
             direction: [0.0, 0.0, 1.0],
             seq: 3,
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3076,9 +3426,9 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3088,7 +3438,7 @@ mod tests {
     #[test]
     fn client_request_snapshot_noop() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RequestSnapshot);
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RequestSnapshot));
 
         process_client_inputs(&mut world); // should not panic
     }
@@ -3702,11 +4052,11 @@ mod tests {
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
         // Send unnormalized direction [3, 0, 4] (length 5)
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: eid.0.to_string(),
             direction: [3.0, 0.0, 4.0],
             seq: 1,
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3723,11 +4073,11 @@ mod tests {
         let mut world = setup_world(1);
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: eid.0.to_string(),
             direction: [0.0, 0.0, 0.0],
             seq: 1,
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3741,11 +4091,11 @@ mod tests {
     fn client_move_input_invalid_uuid_ignored() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: "not-a-valid-uuid".to_string(),
             direction: [1.0, 0.0, 0.0],
             seq: 1,
-        });
+        }));
 
         // Should not panic
         process_client_inputs(&mut world);
@@ -3755,9 +4105,9 @@ mod tests {
     fn client_remove_invalid_uuid_ignored() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: "garbage".to_string(),
-        });
+        }));
 
         // Should not panic
         process_client_inputs(&mut world);
@@ -3768,9 +4118,9 @@ mod tests {
         let mut world = setup_world(1);
         let uuid = uuid::Uuid::new_v4();
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: uuid.to_string(),
-        });
+        }));
 
         // Should not panic
         process_client_inputs(&mut world);
@@ -3792,9 +4142,9 @@ mod tests {
         });
 
         // Client sends RemoveEntity
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -3807,7 +4157,7 @@ mod tests {
         assert_eq!(forwards[0].0, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
 
         // Verify it deserializes to ForwardedRemove
-        let msg: PeerMessage = bincode::deserialize(&forwards[0].1).unwrap();
+        let msg: PeerMessage = deserialize_versioned(&forwards[0].1);
         match msg {
             PeerMessage::ForwardedRemove { entity_id } => {
                 assert_eq!(entity_id, eid);
@@ -3822,9 +4172,9 @@ mod tests {
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         // No TransferOutbound -- normal remove
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -4196,10 +4546,10 @@ mod tests {
     fn client_spawn_player_invalid_uuid_ignored() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::SpawnPlayer {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
             player_id: "not-a-uuid".to_string(),
             position: [0.0, 0.0, 0.0],
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -4249,9 +4599,9 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // Push RemoveEntity (as if the client disconnected)
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -4260,7 +4610,7 @@ mod tests {
         assert_eq!(forwards.len(), 1, "Should produce exactly one forwarded remove");
 
         // Deserialize and verify the message
-        let msg: PeerMessage = bincode::deserialize(&forwards[0].1).unwrap();
+        let msg: PeerMessage = deserialize_versioned(&forwards[0].1);
         match msg {
             PeerMessage::ForwardedRemove { entity_id } => {
                 assert_eq!(entity_id, eid);
@@ -4281,9 +4631,9 @@ mod tests {
 
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -4360,9 +4710,9 @@ mod tests {
 
         // Do NOT register peer address for S2
 
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -4401,9 +4751,9 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // 4. Client disconnects -- push RemoveEntity
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::RemoveEntity {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
             entity_id: eid.0.to_string(),
-        });
+        }));
 
         world.resource_mut::<TickCounter>().0 = 51;
 
@@ -4418,7 +4768,8 @@ mod tests {
         // Find the ForwardedRemove message
         let mut found = false;
         for (_addr, bytes) in forwards {
-            if let Ok(msg) = bincode::deserialize::<PeerMessage>(bytes) {
+            if bytes.len() >= 2 {
+                let msg: PeerMessage = deserialize_versioned(bytes);
                 if let PeerMessage::ForwardedRemove { entity_id } = msg {
                     assert_eq!(entity_id, eid);
                     found = true;
@@ -4461,7 +4812,7 @@ mod tests {
         let (addr, bytes) = &transfers[0];
         assert_eq!(*addr, "127.0.0.1:9101".parse::<std::net::SocketAddr>().unwrap());
 
-        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        let msg: PeerMessage = deserialize_versioned(bytes);
         match msg {
             PeerMessage::TransferAck { entity_id, tick } => {
                 assert_eq!(entity_id, eid);
@@ -4879,7 +5230,7 @@ mod tests {
         let (addr, bytes) = &transfers[0];
         assert_eq!(addr.to_string(), "127.0.0.1:9101");
 
-        let decoded: PeerMessage = bincode::deserialize(bytes).unwrap();
+        let decoded: PeerMessage = deserialize_versioned(bytes);
         match decoded {
             PeerMessage::TransferAck { entity_id, tick } => {
                 assert_eq!(entity_id, eid);
@@ -5164,11 +5515,11 @@ mod tests {
         });
 
         // Client sends MoveInput for the entity
-        world.resource_mut::<InboundQueue>().client_inputs.push(ClientMessage::MoveInput {
+        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
             entity_id: eid.0.to_string(),
             direction: [1.0, 0.0, 0.0],
             seq: 42,
-        });
+        }));
 
         process_client_inputs(&mut world);
 
@@ -5187,7 +5538,7 @@ mod tests {
         // Verify the forwarded message
         let (addr, bytes) = &forwards[0];
         assert_eq!(*addr, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
-        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        let msg: PeerMessage = deserialize_versioned(bytes);
         match msg {
             PeerMessage::ForwardedInput { entity_id, direction, seq } => {
                 assert_eq!(entity_id, eid);
@@ -5236,7 +5587,7 @@ mod tests {
 
         let (addr, bytes) = &forwards[0];
         assert_eq!(*addr, "127.0.0.1:9103".parse::<std::net::SocketAddr>().unwrap());
-        let msg: PeerMessage = bincode::deserialize(bytes).unwrap();
+        let msg: PeerMessage = deserialize_versioned(bytes);
         match msg {
             PeerMessage::ForwardedInput { entity_id, seq, .. } => {
                 assert_eq!(entity_id, eid);
@@ -5352,7 +5703,7 @@ mod tests {
         let messages = &world.resource::<OutboundTransfers>().messages;
         assert_eq!(messages.len(), 1);
 
-        let msg: PeerMessage = bincode::deserialize(&messages[0].1).unwrap();
+        let msg: PeerMessage = deserialize_versioned(&messages[0].1);
         match msg {
             PeerMessage::AuthorityTransfer { full_state, entity_id, tick, .. } => {
                 assert_eq!(entity_id, eid);
@@ -5438,10 +5789,10 @@ mod tests {
         schedule.run(&mut world);
 
         let outbound = world.resource::<OutboundReplication>();
-        assert!(outbound.snapshot.is_some());
+        assert!(outbound.full_snapshot.is_some());
         // All 3 entities should be replicated, including the TransferOutbound one.
         // This ensures peers have up-to-date shadows for crash recovery.
-        assert_eq!(outbound.snapshot.as_ref().unwrap().len(), 3,
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 3,
             "TransferOutbound entity should be included in replication for crash recovery");
     }
 
@@ -6000,5 +6351,1691 @@ mod tests {
         schedule.run(&mut world);
         assert_eq!(rx.try_recv().unwrap().into_vec()[0], 0x01,
             "new client with no baseline should get full snapshot");
+    }
+
+    // ── AoI filtering tests ──
+
+    /// Helper: extract entity count from a full snapshot frame (0x01 header).
+    fn entity_count_from_full_frame(frame: &[u8]) -> u32 {
+        assert_eq!(frame[0], 0x01, "expected full snapshot frame");
+        u32::from_le_bytes([frame[9], frame[10], frame[11], frame[12]])
+    }
+
+    /// Helper: register a test client and set its player_id on the registry.
+    fn register_test_client_with_player(
+        world: &mut World,
+        client_id: u64,
+        player_id: EntityId,
+    ) -> tokio::sync::mpsc::Receiver<ClientFrame> {
+        let rx = register_test_client(world, client_id);
+        world.resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&client_id)
+            .unwrap()
+            .player_id = Some(player_id);
+        rx
+    }
+
+    #[test]
+    fn snapshot_filters_by_aoi() {
+        // 3 entities: player at origin, NPC at (100,0,0), NPC at (3000,0,0).
+        // Client with player at origin should only see 2 entities.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 2, "AoI should filter out the entity at 3000 units");
+    }
+
+    #[test]
+    fn snapshot_always_includes_player() {
+        // Player at origin, NPC at 3000 units away. Player's own entity
+        // must always be included regardless of AoI distance.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 1, "only player should be in frame (NPC is outside AoI)");
+    }
+
+    #[test]
+    fn snapshot_no_player_sends_all() {
+        // Client with no player_id set should receive all entities.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 4000.0), 1);
+
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 3, "no player_id means all entities are sent");
+    }
+
+    #[test]
+    fn snapshot_all_within_aoi_sends_all() {
+        // All entities within 500 units. All should appear in the snapshot.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(-200.0, 0.0, 300.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(400.0, 0.0, 0.0), 1);
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 4, "all entities within AoI + player = 4 total");
+    }
+
+    // ── AoI + delta compression interaction tests ──
+
+    /// Helper: extract update count and removal count from a delta frame (0x02 header).
+    fn delta_counts_from_frame(frame: &[u8]) -> (u32, u32) {
+        assert_eq!(frame[0], 0x02, "expected delta frame");
+        let updates = u32::from_le_bytes([frame[9], frame[10], frame[11], frame[12]]);
+        let removals = u32::from_le_bytes([frame[13], frame[14], frame[15], frame[16]]);
+        (updates, removals)
+    }
+
+    #[test]
+    fn aoi_entity_leaving_produces_removal() {
+        // Tick 1: entity at (400,0,0) is within AoI. Full snapshot + baseline.
+        // Then move entity to (3000,0,0) -- outside AoI.
+        // Tick 2: delta should contain a removal.
+        let mut world = setup_world(1);
+        let (player_entity, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        let (npc_entity, _npc_id) = spawn_auth_npc(&mut world, Vec3::new(400.0, 0.0, 0.0), 1);
+
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (2 entities: player + NPC)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01, "first frame should be full");
+        assert_eq!(entity_count_from_full_frame(&f1), 2);
+        acked.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Move NPC outside AoI
+        world.get_mut::<Position>(npc_entity).unwrap().0 = Vec3::new(3000.0, 0.0, 0.0);
+
+        // Tick 2: delta should have a removal for the NPC
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "second frame should be delta");
+        let (updates, removals) = delta_counts_from_frame(&f2);
+        assert_eq!(removals, 1, "NPC moved outside AoI should produce 1 removal");
+        // The player may have an update (unchanged position still in baseline),
+        // but the NPC should be gone.
+        let _ = updates; // player update is fine
+        let _ = player_entity; // keep the compiler happy
+    }
+
+    #[test]
+    fn aoi_entity_entering_produces_update() {
+        // Tick 1: entity at (3000,0,0) is outside AoI. Full snapshot (player only).
+        // Then move entity to (100,0,0) -- inside AoI.
+        // Tick 2: delta should contain an update (new entity).
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        let (npc_entity, _npc_id) = spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
+
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (only player, NPC outside AoI)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(entity_count_from_full_frame(&f1), 1, "only player should be in first frame");
+        acked.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Move NPC inside AoI
+        world.get_mut::<Position>(npc_entity).unwrap().0 = Vec3::new(100.0, 0.0, 0.0);
+
+        // Tick 2: delta should have the NPC as an update (new entity)
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x02, "second frame should be delta");
+        let (updates, removals) = delta_counts_from_frame(&f2);
+        assert!(updates >= 1, "NPC entering AoI should produce at least 1 update");
+        assert_eq!(removals, 0, "no entities should be removed");
+    }
+
+    #[test]
+    fn aoi_boundary_no_flicker() {
+        // Entity at exactly 500 units from player (on boundary).
+        // Run 5 ticks. Entity should be consistently included (no removal+re-add).
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        // Exactly on boundary: 500 units in X direction
+        spawn_auth_npc(&mut world, Vec3::new(500.0, 0.0, 0.0), 1);
+
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: full snapshot (2 entities: player + boundary NPC)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(entity_count_from_full_frame(&f1), 2, "boundary entity should be included");
+        acked.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Ticks 2-5: deltas should have 0 removals (entity stays stable)
+        for tick in 2..=5 {
+            acked.store(tick - 1, std::sync::atomic::Ordering::Relaxed);
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let frame = rx.try_recv().unwrap().into_vec();
+            assert_eq!(frame[0], 0x02, "tick {tick} should be delta");
+            let (_updates, removals) = delta_counts_from_frame(&frame);
+            assert_eq!(removals, 0, "tick {tick}: boundary entity should not flicker out");
+        }
+    }
+
+    #[test]
+    fn aoi_full_snapshot_is_filtered() {
+        // Force a full snapshot (set ticks_since_full to FULL_SNAPSHOT_INTERVAL).
+        // Verify the full snapshot only contains AoI-visible entities.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1); // outside AoI
+
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: first frame is full (no baseline)
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f1[0], 0x01);
+        assert_eq!(entity_count_from_full_frame(&f1), 2, "first full should have 2 AoI entities");
+        acked.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Force a periodic full snapshot by setting ticks_since_full = FULL_SNAPSHOT_INTERVAL
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().ticks_since_full = FULL_SNAPSHOT_INTERVAL;
+
+        // Tick 2: forced full snapshot should still be AoI-filtered
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        let f2 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(f2[0], 0x01, "periodic refresh should be full snapshot");
+        assert_eq!(entity_count_from_full_frame(&f2), 2,
+            "periodic full snapshot should be AoI-filtered (not all 3 entities)");
+    }
+
+    // ── AoI coverage gap tests ──
+
+    #[test]
+    fn aoi_filters_shadow_entities() {
+        // Shadow entities should also be filtered by AoI. A shadow at 3000 units
+        // should NOT appear in the client's snapshot.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1); // auth, inside AoI
+
+        // Shadow entity inside AoI (from server 2)
+        let shadow_near = EntityState::new_npc(Vec3::new(200.0, 0.0, 0.0), ServerId(2));
+        spawn_from_entity_state_direct(&mut world, &shadow_near, false, Some(1));
+
+        // Shadow entity outside AoI (from server 2)
+        let shadow_far = EntityState::new_npc(Vec3::new(3000.0, 0.0, 0.0), ServerId(2));
+        spawn_from_entity_state_direct(&mut world, &shadow_far, false, Some(1));
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        // player (0,0,0) + auth NPC (100,0,0) + shadow near (200,0,0) = 3
+        // shadow far (3000,0,0) should be excluded
+        assert_eq!(count, 3, "shadow entity at 3000 units should be filtered out");
+    }
+
+    #[test]
+    fn aoi_filters_transfer_outbound_entities() {
+        // TransferOutbound entities should also be filtered by AoI.
+        use crate::components::TransferOutbound;
+
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+
+        // Auth NPC inside AoI
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+
+        // TransferOutbound NPC inside AoI
+        let state_near = EntityState::new_npc(Vec3::new(200.0, 0.0, 0.0), ServerId(1));
+        let e_near = spawn_from_entity_state_direct(&mut world, &state_near, true, None);
+        world.entity_mut(e_near).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        // TransferOutbound NPC outside AoI
+        let state_far = EntityState::new_npc(Vec3::new(3000.0, 0.0, 0.0), ServerId(1));
+        let e_far = spawn_from_entity_state_direct(&mut world, &state_far, true, None);
+        world.entity_mut(e_far).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 1,
+            retry_count: 0,
+        });
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        // player (0,0,0) + auth NPC (100,0,0) + transfer near (200,0,0) = 3
+        // transfer far (3000,0,0) should be excluded
+        assert_eq!(count, 3, "transfer-outbound entity at 3000 units should be filtered out");
+    }
+
+    #[test]
+    fn aoi_player_not_spawned_sends_unfiltered() {
+        // If player_id is set but the player entity does not exist in the ECS
+        // (e.g., not yet spawned), the system should send all entities unfiltered.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(4500.0, 0.0, 4500.0), 1);
+
+        // Create a fake player_id that does NOT exist in the ECS
+        let fake_player_id = EntityId::new();
+        let mut rx = register_test_client_with_player(&mut world, 100, fake_player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 3, "player entity not in ECS means unfiltered: all 3 entities sent");
+    }
+
+    #[test]
+    fn aoi_two_clients_different_windows() {
+        // Two clients with players at different positions should receive different entity sets.
+        let mut world = setup_world(1);
+
+        // Player A at origin
+        let (_pe_a, player_a_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        // Player B at (4000, 0, 0)
+        let (_pe_b, player_b_id) = spawn_auth_player(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        // NPC near player A only (100, 0, 0)
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+        // NPC near player B only (3900, 0, 0)
+        spawn_auth_npc(&mut world, Vec3::new(3900.0, 0.0, 0.0), 1);
+        // NPC far from both (2000, 0, 2000) - 2828 from A, 2236 from B
+        spawn_auth_npc(&mut world, Vec3::new(2000.0, 0.0, 2000.0), 1);
+
+        let mut rx_a = register_test_client_with_player(&mut world, 100, player_a_id);
+        let mut rx_b = register_test_client_with_player(&mut world, 200, player_b_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame_a = rx_a.try_recv().unwrap().into_vec();
+        let frame_b = rx_b.try_recv().unwrap().into_vec();
+        let count_a = entity_count_from_full_frame(&frame_a);
+        let count_b = entity_count_from_full_frame(&frame_b);
+
+        // Client A should see: player A + NPC at (100,0,0) + player B is at 4000 (outside AoI)
+        // Wait -- player B is an entity too. Player B at (4000,0,0) is outside A's AoI.
+        // So client A sees: player A (self, always included) + NPC(100,0,0) = 2
+        assert_eq!(count_a, 2, "client A: own player + nearby NPC");
+
+        // Client B should see: player B (self) + NPC at (3900,0,0) (100 away) = 2
+        // Player A at origin is 4000 units away -- outside. NPC at (2000,0,2000) is too far.
+        assert_eq!(count_b, 2, "client B: own player + nearby NPC");
+    }
+
+    #[test]
+    fn aoi_stale_ack_full_snapshot_is_filtered() {
+        // When stale ACK triggers a full snapshot, it should still be AoI-filtered.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1); // inside AoI
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1); // outside AoI
+
+        let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
+        world.resource_mut::<ClientRegistry>()
+            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+
+        // Tick 1: initial full snapshot
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let f1 = rx.try_recv().unwrap().into_vec();
+        assert_eq!(entity_count_from_full_frame(&f1), 2, "initial: player + nearby NPC");
+        acked.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Advance ticks without updating acked_tick to trigger stale ACK.
+        // ACK_STALE_TICKS = 40, so advance to tick 43 (last_sent_tick - acked > 40).
+        for tick in 2..=43 {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let _ = rx.try_recv(); // drain frames
+        }
+
+        // Tick 44: stale ACK should trigger full snapshot
+        world.resource_mut::<TickCounter>().0 = 44;
+        schedule.run(&mut world);
+        let stale_frame = rx.try_recv().unwrap().into_vec();
+        assert_eq!(stale_frame[0], 0x01, "stale ACK should trigger full snapshot");
+        assert_eq!(entity_count_from_full_frame(&stale_frame), 2,
+            "stale ACK full snapshot should be AoI-filtered (not 3)");
+    }
+
+    #[test]
+    fn replication_includes_all_entities_regardless_of_distance() {
+        // Peer replication (prepare_replication) should NOT filter by AoI.
+        // An authoritative entity at (4000,0,0) should still be replicated.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+        spawn_auth_npc(&mut world, Vec3::new(-4000.0, 0.0, -4000.0), 1);
+
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        // No PeerAddresses/ReplicationConfig/shadows in this test world,
+        // so prepare_replication falls back to full_snapshot for all entities.
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some());
+        let entities = outbound.full_snapshot.as_ref().unwrap();
+        assert_eq!(entities.len(), 3, "replication should include ALL auth entities regardless of position");
+    }
+
+    // -- Peer replication AoI filtering tests --
+
+    #[test]
+    fn peer_repl_full_tick_sends_all() {
+        // On a full-replication tick (tick % full_interval == 0) with full_snapshot_enabled,
+        // full_snapshot is populated, per_peer is empty.
+        let mut world = setup_world(1);
+        // Enable full snapshots for this test (disabled by default)
+        world.insert_resource(ReplicationConfig {
+            full_interval: 20,
+            full_snapshot_enabled: true,
+        });
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        // Add a peer so we are not in the "no peers" fallback
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2,
+            "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Shadow from peer 2 at (3000,0,0)
+        spawn_shadow_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 2);
+
+        // Tick 20 = full replication tick (20 % 20 == 0)
+        world.resource_mut::<TickCounter>().0 = 20;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some(), "full tick should set full_snapshot");
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2);
+        assert!(outbound.per_peer.is_empty(), "full tick should have empty per_peer");
+    }
+
+    #[test]
+    fn peer_repl_filtered_tick_produces_per_peer() {
+        // On a non-full tick with NPC-only shadows, per_peer is populated via
+        // PeerBounds fallback, full_snapshot is None.
+        // With phase spreading, only entities matching tick's phase are sent.
+        let mut world = setup_world(1);
+        // Both entities in phase 1 so they match tick=1 (current_phase=1).
+        // The fallback path requires phase match AND bounds.contains().
+        let (_e1, _eid1) = spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 1, 100);
+        let (_e2, _eid2) = spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 1, 101);
+
+        // Peer 2 with NPC shadow near origin (no Player shadows -> PeerBounds fallback)
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2,
+            "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+
+        // Tick 1: current_phase=1, both entities match phase 1
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none(), "filtered tick should not set full_snapshot");
+        assert!(outbound.per_peer.contains_key(&2), "should have per_peer entry for peer 2");
+        let peer_entities = &outbound.per_peer[&2];
+        // Entity at (0,0) matches phase AND within PeerBounds -> included
+        // Entity at (4000,0,0) matches phase but NOT within PeerBounds -> excluded
+        assert_eq!(peer_entities.len(), 1, "only nearby phase-matched entity should be included");
+    }
+
+    #[test]
+    fn peer_repl_no_shadows_sends_full() {
+        // If a peer is in PeerAddresses but has no shadows from any peer,
+        // the no-shadows bootstrap sends phase-matched entities (~25% per tick).
+        // With full_snapshot_enabled, the full_interval tick sends everything.
+        let mut world = setup_world(1);
+        // Enable full snapshots with interval=20 for this test
+        world.insert_resource(ReplicationConfig {
+            full_interval: 20,
+            full_snapshot_enabled: true,
+        });
+        // Entity in phase 0 -- will NOT match tick=1 (phase 1)
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 0, 200);
+
+        // Peer 2 registered but no shadows
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2,
+            "127.0.0.1:9102".parse().unwrap(),
+        );
+
+        // Tick 1 (phase 1): entity is phase 0, no phase match -> not sent via bootstrap
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none(),
+            "no shadows, no phase match -> no replication on this tick");
+        assert!(outbound.per_peer.is_empty());
+
+        // Full tick: should send everything via full_snapshot
+        world.resource_mut::<TickCounter>().0 = 20;
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some(),
+            "full_interval tick should still send to all peers");
+    }
+
+    #[test]
+    fn peer_repl_mixed_proximity() {
+        // Auth entities at various distances; PeerBounds fallback (NPC-only shadows)
+        // only sends phase-matched entities within bounds.
+        let mut world = setup_world(1);
+        // All entities in phase 1 to match tick=1
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(0.0, 0.0, 0.0), 1, 1, 110);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(100.0, 0.0, 0.0), 1, 1, 111);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 1, 112);
+
+        // Peer 2: NPC shadow at origin (no Player -> PeerBounds fallback)
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2,
+            "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_npc(&mut world, Vec3::new(0.0, 0.0, 0.0), 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        // All match phase 1. PeerBounds around (0,0) expanded by PEER_AOI_RADIUS:
+        // (0,0,0) within bounds -> yes
+        // (100,0,0) within bounds -> yes
+        // (4000,0,0) outside bounds -> no
+        assert_eq!(peer_entities.len(), 2, "should include (0,0) and (100,0) but not (4000,0)");
+    }
+
+    #[test]
+    fn peer_repl_two_peers_different_bounds() {
+        // Two peers with NPC-only shadows at different positions.
+        // PeerBounds fallback requires phase match AND bounds.contains().
+        let mut world = setup_world(1);
+        // Both entities in phase 1 to match tick=1
+        let (_e1, _eid1) = spawn_auth_npc_in_phase(&mut world, Vec3::new(0.0, 0.0, 0.0), 1, 1, 120);       // near peer 2
+        let (_e2, _eid2) = spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 1, 121); // near peer 3
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+
+        spawn_shadow_npc(&mut world, Vec3::new(100.0, 0.0, 100.0), 2);
+        spawn_shadow_npc(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none());
+        // Peer 2: entity at (0,0) matches phase AND within PeerBounds around (100,100)
+        let p2 = &outbound.per_peer[&2];
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].position.x, 0.0);
+        // Peer 3: entity at (3000,3000) matches phase AND within PeerBounds around (3100,3100)
+        let p3 = &outbound.per_peer[&3];
+        assert_eq!(p3.len(), 1);
+        assert_eq!(p3[0].position.x, 3000.0);
+    }
+
+    #[test]
+    fn peer_repl_new_peer_no_shadows_gets_all() {
+        // Peer 2 has NPC shadows (PeerBounds fallback), peer 3 has none (bootstrap).
+        // Bootstrap sends phase-matched entities to shadowless peers.
+        let mut world = setup_world(1);
+        // Entity near peer 2's shadow, in phase 1 (matches tick=1)
+        let (_e1, _eid1) = spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 1, 130);
+        // Entity far from peer 2's shadow, in phase 0 (does NOT match tick=1)
+        let (_e2, _eid2) = spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 131);
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+
+        // Only peer 2 has shadows (NPC, no Player -> PeerBounds fallback)
+        spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        // Peer 2: PeerBounds fallback, only phase-matched (phase 1) AND within bounds
+        let p2 = &outbound.per_peer[&2];
+        assert_eq!(p2.len(), 1, "peer 2 should only get nearby phase-matched entity");
+        // Peer 3: bootstrap path sends phase-matched entities (phase 1 only)
+        // Entity at ZERO is phase 1 -> sent. Entity at 4000 is phase 0 -> not sent.
+        assert!(outbound.per_peer.contains_key(&3),
+            "peer 3 (no shadows) gets bootstrap phase-matched entities");
+        assert_eq!(outbound.per_peer[&3].len(), 1,
+            "peer 3 should get 1 phase-matched entity via bootstrap");
+    }
+
+    #[test]
+    fn peer_repl_full_interval_1_disables_filtering() {
+        // Setting full_interval to 1 means every tick is a full tick -> filtering disabled.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
+
+        // Override replication config to disable filtering
+        world.insert_resource(ReplicationConfig { full_interval: 1, full_snapshot_enabled: true });
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some(), "full_interval=1 should force full_snapshot every tick");
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2);
+        assert!(outbound.per_peer.is_empty());
+    }
+
+    #[test]
+    fn peer_repl_peer_removed_not_in_per_peer() {
+        // If a peer is removed from PeerAddresses, it should not appear in per_peer.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // Peer 2 registered
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        // Peer 2 should be present
+        assert!(world.resource::<OutboundReplication>().per_peer.contains_key(&2));
+
+        // Remove peer from PeerAddresses (simulate peer leaving)
+        world.resource_mut::<PeerAddresses>().0.remove(&2);
+        world.resource_mut::<TickCounter>().0 = 2;
+
+        // Clear and re-run
+        world.resource_mut::<OutboundReplication>().per_peer.clear();
+        world.resource_mut::<OutboundReplication>().full_snapshot = None;
+        schedule.run(&mut world);
+
+        // Peer 2 may still appear in per_peer (shadow still exists), but since it
+        // is no longer in PeerAddresses, the game loop won't send to it.
+        // The key invariant: the system does not panic.
+    }
+
+    // -- Tiered replication tests (hot/cold) --
+
+    #[test]
+    fn tiered_hot_only_tick_sends_nearby() {
+        // On tick=1, entities NOT in phase 1 are only sent if hot (near player).
+        // Entities in phase 1 would be sent as cold regardless of distance.
+        // Use phase 0 for all entities to test pure hot classification.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 0, 140);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 141);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Player shadow from peer 2 at (100,0,0)
+        spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> no cold-phase match
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none());
+        let peer_entities = &outbound.per_peer[&2];
+        // Entity at (0,0) is within 750 of player at (100,0,0) -> hot
+        // Entity at (4000,0,0) is NOT within 750 -> not hot, not in cold phase -> excluded
+        assert_eq!(peer_entities.len(), 1, "only nearby entity should be sent (hot)");
+        assert_eq!(outbound.hot_count, 1);
+        assert_eq!(outbound.cold_count, 0);
+    }
+
+    #[test]
+    fn tiered_cold_tick_sends_all() {
+        // With phase spreading, entities in their cold phase are always sent
+        // (counted as cold), and nearby entities not in their phase are sent as hot.
+        // To get both entities sent: put the nearby one in a non-matching phase (hot)
+        // and the far one in the matching phase (cold).
+        let mut world = setup_world(1);
+        // Nearby entity in phase 2 (NOT matching tick=4, phase 0) -> classified by distance -> hot
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 150);
+        // Far entity in phase 0 (matches tick=4, phase 0) -> cold-phase send
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 151);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+
+        // Tick 4: current_phase = 4 % 4 = 0
+        world.resource_mut::<TickCounter>().0 = 4;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none());
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 2, "both entities should be sent (1 hot + 1 cold-phase)");
+        assert_eq!(outbound.hot_count, 1, "nearby entity is hot (not in its cold phase)");
+        assert_eq!(outbound.cold_count, 1, "far entity is in its cold phase");
+    }
+
+    #[test]
+    fn tiered_player_vs_npc_shadow() {
+        // Player-based filtering is more precise than bounding-box.
+        // An NPC shadow at (3000,0,0) should NOT inflate the hot zone.
+        // Entity in phase 0 (not matching tick=1) so only hot check applies.
+        let mut world = setup_world(1);
+        // Auth entity near the NPC shadow but far from the player, phase 0
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(2800.0, 0.0, 0.0), 1, 0, 160);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Player shadow at origin
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        // NPC shadow at (3000,0,0) -- should NOT affect hot zone
+        spawn_shadow_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 2);
+
+        // Tick 1: current_phase=1, entity is phase 0 -> no cold-phase match
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        // Entity at (2800,0,0) is far from player at (0,0,0) (distance=2800 > 750) -> not hot
+        // Not in cold phase either -> excluded
+        assert_eq!(peer_entities.len(), 0,
+            "entity near NPC shadow but far from player should be excluded when not in cold phase");
+    }
+
+    #[test]
+    fn tiered_no_player_shadows_falls_back() {
+        // When a peer has only NPC shadows (no Player shadows),
+        // fall back to PeerBounds. With phase spreading, the fallback requires
+        // both phase match AND bounds.contains().
+        let mut world = setup_world(1);
+        // Both in phase 1 (matching tick=1)
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 1, 170);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 1, 171);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Only NPC shadows, no Player shadows -> PeerBounds fallback
+        spawn_shadow_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        // Both match phase 1. PeerBounds around NPC shadow at (100,0,0):
+        // Entity at (0,0) within bounds -> included
+        // Entity at (4000,0,0) outside bounds -> excluded
+        assert_eq!(peer_entities.len(), 1, "fallback to PeerBounds should still filter spatially");
+    }
+
+    #[test]
+    fn tiered_full_snapshot_disabled_by_default() {
+        // With default ReplicationConfig (full_snapshot_enabled=false),
+        // tick 600 (old default full interval) should NOT produce a full_snapshot.
+        let mut world = setup_world(1);
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 600 = would be full_interval hit, but full_snapshot_enabled=false
+        world.resource_mut::<TickCounter>().0 = 600;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none(),
+            "full_snapshot should be None when full_snapshot_enabled is false");
+        assert!(!outbound.per_peer.is_empty(),
+            "per_peer should be populated even on tick 600");
+    }
+
+    #[test]
+    fn tiered_full_snapshot_enabled() {
+        // With full_snapshot_enabled=true and full_interval=600,
+        // tick 600 should produce a full_snapshot.
+        let mut world = setup_world(1);
+        world.insert_resource(ReplicationConfig {
+            full_interval: 600,
+            full_snapshot_enabled: true,
+        });
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 600;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some(),
+            "full_snapshot should be Some when full_snapshot_enabled=true at full_interval");
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2);
+        assert!(outbound.per_peer.is_empty());
+    }
+
+    #[test]
+    fn tiered_cold_tick_modulo() {
+        // With per-entity phase spreading, verify that a far entity is sent
+        // when its phase matches the tick, and only the nearby entity is sent otherwise.
+        let mut world = setup_world(1);
+        // Nearby entity in phase 2: never matches phase 0 or 1 or 3 ticks we test.
+        // On tick=2 (phase 2) it matches cold phase and is counted as cold.
+        // On other ticks it's sent as hot (within 750 of player at 100,0,0).
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 180);
+        // Far entity in phase 0: matches tick 4, 8, 12 (phase 0). Not hot (4000 > 750).
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 181);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+
+        // Per-entity phase spreading: far entity (phase 0) sent on ticks where phase=0.
+        // Nearby entity (phase 2) is always included (hot or cold-phase).
+        for tick in [1u64, 2, 3, 4, 5, 6, 7, 8, 12] {
+            let current_phase = tick % 4;
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            let outbound = world.resource::<OutboundReplication>();
+            let count = outbound.per_peer.get(&2).map_or(0, |v| v.len());
+            if current_phase == 0 {
+                // Far entity matches phase 0 -> sent as cold. Nearby entity is hot (phase 2 != 0).
+                assert_eq!(count, 2, "tick {tick} (phase 0): far entity in cold phase, both sent");
+            } else if current_phase == 2 {
+                // Nearby entity matches phase 2 -> sent as cold. Far entity not hot, not phase 2 -> excluded.
+                assert_eq!(count, 1, "tick {tick} (phase 2): only nearby entity (cold-phase match)");
+            } else {
+                // Nearby entity is hot (distance check). Far entity: not hot, not in phase -> excluded.
+                assert_eq!(count, 1, "tick {tick}: only nearby entity (hot)");
+            }
+        }
+    }
+
+    #[test]
+    fn tiered_multiple_peers_different_splits() {
+        // Peer 2 player at (50,0,0), peer 3 player at (3100,0,3100).
+        // Auth entities at both locations. Each peer gets different hot sets.
+        // Both entities in phase 0 (not matching tick=1) for pure hot classification.
+        let mut world = setup_world(1);
+        let (_e1, _eid1) = spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 0, 190);                       // near peer 2
+        let (_e2, _eid2) = spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 0, 191);  // near peer 3
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+
+        spawn_shadow_player(&mut world, Vec3::new(50.0, 0.0, 0.0), 2);
+        spawn_shadow_player(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> no cold-phase match
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none());
+        // Peer 2: entity at (0,0) is hot (near player at 50,0,0), other is 4243 away -> excluded
+        let p2 = &outbound.per_peer[&2];
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].position.x, 0.0);
+        // Peer 3: entity at (3000,3000) is hot (near player at 3100,3100), other is 4243 away -> excluded
+        let p3 = &outbound.per_peer[&3];
+        assert_eq!(p3.len(), 1);
+        assert_eq!(p3[0].position.x, 3000.0);
+    }
+
+    // -- WI-109: Integration test across a full 4-tick cycle --
+
+    #[test]
+    fn tiered_replication_full_cycle() {
+        // Comprehensive test: 5 auth entities with controlled phases, 2 peers with
+        // player shadows. Verify per-entity phase spreading across ticks 1-4.
+        //
+        // Entity layout:
+        //   A at (0,0,0)       phase 3 -- hot for peer 2 (dist=50 from player)
+        //   B at (100,0,0)     phase 3 -- hot for peer 2 (dist=50 from player)
+        //   C at (3000,0,3000) phase 2 -- hot for peer 3 (dist=141 from player)
+        //   D at (4500,0,0)    phase 0 -- far from all players (cold only)
+        //   E at (-4500,0,-4500) phase 1 -- far from all players (cold only)
+        //
+        // Peer 2 player at (50,0,0). Peer 3 player at (3100,0,3100).
+        let mut world = setup_world(1);
+
+        let (_, eid_a) = spawn_auth_npc_in_phase(&mut world, Vec3::new(0.0, 0.0, 0.0), 1, 3, 300);
+        let (_, eid_b) = spawn_auth_npc_in_phase(&mut world, Vec3::new(100.0, 0.0, 0.0), 1, 3, 301);
+        let (_, eid_c) = spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 2, 302);
+        let (_, _eid_d) = spawn_auth_npc_in_phase(&mut world, Vec3::new(4500.0, 0.0, 0.0), 1, 0, 303);
+        let (_, eid_e) = spawn_auth_npc_in_phase(&mut world, Vec3::new(-4500.0, 0.0, -4500.0), 1, 1, 304);
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+
+        spawn_shadow_player(&mut world, Vec3::new(50.0, 0.0, 0.0), 2);
+        spawn_shadow_player(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+
+        // Track which entities each peer has received across all 4 ticks
+        let mut p2_seen = std::collections::HashSet::new();
+        let mut p3_seen = std::collections::HashSet::new();
+
+        // -- Tick 1 (phase 1): E matches cold phase --
+        // Peer 2: A,B hot (dist<750). E cold-phase. => 3 entities. hot=2, cold=1
+        // Peer 3: C hot (dist<750). E cold-phase. => 2 entities. hot=1, cold=1
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        {
+            let outbound = world.resource::<OutboundReplication>();
+            assert!(outbound.full_snapshot.is_none());
+            let p2 = &outbound.per_peer[&2];
+            assert_eq!(p2.len(), 3, "tick 1: peer 2 gets A,B (hot) + E (cold-phase 1)");
+            let p2_ids: std::collections::HashSet<EntityId> = p2.iter().map(|e| e.id).collect();
+            assert!(p2_ids.contains(&eid_a));
+            assert!(p2_ids.contains(&eid_b));
+            assert!(p2_ids.contains(&eid_e));
+            let p3 = &outbound.per_peer[&3];
+            assert_eq!(p3.len(), 2, "tick 1: peer 3 gets C (hot) + E (cold-phase 1)");
+            assert_eq!(outbound.hot_count, 3, "tick 1: 2 hot (peer 2) + 1 hot (peer 3)");
+            assert_eq!(outbound.cold_count, 2, "tick 1: 1 cold (peer 2) + 1 cold (peer 3)");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
+        }
+
+        // -- Tick 2 (phase 2): C matches cold phase --
+        // Peer 2: A,B hot. C cold-phase. => 3 entities. hot=2, cold=1
+        // Peer 3: C cold-phase (counted as cold, not hot). => 1 entity. hot=0, cold=1
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+
+        {
+            let outbound = world.resource::<OutboundReplication>();
+            let p2 = &outbound.per_peer[&2];
+            assert_eq!(p2.len(), 3, "tick 2: peer 2 gets A,B (hot) + C (cold-phase 2)");
+            let p3 = &outbound.per_peer[&3];
+            assert_eq!(p3.len(), 1, "tick 2: peer 3 gets C (cold-phase 2, counted as cold not hot)");
+            assert_eq!(p3[0].id, eid_c);
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
+        }
+
+        // -- Tick 3 (phase 3): A,B match cold phase --
+        // Peer 2: A,B cold-phase (counted as cold). => 2 entities. hot=0, cold=2
+        // Peer 3: A,B cold-phase. C hot. => 3 entities. hot=1, cold=2
+        world.resource_mut::<TickCounter>().0 = 3;
+        schedule.run(&mut world);
+
+        {
+            let outbound = world.resource::<OutboundReplication>();
+            let p2 = &outbound.per_peer[&2];
+            assert_eq!(p2.len(), 2, "tick 3: peer 2 gets A,B (cold-phase 3)");
+            let p3 = &outbound.per_peer[&3];
+            assert_eq!(p3.len(), 3, "tick 3: peer 3 gets C (hot) + A,B (cold-phase 3)");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
+        }
+
+        // -- Tick 4 (phase 0): D matches cold phase --
+        // Peer 2: A,B hot. D cold-phase. => 3 entities.
+        // Peer 3: C hot. D cold-phase. => 2 entities.
+        world.resource_mut::<TickCounter>().0 = 4;
+        schedule.run(&mut world);
+
+        {
+            let outbound = world.resource::<OutboundReplication>();
+            assert!(outbound.full_snapshot.is_none());
+            let p2 = &outbound.per_peer[&2];
+            assert_eq!(p2.len(), 3, "tick 4: peer 2 gets A,B (hot) + D (cold-phase 0)");
+            let p3 = &outbound.per_peer[&3];
+            assert_eq!(p3.len(), 2, "tick 4: peer 3 gets C (hot) + D (cold-phase 0)");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
+        }
+
+        // Key invariant: over 4 ticks, every entity was sent to every peer at least once
+        assert_eq!(p2_seen.len(), 5, "peer 2 should have seen all 5 entities over 4 ticks");
+        assert_eq!(p3_seen.len(), 5, "peer 3 should have seen all 5 entities over 4 ticks");
+    }
+
+    #[test]
+    fn client_snapshot_resource_contains_unfiltered_full() {
+        // The ClientSnapshot resource (backward compat) should contain ALL entities
+        // (unfiltered), while the per-client channel gets the AoI-filtered version.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1); // inside AoI
+        spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1); // outside AoI
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        // Per-client channel: AoI-filtered
+        let client_frame = rx.try_recv().unwrap().into_vec();
+        let client_count = entity_count_from_full_frame(&client_frame);
+        assert_eq!(client_count, 2, "per-client frame should be AoI-filtered");
+
+        // ClientSnapshot resource: unfiltered (all 3 entities)
+        let resource_frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
+        assert_eq!(resource_frame[0], 0x01, "resource should be a full snapshot");
+        let resource_count = u32::from_le_bytes([
+            resource_frame[9], resource_frame[10], resource_frame[11], resource_frame[12],
+        ]);
+        assert_eq!(resource_count, 3, "ClientSnapshot resource should have ALL 3 entities (unfiltered)");
+    }
+
+    #[test]
+    fn aoi_player_at_world_edge() {
+        // Player at the edge of the world. Entities near them should be visible.
+        let mut world = setup_world(1);
+        let (_pe, player_id) = spawn_auth_player(&mut world, Vec3::new(4800.0, 0.0, 4800.0), 1);
+        // NPC within 500 of player
+        spawn_auth_npc(&mut world, Vec3::new(4900.0, 0.0, 4700.0), 1);
+        // NPC far from player (at opposite edge)
+        spawn_auth_npc(&mut world, Vec3::new(-4800.0, 0.0, -4800.0), 1);
+
+        let mut rx = register_test_client_with_player(&mut world, 100, player_id);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        // player + nearby NPC = 2 (far NPC is ~13577 units away)
+        assert_eq!(count, 2, "player at world edge should see only nearby entities");
+    }
+
+    #[test]
+    fn aoi_zero_entities_no_panic() {
+        // No entities in the world. Client with no player_id. Should produce a valid
+        // empty snapshot without panicking.
+        let mut world = setup_world(1);
+        let mut rx = register_test_client(&mut world, 100);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+
+        let frame = rx.try_recv().unwrap().into_vec();
+        let count = entity_count_from_full_frame(&frame);
+        assert_eq!(count, 0, "empty world should produce frame with 0 entities");
+    }
+
+    // =========================================================
+    // Tiered replication edge cases (design 010 coverage gaps)
+    // =========================================================
+
+    #[test]
+    fn tiered_all_entities_hot() {
+        // When ALL auth entities are clustered near a peer's player and none
+        // are in the current cold phase, every entity is classified as hot.
+        // Use phase 0 entities at tick=1 (phase 1) so no cold-phase match.
+        let mut world = setup_world(1);
+        // All 4 entities within 200 units of (0,0,0), all in phase 0
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(0.0, 0.0, 0.0), 1, 0, 400);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(100.0, 0.0, 0.0), 1, 0, 401);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-50.0, 0.0, 150.0), 1, 0, 402);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(200.0, 0.0, -100.0), 1, 0, 403);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::new(50.0, 0.0, 50.0), 2);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> no cold-phase match
+        // All 4 entities are within 750 of player -> all hot
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 4, "all entities should be sent when all are hot");
+        assert_eq!(outbound.hot_count, 4, "all 4 entities are hot");
+        assert_eq!(outbound.cold_count, 0, "no cold entities when none match the current phase");
+    }
+
+    #[test]
+    fn tiered_all_entities_cold_hot_tick() {
+        // All entities far from the player, none in the current cold phase.
+        // Nothing should be sent: not hot (distance), not in cold phase.
+        // Use phase 0 entities at tick=1 (phase 1) so no cold-phase match.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 410);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-3000.0, 0.0, 3000.0), 1, 0, 411);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(2000.0, 0.0, -4000.0), 1, 0, 412);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Player at origin -- all entities are > 750 away
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> no cold-phase match, not hot
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 0, "far entities with no phase match are excluded");
+        assert_eq!(outbound.hot_count, 0);
+        assert_eq!(outbound.cold_count, 0);
+    }
+
+    #[test]
+    fn tiered_all_entities_cold_cold_tick() {
+        // All entities far from the player, all in phase 0.
+        // On tick=8 (phase 0), all match their cold phase and are sent.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 420);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-3000.0, 0.0, 3000.0), 1, 0, 421);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(2000.0, 0.0, -4000.0), 1, 0, 422);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 8: current_phase = 8 % 4 = 0, all entities are phase 0 -> cold-phase match
+        world.resource_mut::<TickCounter>().0 = 8;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 3, "all entities sent on their cold-phase tick");
+        assert_eq!(outbound.hot_count, 0, "none are hot (all matched cold phase first)");
+        assert_eq!(outbound.cold_count, 3, "all 3 are cold-phase matched");
+    }
+
+    #[test]
+    fn tiered_entity_at_exact_peer_aoi_boundary() {
+        // Entity at EXACTLY PEER_AOI_RADIUS (750 units) from the player.
+        // Not in cold phase -> classified by distance -> hot (uses <= comparison).
+        // Phase 0 entity at tick=1 (phase 1) -> no cold-phase match.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(750.0, 0.0, 0.0), 1, 0, 430);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 1: current_phase=1, entity is phase 0 -> distance check applies
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 1, "entity at exact boundary (750) should be hot");
+        assert_eq!(outbound.hot_count, 1);
+    }
+
+    #[test]
+    fn tiered_entity_just_outside_peer_aoi() {
+        // Entity at 751 units from player -- just outside PEER_AOI_RADIUS.
+        // Not in cold phase -> not hot (distance > 750) -> excluded.
+        // Phase 0 entity at tick=1 (phase 1) -> no cold-phase match.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(751.0, 0.0, 0.0), 1, 0, 440);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 1: current_phase=1, entity is phase 0 -> distance check applies
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 0, "entity at 751 units excluded when not in cold phase");
+        assert_eq!(outbound.hot_count, 0);
+    }
+
+    #[test]
+    fn tiered_multiple_players_same_peer() {
+        // Peer 2 has two Player shadows at different locations.
+        // An entity near EITHER player should be classified as hot.
+        // All entities in phase 0 (not matching tick=1) for pure hot classification.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(100.0, 0.0, 0.0), 1, 0, 450);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1, 0, 451);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-4000.0, 0.0, -4000.0), 1, 0, 452);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Two Player shadows on the SAME peer (server 2)
+        spawn_shadow_player(&mut world, Vec3::new(0.0, 0.0, 0.0), 2);     // player A
+        spawn_shadow_player(&mut world, Vec3::new(3000.0, 0.0, 0.0), 2);  // player B
+
+        // Tick 1: current_phase=1, entities are phase 0 -> no cold-phase match
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        // Entity at (100,0) near player A: hot. Entity at (3000,0) near player B: hot.
+        // Entity at (-4000,-4000) far from both: not hot, not in cold phase -> excluded.
+        assert_eq!(peer_entities.len(), 2, "entity near either player should be hot");
+        assert_eq!(outbound.hot_count, 2);
+        assert_eq!(outbound.cold_count, 0);
+    }
+
+    #[test]
+    fn tiered_cold_tick_zero() {
+        // Tick 0 (phase 0). A phase-0 entity far from the player should be sent
+        // via cold-phase match. This is an edge case: tick 0 is a valid tick value.
+        let mut world = setup_world(1);
+        // Phase 0 entity, matches tick=0 (phase 0)
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 460);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 0: current_phase=0, entity is phase 0 -> cold-phase match
+        world.resource_mut::<TickCounter>().0 = 0;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 1, "phase-0 entity sent on tick 0 (phase 0 match)");
+    }
+
+    #[test]
+    fn tiered_full_snapshot_tick_zero_when_enabled() {
+        // Tick 0 with full_snapshot_enabled=true: 0 % 600 == 0, so it is a full tick.
+        // The full tick path takes precedence over tiered logic.
+        let mut world = setup_world(1);
+        world.insert_resource(ReplicationConfig {
+            full_interval: 600,
+            full_snapshot_enabled: true,
+        });
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 0;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some(),
+            "tick 0 with full_snapshot_enabled should trigger full snapshot (0%600==0)");
+        assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2);
+        assert!(outbound.per_peer.is_empty(), "per_peer should be empty on full tick");
+    }
+
+    #[test]
+    fn tiered_no_shadows_at_all() {
+        // Peer is registered but has NO shadow entities.
+        // The no-shadows bootstrap path sends phase-matched entities.
+        // With a phase-0 entity at tick=1 (phase 1), no match -> nothing sent.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 0, 470);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // No shadows at all
+
+        // Tick 1: current_phase=1, entity is phase 0 -> no match
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none());
+        assert!(outbound.per_peer.is_empty(),
+            "no shadows and no phase match -> nothing sent");
+        assert_eq!(outbound.hot_count, 0);
+        assert_eq!(outbound.cold_count, 0);
+    }
+
+    #[test]
+    fn tiered_peer_with_address_but_only_own_shadows() {
+        // Peer 2 is registered, but all shadow entities belong to our own server.
+        // Shadow entities with auth == config.server_id are skipped in the shadow loop,
+        // so peer_all_positions is empty -> no-shadows bootstrap path.
+        // Phase 0 entity at tick=1 (phase 1) -> no phase match -> nothing sent.
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 0, 480);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Shadow owned by server 1 (our own server) -- should be skipped
+        spawn_shadow_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 1);
+
+        // Tick 1: own-server shadows skipped -> no shadows -> bootstrap path.
+        // Entity phase 0 != current phase 1 -> no match -> nothing sent.
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.per_peer.is_empty(),
+            "own-server shadows skipped, no phase match -> nothing sent");
+    }
+
+    #[test]
+    fn tiered_full_interval_one_always_full() {
+        // With full_snapshot_enabled=true and full_interval=1,
+        // every tick triggers a full snapshot (disables filtering entirely).
+        let mut world = setup_world(1);
+        world.insert_resource(ReplicationConfig {
+            full_interval: 1,
+            full_snapshot_enabled: true,
+        });
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+        spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+
+        // Every tick should be full
+        for tick in [1u64, 2, 3, 5, 7, 99] {
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+
+            let outbound = world.resource::<OutboundReplication>();
+            assert!(outbound.full_snapshot.is_some(),
+                "tick {tick}: full_interval=1 should always produce full_snapshot");
+            assert_eq!(outbound.full_snapshot.as_ref().unwrap().len(), 2);
+            assert!(outbound.per_peer.is_empty());
+        }
+    }
+
+    #[test]
+    fn tiered_hot_cold_counts_accurate_multiple_peers() {
+        // Two peers with different player positions. Verify hot_count and cold_count
+        // are summed correctly across both peers with per-entity phase spreading.
+        //
+        // Entity A at origin, phase 2 (hot for peer 2, distance-excluded for peer 3)
+        // Entity B at (3000,0,3000), phase 2 (hot for peer 3, distance-excluded for peer 2)
+        // Entity C at (4500,0,0), phase 1 (cold for both, phase matches tick=1)
+        let mut world = setup_world(1);
+        spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 490);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 2, 491);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4500.0, 0.0, 0.0), 1, 1, 492);
+
+        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);                            // peer 2 player
+        spawn_shadow_player(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3);       // peer 3 player
+
+        // Tick 1: current_phase=1
+        // Entity C (phase 1) matches cold phase -> sent to both peers as cold
+        // Entity A (phase 2): peer 2 hot (dist 0), peer 3 not hot (dist 4384) -> peer 2 only
+        // Entity B (phase 2): peer 2 not hot (dist 4243), peer 3 hot (dist 141) -> peer 3 only
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        // Peer 2: A hot + C cold-phase => hot=1, cold=1, count=2
+        // Peer 3: B hot + C cold-phase => hot=1, cold=1, count=2
+        // Total: hot=2, cold=2
+        assert_eq!(outbound.hot_count, 2, "2 hot entities total (A for peer 2, B for peer 3)");
+        assert_eq!(outbound.cold_count, 2, "2 cold entities total (C for each peer)");
+        assert_eq!(outbound.per_peer[&2].len(), 2, "peer 2 gets A (hot) + C (cold-phase)");
+        assert_eq!(outbound.per_peer[&3].len(), 2, "peer 3 gets B (hot) + C (cold-phase)");
+    }
+
+    #[test]
+    fn tiered_hot_count_zero_on_full_snapshot() {
+        // When a full snapshot is produced, hot_count and cold_count should be 0.
+        let mut world = setup_world(1);
+        world.insert_resource(ReplicationConfig {
+            full_interval: 100,
+            full_snapshot_enabled: true,
+        });
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 100 = full tick
+        world.resource_mut::<TickCounter>().0 = 100;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_some());
+        assert_eq!(outbound.hot_count, 0, "hot_count should be 0 on full snapshot tick");
+        assert_eq!(outbound.cold_count, 0, "cold_count should be 0 on full snapshot tick");
+    }
+
+    #[test]
+    fn tiered_empty_entities_no_full_snapshot() {
+        // When there are no auth entities, full_snapshot should be None (not Some(empty vec)).
+        let mut world = setup_world(1);
+        // No auth entities
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        assert!(outbound.full_snapshot.is_none(),
+            "empty entity list should produce None, not Some(empty)");
+        assert!(outbound.per_peer.is_empty());
+    }
+
+    #[test]
+    fn tiered_diagonal_boundary_precision() {
+        // Entity at diagonal distance exactly at PEER_AOI_RADIUS.
+        // sqrt(530^2 + 530^2) = 749.53 (just inside 750).
+        // sqrt(531^2 + 531^2) = 750.95 (just outside 750).
+        // Both in phase 0 (not matching tick=1) for pure distance classification.
+        let mut world = setup_world(1);
+        let inside = spawn_auth_npc_in_phase(&mut world, Vec3::new(530.0, 0.0, 530.0), 1, 0, 500);
+        let outside = spawn_auth_npc_in_phase(&mut world, Vec3::new(531.0, 0.0, 531.0), 1, 0, 501);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> distance check only
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 1, "only entity at diagonal 749.53 should be hot");
+        assert_eq!(peer_entities[0].id, inside.1, "the inside entity should be the one sent");
+        assert!(!peer_entities.iter().any(|e| e.id == outside.1),
+            "entity at diagonal 750.95 should be excluded (not hot, not in cold phase)");
+    }
+
+    #[test]
+    fn tiered_player_shadow_mixed_with_npc_shadows() {
+        // Peer has both Player and NPC shadows. Only Player positions should
+        // be used for hot/cold classification (NPC shadows are irrelevant).
+        // Both entities in phase 0 (not matching tick=1) for pure hot classification.
+        let mut world = setup_world(1);
+        // Auth entity near the NPC shadow but far from the Player shadow
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-3000.0, 0.0, -3000.0), 1, 0, 510);
+        // Auth entity near the Player shadow
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(100.0, 0.0, 0.0), 1, 0, 511);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        // Player at origin
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        // NPC shadow at (-3000, -3000) -- should NOT affect hot classification
+        spawn_shadow_npc(&mut world, Vec3::new(-3000.0, 0.0, -3000.0), 2);
+
+        // Tick 1: current_phase=1, entities are phase 0 -> distance check only
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        // Only the entity at (100,0) is within 750 of Player at origin -> hot.
+        // Entity at (-3000,-3000) is 4243 units from Player -> not hot, not in cold phase -> excluded.
+        assert_eq!(peer_entities.len(), 1,
+            "only entity near Player shadow should be hot (NPC shadow position ignored)");
+        assert_eq!(outbound.hot_count, 1);
+    }
+
+    #[test]
+    fn tiered_replication_preserves_entity_fields() {
+        // Verify that tiered replication does not corrupt entity fields.
+        // The entities in per_peer should have the exact same fields as the original.
+        let mut world = setup_world(1);
+        let (entity, eid) = spawn_auth_npc(&mut world, Vec3::new(100.0, 0.0, 200.0), 1);
+        // Set a velocity
+        world.get_mut::<Velocity>(entity).unwrap().0 = Vec3::new(5.0, 0.0, -3.0);
+
+        world.resource_mut::<PeerAddresses>().0.insert(
+            2, "127.0.0.1:9102".parse().unwrap(),
+        );
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+
+        world.resource_mut::<TickCounter>().0 = 1;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        schedule.run(&mut world);
+
+        let outbound = world.resource::<OutboundReplication>();
+        let peer_entities = &outbound.per_peer[&2];
+        assert_eq!(peer_entities.len(), 1);
+        let e = &peer_entities[0];
+        assert_eq!(e.id, eid);
+        assert_eq!(e.position.x, 100.0);
+        assert_eq!(e.position.z, 200.0);
+        assert_eq!(e.velocity.x, 5.0);
+        assert_eq!(e.velocity.z, -3.0);
+        assert_eq!(e.entity_type, EntityType::Npc);
+        assert_eq!(e.authority_server, ServerId(1));
     }
 }

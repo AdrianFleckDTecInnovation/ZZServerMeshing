@@ -64,12 +64,12 @@ fi
 
 if $NEED_ARM64; then
   echo "=== Cross-compiling sim-server + board-dash for aarch64 ==="
-  cross build --release --target aarch64-unknown-linux-gnu -p sim-server -p board-dash
+  cargo zigbuild --release --target aarch64-unknown-linux-gnu -p sim-server -p board-dash
   echo ""
 fi
 if $NEED_ARMV7; then
   echo "=== Cross-compiling coordinator for armv7 (Pi Zero W2) ==="
-  cross build --release --target armv7-unknown-linux-gnueabihf -p coordinator
+  cargo zigbuild --release --target armv7-unknown-linux-gnueabihf -p coordinator
   echo ""
 fi
 

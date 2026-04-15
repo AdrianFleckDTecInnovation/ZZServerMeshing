@@ -59,6 +59,17 @@ struct Args {
     /// Path to TLS private key file (PEM).
     #[arg(long)]
     tls_key: Option<PathBuf>,
+
+    /// Full replication interval in ticks. Every N ticks, send ALL entities to
+    /// all peers (unfiltered broadcast). Only used when --full-snapshot is enabled.
+    /// Default: 600 (every 30 seconds at 20Hz). Set to 1 to disable filtering entirely.
+    #[arg(long, default_value_t = 600)]
+    full_repl_interval: u64,
+
+    /// Enable periodic full snapshots to all peers. Disabled by default because
+    /// the cold tier at 5Hz provides sufficient crash recovery coverage.
+    #[arg(long, default_value_t = false)]
+    full_snapshot: bool,
 }
 
 #[tokio::main]
@@ -104,6 +115,12 @@ async fn main() {
 
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
+    // Weighted load: players count 3x, NPCs count 1x
+    let weighted_load_atomic = Arc::new(AtomicU32::new(0));
+    // Outbound coordinator messages (TransferResult, etc.) from game loop
+    let coord_outbound = Arc::new(game_loop::SharedCoordOutbound {
+        queue: std::sync::Mutex::new(Vec::new()),
+    });
 
     // Create metrics collector
     let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
@@ -144,7 +161,9 @@ async fn main() {
         Arc::clone(&shared_coord_events),
         args.advertise_host,
         Arc::clone(&entity_count_atomic),
+        Arc::clone(&weighted_load_atomic),
         use_tls,
+        Arc::clone(&coord_outbound),
     ));
 
     // Create two UDP sender channels: replication (bulk, best-effort) and
@@ -171,6 +190,10 @@ async fn main() {
         udp_ctrl_tx,
         Arc::clone(&metrics_collector),
         Arc::clone(&entity_count_atomic),
+        Arc::clone(&weighted_load_atomic),
+        args.full_repl_interval,
+        args.full_snapshot,
+        Arc::clone(&coord_outbound),
     ));
 
     tokio::select! {
