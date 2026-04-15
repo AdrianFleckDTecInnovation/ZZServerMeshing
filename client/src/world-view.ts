@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { NETCODE, COLORS } from './config';
 
 export interface EntityData {
   id: string;
@@ -44,18 +45,9 @@ function toVec3(v: Vec3Like): THREE.Vector3 {
 }
 
 // Colors for up to 8 servers
-export const SERVER_COLORS = [
-  new THREE.Color(0xff4444), // Server 1 - Red
-  new THREE.Color(0x4488ff), // Server 2 - Blue
-  new THREE.Color(0x44ff44), // Server 3 - Green
-  new THREE.Color(0xffaa00), // Server 4 - Orange
-  new THREE.Color(0xff44ff), // Server 5 - Magenta
-  new THREE.Color(0x00ffff), // Server 6 - Cyan
-  new THREE.Color(0xffff44), // Server 7 - Yellow
-  new THREE.Color(0xffffff), // Server 8 - White
-];
+export const SERVER_COLORS = COLORS.SERVERS.map(c => new THREE.Color(c));
 
-export const PLAYER_COLOR = new THREE.Color(0xffd700); // Gold for players
+export const PLAYER_COLOR = new THREE.Color(COLORS.PLAYER);
 
 export class WorldView {
   entities: Map<string, EntityData> = new Map();
@@ -75,7 +67,6 @@ export class WorldView {
   get measuredHz(): number { return this.displayHz; }
   /** Number of snapshots applied — skip interpolation during warmup */
   private snapshotCount: number = 0;
-  private static readonly WARMUP_SNAPSHOTS = 3;
 
   /** Call for every frame received (before duplicate filtering) to track true network rate */
   countFrame(): void {
@@ -97,8 +88,8 @@ export class WorldView {
     const now = performance.now();
     if (this.prevSnapshotTime > 0) {
       const interval = now - this.prevSnapshotTime;
-      if (interval > 10 && interval < 500) {
-        this.measuredIntervalMs = this.measuredIntervalMs * 0.8 + interval * 0.2;
+      if (interval > NETCODE.INTERVAL_MIN_MS && interval < NETCODE.INTERVAL_MAX_MS) {
+        this.measuredIntervalMs = this.measuredIntervalMs * (1 - NETCODE.INTERVAL_EMA_NEW) + interval * NETCODE.INTERVAL_EMA_NEW;
       }
     }
     this.prevSnapshotTime = now;
@@ -106,7 +97,7 @@ export class WorldView {
     this.snapshotCount++;
 
     // During warmup, don't interpolate — snap to server positions
-    if (this.snapshotCount > WorldView.WARMUP_SNAPSHOTS) {
+    if (this.snapshotCount > NETCODE.WARMUP_SNAPSHOTS) {
       // Run interpolation one last time before applying new data
       // so entity.position reflects what was actually rendered
       this.interpolate(0);
@@ -139,7 +130,7 @@ export class WorldView {
           existing.velocity.copy(vel);
           existing.entityType = raw.entity_type;
           existing.authorityServer = serverId;
-        } else if (this.snapshotCount <= WorldView.WARMUP_SNAPSHOTS) {
+        } else if (this.snapshotCount <= NETCODE.WARMUP_SNAPSHOTS) {
           // During warmup: snap everything, no interpolation
           existing.position.copy(pos);
           existing.previousPosition.copy(pos);
@@ -259,12 +250,6 @@ export class WorldView {
     }
   }
 
-  /** Staleness threshold: entities not updated for this long are removed as a safety net.
-   *  Set slightly above FULL_SNAPSHOT_INTERVAL (5s) to avoid removing entities that are
-   *  merely unchanged between full snapshots. This catches ghost entities from baseline
-   *  drift or missed delta removals. */
-  private static readonly STALE_ENTITY_THRESHOLD_MS = 6000;
-
   interpolate(_dt: number): void {
     const now = performance.now();
 
@@ -272,10 +257,10 @@ export class WorldView {
       // Local player position is managed by the prediction system
       if (entity.id === this.localPlayerId) continue;
 
-      // Safety net: remove entities not updated by the server for >6 seconds.
-      // This catches ghost entities from baseline drift (#018) or missed delta removals (#023).
+      // Safety net: remove entities not updated by the server for too long.
+      // This catches ghost entities from baseline drift or missed delta removals.
       // Full snapshots arrive every 5s, so any legitimate entity will be refreshed well within this window.
-      if (now - entity.lastUpdateTime > WorldView.STALE_ENTITY_THRESHOLD_MS) {
+      if (now - entity.lastUpdateTime > NETCODE.STALE_ENTITY_MS) {
         this.entities.delete(id);
         continue;
       }
@@ -286,7 +271,7 @@ export class WorldView {
       }
       // Per-entity interpolation: each entity tracks its own last update time
       const timeSinceUpdate = now - entity.lastUpdateTime;
-      const alpha = Math.min(timeSinceUpdate / this.measuredIntervalMs, 1.2);
+      const alpha = Math.min(timeSinceUpdate / this.measuredIntervalMs, NETCODE.MAX_INTERPOLATION_ALPHA);
       entity.position.lerpVectors(entity.previousPosition, entity.currentPosition, alpha);
     }
   }

@@ -2,8 +2,9 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { WorldView, SERVER_COLORS, PLAYER_COLOR, EntityData } from './world-view';
 import { NetworkClient } from './network';
+import { RENDERING, COLORS } from './config';
 
-const LOCAL_PLAYER_COLOR = new THREE.Color(0x00ff88);
+const LOCAL_PLAYER_COLOR = new THREE.Color(COLORS.LOCAL_PLAYER);
 
 export class Renderer {
   private renderer!: THREE.WebGPURenderer;
@@ -37,7 +38,7 @@ export class Renderer {
   private keys = new Set<string>();
   followPlayer = true;
   onRenderFrame: (() => void) | null = null;
-  private cameraOffset = new THREE.Vector3(0, 600, 0);
+  private cameraOffset = new THREE.Vector3(0, RENDERING.CAMERA_HEIGHT, 0);
 
   constructor(worldView: WorldView, network: NetworkClient) {
     this.worldView = worldView;
@@ -46,12 +47,13 @@ export class Renderer {
 
   async init(): Promise<void> {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a2e);
+    this.scene.background = new THREE.Color(COLORS.SCENE_BACKGROUND);
 
     this.camera = new THREE.PerspectiveCamera(
-      90, window.innerWidth / window.innerHeight, 0.1, 20000
+      RENDERING.CAMERA_FOV, window.innerWidth / window.innerHeight,
+      RENDERING.CAMERA_NEAR, RENDERING.CAMERA_FAR
     );
-    this.camera.position.set(0, 2000, 0);
+    this.camera.position.set(0, RENDERING.CAMERA_FOLLOW_HEIGHT, 0);
     this.camera.up.set(0, 0, -1); // Z-forward as "up" so lookAt points straight down
     this.camera.lookAt(0, 0, 0);
 
@@ -65,32 +67,32 @@ export class Renderer {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enabled = false;
 
-    this.scene.add(new THREE.AmbientLight(0x606080, 2));
+    this.scene.add(new THREE.AmbientLight(COLORS.AMBIENT_LIGHT, 2));
     const dir = new THREE.DirectionalLight(0xffffff, 3);
     dir.position.set(200, 400, 200);
     this.scene.add(dir);
 
-    const groundGeom = new THREE.PlaneGeometry(10000, 10000);
+    const groundGeom = new THREE.PlaneGeometry(RENDERING.GROUND_SIZE, RENDERING.GROUND_SIZE);
     const groundMat = new THREE.MeshStandardNodeMaterial();
-    groundMat.color = new THREE.Color(0x1a2a1a);
+    groundMat.color = new THREE.Color(COLORS.GROUND);
     const ground = new THREE.Mesh(groundGeom, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.5;
     this.scene.add(ground);
 
-    this.scene.add(new THREE.GridHelper(10000, 20, 0x333333, 0x222222));
+    this.scene.add(new THREE.GridHelper(RENDERING.GROUND_SIZE, RENDERING.GRID_DIVISIONS, 0x333333, 0x222222));
 
-    const boundsEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(10000, 10, 10000));
-    const boundsLine = new THREE.LineSegments(boundsEdges, new THREE.LineBasicMaterial({ color: 0x444444 }));
+    const boundsEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(RENDERING.GROUND_SIZE, 10, RENDERING.GROUND_SIZE));
+    const boundsLine = new THREE.LineSegments(boundsEdges, new THREE.LineBasicMaterial({ color: COLORS.BOUNDS }));
     boundsLine.position.y = 5;
     this.scene.add(boundsLine);
 
-    // AoI radius ring (500 units) — rendered as a thin ring mesh since WebGPU doesn't support lines well
-    const aoiRadius = 500;
-    const aoiRingGeom = new THREE.RingGeometry(aoiRadius - 3, aoiRadius + 3, 64);
+    // AoI radius ring — rendered as a thin ring mesh since WebGPU doesn't support lines well
+    const t = RENDERING.AOI_RING_THICKNESS;
+    const aoiRingGeom = new THREE.RingGeometry(RENDERING.AOI_RADIUS - t, RENDERING.AOI_RADIUS + t, RENDERING.AOI_RING_SEGMENTS);
     const aoiRingMat = new THREE.MeshBasicNodeMaterial();
-    aoiRingMat.color = new THREE.Color(0x00ff00);
-    aoiRingMat.opacity = 0.4;
+    aoiRingMat.color = new THREE.Color(COLORS.AOI_RING);
+    aoiRingMat.opacity = COLORS.AOI_RING_OPACITY;
     aoiRingMat.transparent = true;
     aoiRingMat.side = THREE.DoubleSide;
     this.aoiCircle = new THREE.Mesh(aoiRingGeom, aoiRingMat);
@@ -99,28 +101,28 @@ export class Renderer {
     this.scene.add(this.aoiCircle);
 
     // Shared geometries
-    this.npcGeometry = new THREE.SphereGeometry(12, 16, 12);
-    this.playerGeometry = new THREE.BoxGeometry(16, 16, 16);
+    this.npcGeometry = new THREE.SphereGeometry(RENDERING.NPC_RADIUS, ...RENDERING.NPC_SEGMENTS);
+    this.playerGeometry = new THREE.BoxGeometry(RENDERING.PLAYER_SIZE, RENDERING.PLAYER_SIZE, RENDERING.PLAYER_SIZE);
 
     // Pre-create shared materials
     for (let i = 0; i < SERVER_COLORS.length; i++) {
       const mat = new THREE.MeshStandardNodeMaterial();
-      mat.roughness = 0.5;
-      mat.metalness = 0.3;
+      mat.roughness = RENDERING.MATERIAL_ROUGHNESS;
+      mat.metalness = RENDERING.MATERIAL_METALNESS;
       mat.color = SERVER_COLORS[i].clone();
       this.serverMaterials.set(i + 1, mat);
     }
 
     this.playerMaterial = new THREE.MeshStandardNodeMaterial();
-    this.playerMaterial.roughness = 0.5;
-    this.playerMaterial.metalness = 0.3;
+    this.playerMaterial.roughness = RENDERING.MATERIAL_ROUGHNESS;
+    this.playerMaterial.metalness = RENDERING.MATERIAL_METALNESS;
     this.playerMaterial.color = PLAYER_COLOR.clone();
 
     this.localPlayerMaterial = new THREE.MeshStandardNodeMaterial();
-    this.localPlayerMaterial.roughness = 0.5;
-    this.localPlayerMaterial.metalness = 0.3;
+    this.localPlayerMaterial.roughness = RENDERING.MATERIAL_ROUGHNESS;
+    this.localPlayerMaterial.metalness = RENDERING.MATERIAL_METALNESS;
     this.localPlayerMaterial.color = LOCAL_PLAYER_COLOR.clone();
-    this.localPlayerMaterial.emissive = new THREE.Color(0x003311);
+    this.localPlayerMaterial.emissive = new THREE.Color(COLORS.LOCAL_PLAYER_EMISSIVE);
 
     // Events
     window.addEventListener('resize', this.onResize.bind(this));
@@ -173,7 +175,7 @@ export class Renderer {
       this.controls.enabled = false;
       const player = this.worldView.entities.get(this.worldView.localPlayerId);
       if (player) {
-        this.camera.position.set(player.position.x, 2000, player.position.z);
+        this.camera.position.set(player.position.x, RENDERING.CAMERA_FOLLOW_HEIGHT, player.position.z);
         this.camera.up.set(0, 0, -1);
         this.camera.lookAt(player.position.x, 0, player.position.z);
         this.aoiCircle.position.set(player.position.x, 1, player.position.z);
@@ -216,7 +218,9 @@ export class Renderer {
       }
 
       // Stack entities vertically by server ID so overlapping ones are all visible from top-down
-      const yOffset = entity.entityType === 'Player' ? 20 : (entity.authorityServer * 8);
+      const yOffset = entity.entityType === 'Player'
+        ? RENDERING.PLAYER_Y_OFFSET
+        : (entity.authorityServer * RENDERING.NPC_Y_OFFSET_PER_SERVER);
       mesh.position.set(entity.position.x, entity.position.y + yOffset, entity.position.z);
 
       // Swap material if authority changed (skip local player)

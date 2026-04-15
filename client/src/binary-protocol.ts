@@ -7,11 +7,11 @@
  *
  * Full Snapshot (type 0x01):
  *   [type:u8][tick:u64][entity_count:u32][metrics:14bytes]
- *   [entity × N: 43 bytes each]
+ *   [entity × N: 47 bytes each]
  *
  * Delta (type 0x02):
  *   [type:u8][tick:u64][update_count:u32][removal_count:u32][metrics:14bytes]
- *   [updated entities × N: 43 bytes each]
+ *   [updated entities × N: 47 bytes each]
  *   [removed UUIDs × M: 16 bytes each]
  *
  * Entity (47 bytes):
@@ -19,10 +19,7 @@
  */
 
 import type { WorldSnapshot, RawEntity, GatewayMetrics } from './world-view';
-
-const FRAME_FULL = 0x01;
-const FRAME_DELTA = 0x02;
-const ENTITY_SIZE = 47;
+import { PROTOCOL } from './config';
 
 // Pre-allocated hex lookup table
 const HEX: string[] = [];
@@ -88,8 +85,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
   const bytes = new Uint8Array(buffer);
   const frameType = bytes[0];
 
-  if (frameType === FRAME_FULL) {
-    // [type:1][tick:8][count:4][metrics:14] = 27 byte header
+  if (frameType === PROTOCOL.FRAME_FULL) {
     const tickLow = view.getUint32(1, true);
     const tickHigh = view.getUint32(5, true);
     const tick = tickLow + tickHigh * 0x100000000;
@@ -97,17 +93,16 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
     const metrics = readMetrics(view, 13);
 
     const entities: RawEntity[] = new Array(entityCount);
-    let offset = 27;
+    let offset = PROTOCOL.FULL_HEADER_SIZE;
     for (let i = 0; i < entityCount; i++) {
       entities[i] = readEntity(view, bytes, offset);
-      offset += ENTITY_SIZE;
+      offset += PROTOCOL.ENTITY_SIZE;
     }
 
     return { type: 'full', tick, metrics, entities, removals: [] };
   }
 
-  if (frameType === FRAME_DELTA) {
-    // [type:1][tick:8][updates:4][removals:4][metrics:14] = 31 byte header
+  if (frameType === PROTOCOL.FRAME_DELTA) {
     const tickLow = view.getUint32(1, true);
     const tickHigh = view.getUint32(5, true);
     const tick = tickLow + tickHigh * 0x100000000;
@@ -116,10 +111,10 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
     const metrics = readMetrics(view, 17);
 
     const entities: RawEntity[] = new Array(updateCount);
-    let offset = 31;
+    let offset = PROTOCOL.DELTA_HEADER_SIZE;
     for (let i = 0; i < updateCount; i++) {
       entities[i] = readEntity(view, bytes, offset);
-      offset += ENTITY_SIZE;
+      offset += PROTOCOL.ENTITY_SIZE;
     }
 
     const removals: string[] = new Array(removalCount);

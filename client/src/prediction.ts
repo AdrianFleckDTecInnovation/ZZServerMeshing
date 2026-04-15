@@ -8,16 +8,13 @@
  */
 
 import type { EntityData } from './world-view';
+import { GAMEPLAY } from './config';
 
 interface PendingInput {
   seq: number;
   direction: [number, number, number];
   dt: number; // actual frame dt when this input was applied
 }
-
-const PLAYER_SPEED = 5.0;
-const MAX_PENDING = 128;
-const CORRECTION_BLEND = 0.2; // exponential blend per reconciliation
 
 export class PredictionManager {
   private seq = 0;
@@ -32,7 +29,7 @@ export class PredictionManager {
     this.seq++;
 
     this.pending.push({ seq: this.seq, direction, dt });
-    if (this.pending.length > MAX_PENDING) {
+    if (this.pending.length > GAMEPLAY.MAX_PENDING_INPUTS) {
       this.pending.shift();
     }
 
@@ -43,8 +40,8 @@ export class PredictionManager {
     if (len > 0) {
       const nx = direction[0] / len;
       const nz = direction[2] / len;
-      entity.position.x += nx * PLAYER_SPEED * dt;
-      entity.position.z += nz * PLAYER_SPEED * dt;
+      entity.position.x += nx * GAMEPLAY.PLAYER_SPEED * dt;
+      entity.position.z += nz * GAMEPLAY.PLAYER_SPEED * dt;
     }
 
     return this.seq;
@@ -68,14 +65,14 @@ export class PredictionManager {
       const [dx, , dz] = input.direction;
       const len = Math.sqrt(dx * dx + dz * dz);
       if (len > 0) {
-        rx += (dx / len) * PLAYER_SPEED * input.dt;
-        rz += (dz / len) * PLAYER_SPEED * input.dt;
+        rx += (dx / len) * GAMEPLAY.PLAYER_SPEED * input.dt;
+        rz += (dz / len) * GAMEPLAY.PLAYER_SPEED * input.dt;
       }
     }
 
     // Smooth blend toward reconciled position
-    entity.position.x += (rx - entity.position.x) * CORRECTION_BLEND;
-    entity.position.z += (rz - entity.position.z) * CORRECTION_BLEND;
+    entity.position.x += (rx - entity.position.x) * GAMEPLAY.CORRECTION_BLEND;
+    entity.position.z += (rz - entity.position.z) * GAMEPLAY.CORRECTION_BLEND;
     // Y stays 0 (flat world)
     entity.position.y = 0;
   }

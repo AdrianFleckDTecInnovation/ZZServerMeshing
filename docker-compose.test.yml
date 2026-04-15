@@ -10,6 +10,8 @@
 #   docker compose -f docker-compose.test.yml up
 #   ./test.sh --docker
 #   docker compose -f docker-compose.test.yml down
+#
+# Configuration: override values in .env or pass as environment variables.
 
 services:
   coordinator:
@@ -17,12 +19,12 @@ services:
       context: .
       dockerfile: docker/Dockerfile.rust
     entrypoint: ["coordinator"]
-    command: ["--port", "7870", "--http-port", "7871"]
+    command: ["--port", "${COORD_WS_PORT:-7870}", "--http-port", "${COORD_HTTP_PORT:-7871}"]
     ports:
-      - "7870:7870"
-      - "7871:7871"
-    cpus: 0.25
-    mem_limit: 512m
+      - "${COORD_WS_PORT:-7870}:${COORD_WS_PORT:-7870}"
+      - "${COORD_HTTP_PORT:-7871}:${COORD_HTTP_PORT:-7871}"
+    cpus: ${DOCKER_CPUS:-0.25}
+    mem_limit: ${DOCKER_MEM:-512m}
     networks:
       - mesh
 
@@ -36,16 +38,16 @@ services:
       "--port", "7878",
       "--udp-port", "9101",
       "--metrics-port", "8101",
-      "--coordinator", "coordinator:7870",
+      "--coordinator", "coordinator:${COORD_WS_PORT:-7870}",
       "--advertise-host", "sim-server-1",
-      "--initial-npcs", "10"
+      "--initial-npcs", "${DOCKER_NPCS_PER_SERVER:-10}"
     ]
     ports:
       - "7878:7878"
       - "8101:8101"
       - "9101:9101/udp"
-    cpus: 0.25
-    mem_limit: 512m
+    cpus: ${DOCKER_CPUS:-0.25}
+    mem_limit: ${DOCKER_MEM:-512m}
     depends_on:
       - coordinator
     networks:
@@ -61,16 +63,16 @@ services:
       "--port", "7879",
       "--udp-port", "9102",
       "--metrics-port", "8102",
-      "--coordinator", "coordinator:7870",
+      "--coordinator", "coordinator:${COORD_WS_PORT:-7870}",
       "--advertise-host", "sim-server-2",
-      "--initial-npcs", "10"
+      "--initial-npcs", "${DOCKER_NPCS_PER_SERVER:-10}"
     ]
     ports:
       - "7879:7879"
       - "8102:8102"
       - "9102:9102/udp"
-    cpus: 0.25
-    mem_limit: 512m
+    cpus: ${DOCKER_CPUS:-0.25}
+    mem_limit: ${DOCKER_MEM:-512m}
     depends_on:
       - coordinator
     networks:
@@ -86,16 +88,16 @@ services:
       "--port", "7880",
       "--udp-port", "9103",
       "--metrics-port", "8103",
-      "--coordinator", "coordinator:7870",
+      "--coordinator", "coordinator:${COORD_WS_PORT:-7870}",
       "--advertise-host", "sim-server-3",
-      "--initial-npcs", "10"
+      "--initial-npcs", "${DOCKER_NPCS_PER_SERVER:-10}"
     ]
     ports:
       - "7880:7880"
       - "8103:8103"
       - "9103:9103/udp"
-    cpus: 0.25
-    mem_limit: 512m
+    cpus: ${DOCKER_CPUS:-0.25}
+    mem_limit: ${DOCKER_MEM:-512m}
     depends_on:
       - coordinator
     networks:

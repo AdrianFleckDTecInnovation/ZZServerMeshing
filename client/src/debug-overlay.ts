@@ -1,4 +1,5 @@
 import { WorldView, SERVER_COLORS } from './world-view';
+import { DIAGNOSTICS } from './config';
 
 interface ServerInfo {
   server_id: number;
@@ -18,7 +19,6 @@ export class DebugOverlay {
   private serverTotals: Map<number, number> = new Map();
   private coordinatorUrl: string;
   private lastPollTime = 0;
-  private static readonly POLL_INTERVAL_MS = 2000;
 
   constructor(worldView: WorldView, coordinatorUrl: string) {
     this.el = document.getElementById('debug-overlay')!;
@@ -33,7 +33,7 @@ export class DebugOverlay {
   /** Poll coordinator /servers for total entity counts */
   private async pollServerTotals(): Promise<void> {
     const now = performance.now();
-    if (now - this.lastPollTime < DebugOverlay.POLL_INTERVAL_MS) return;
+    if (now - this.lastPollTime < DIAGNOSTICS.COORDINATOR_POLL_MS) return;
     this.lastPollTime = now;
     try {
       const url = this.coordinatorUrl ? `${this.coordinatorUrl}/servers` : '/servers';
@@ -91,11 +91,12 @@ export class DebugOverlay {
       const hex = '#' + c.getHexString();
       // Bar shows visible proportion of total
       const barMax = total ?? visible;
-      const barWidth = barMax > 0 ? Math.round((visible / maxCount) * 20) : 0;
-      const totalBarWidth = barMax > 0 ? Math.round((barMax / maxCount) * 20) : 0;
-      const visibleBar = '\u2588'.repeat(Math.min(barWidth, 20));
+      const bw = DIAGNOSTICS.BAR_WIDTH;
+      const barWidth = barMax > 0 ? Math.round((visible / maxCount) * bw) : 0;
+      const totalBarWidth = barMax > 0 ? Math.round((barMax / maxCount) * bw) : 0;
+      const visibleBar = '\u2588'.repeat(Math.min(barWidth, bw));
       const remainBar = '\u2591'.repeat(Math.max(0, totalBarWidth - barWidth));
-      const emptyBar = '\u2591'.repeat(Math.max(0, 20 - totalBarWidth));
+      const emptyBar = '\u2591'.repeat(Math.max(0, bw - totalBarWidth));
       const label = total !== undefined ? `${visible}/${total}` : `${visible}`;
       serverLines += `  <span style="color:${hex}">S${serverId} ${visibleBar}${remainBar}${emptyBar} ${label}</span>\n`;
     }

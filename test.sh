@@ -10,7 +10,9 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-NUM_SERVERS="${NUM_SERVERS:-3}"
+source "$DIR/config.sh"
+
+NUM_SERVERS="${NUM_SERVERS:-$DEFAULT_NUM_SERVERS}"
 
 # Parse flags
 JSON_FLAG=""
@@ -59,11 +61,11 @@ READY=false
 
 for i in $(seq 1 30); do
   # Check if coordinator assignment endpoint is up
-  if curl -sf http://localhost:7871/assign > /dev/null 2>&1; then
+  if curl -sf "http://localhost:$COORD_HTTP_PORT/assign" > /dev/null 2>&1; then
     # Check if at least one sim-server metrics endpoint is up
-    if curl -sf http://localhost:8101/metrics > /dev/null 2>&1; then
+    if curl -sf "http://localhost:$(sim_metrics_port 1)/metrics" > /dev/null 2>&1; then
       # Get assigned server URL and check WebSocket connectivity
-      SERVER_URL=$(curl -sf http://localhost:7871/assign | node -e "
+      SERVER_URL=$(curl -sf "http://localhost:$COORD_HTTP_PORT/assign" | node -e "
         let d=''; process.stdin.on('data',c=>d+=c);
         process.stdin.on('end',()=>{ try{console.log(JSON.parse(d).ws_url)}catch{process.exit(1)} })
       " 2>/dev/null)
@@ -91,7 +93,7 @@ echo ""
 echo "=== Running test suite ==="
 cd "$DIR/tools"
 
-ARGS="$SERVER_URL 8101 $NUM_SERVERS"
+ARGS="$SERVER_URL $(sim_metrics_port 1) $NUM_SERVERS"
 if [ -n "$SCENARIOS" ]; then
   ARGS="$ARGS $SCENARIOS"
 fi

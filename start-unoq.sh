@@ -8,16 +8,10 @@ set -e
 # Mac is not required — entire mesh runs on embedded hardware
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PIDFILE="$DIR/.pids-unoq"
+source "$DIR/config.sh"
+source "$DIR/boards.env"
 
-UNOQ=unoq
-UNOQ2=unoq2
-UNOQ3=unoq3
-ZZTTPI=zzttpi
-UNOQ_IP=192.168.0.15
-UNOQ2_IP=192.168.0.173
-UNOQ3_IP=192.168.0.86
-ZZTTPI_IP=192.168.0.208
+PIDFILE="$DIR/.pids-unoq"
 
 # Check if already running (coordinator on zzttpi)
 if ssh $ZZTTPI 'pgrep -f coordinator' >/dev/null 2>&1; then
@@ -122,91 +116,62 @@ ssh $UNOQ2 'pkill -f sim-server' 2>/dev/null || true
 ssh $UNOQ3 'pkill -f sim-server' 2>/dev/null || true
 ssh $ZZTTPI 'systemctl --user stop mesh-coordinator' 2>/dev/null || true
 
+# --- Build MESH_ARGS from config ---
+TLS_ARGS="--tls-cert /home/arduino/mesh/certs/mesh-coordinator.crt --tls-key /home/arduino/mesh/certs/mesh-coordinator.key"
+BOARD_IPS=("$UNOQ_IP" "$UNOQ2_IP" "$UNOQ3_IP")
+BOARD_HOSTS=("$UNOQ" "$UNOQ2" "$UNOQ3")
+
 # --- Restart dashboard service (picks up new binary) ---
 echo "=== Restarting dashboards ==="
-MESH_ARGS_1="--server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ_IP} --initial-npcs 15 --tls-cert /home/arduino/mesh/certs/mesh-coordinator.crt --tls-key /home/arduino/mesh/certs/mesh-coordinator.key"
-MESH_ARGS_2="--server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ2_IP} --initial-npcs 15 --tls-cert /home/arduino/mesh/certs/mesh-coordinator.crt --tls-key /home/arduino/mesh/certs/mesh-coordinator.key"
-MESH_ARGS_3="--server-id 3 --port 7880 --udp-port 9103 --metrics-port 8103 --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ3_IP} --initial-npcs 15 --tls-cert /home/arduino/mesh/certs/mesh-coordinator.crt --tls-key /home/arduino/mesh/certs/mesh-coordinator.key"
+for i in 1 2 3; do
+  MESH_ARGS="--server-id $i --port $(sim_ws_port $i) --udp-port $(sim_udp_port $i) --metrics-port $(sim_metrics_port $i) --coordinator ${ZZTTPI_IP}:${COORD_WS_PORT} --advertise-host ${BOARD_IPS[$((i-1))]} --initial-npcs $UNOQ_NPCS_PER_SERVER $TLS_ARGS"
 
-# Set env vars in the systemd override so the dashboard knows how to start sim-server
-ssh $UNOQ "mkdir -p ~/.config/systemd/user/dashboard.service.d && cat > ~/.config/systemd/user/dashboard.service.d/mesh.conf << EOF
+  ssh ${BOARD_HOSTS[$((i-1))]} "mkdir -p ~/.config/systemd/user/dashboard.service.d && cat > ~/.config/systemd/user/dashboard.service.d/mesh.conf << EOF
 [Service]
 Environment=MESH_BINARY=/home/arduino/mesh/sim-server
-Environment=MESH_ARGS=${MESH_ARGS_1}
+Environment=MESH_ARGS=${MESH_ARGS}
 EOF
 systemctl --user daemon-reload
 systemctl --user restart dashboard"
-
-ssh $UNOQ2 "mkdir -p ~/.config/systemd/user/dashboard.service.d && cat > ~/.config/systemd/user/dashboard.service.d/mesh.conf << EOF
-[Service]
-Environment=MESH_BINARY=/home/arduino/mesh/sim-server
-Environment=MESH_ARGS=${MESH_ARGS_2}
-EOF
-systemctl --user daemon-reload
-systemctl --user restart dashboard"
-
-ssh $UNOQ3 "mkdir -p ~/.config/systemd/user/dashboard.service.d && cat > ~/.config/systemd/user/dashboard.service.d/mesh.conf << EOF
-[Service]
-Environment=MESH_BINARY=/home/arduino/mesh/sim-server
-Environment=MESH_ARGS=${MESH_ARGS_3}
-EOF
-systemctl --user daemon-reload
-systemctl --user restart dashboard"
+done
 echo "  Dashboards restarted"
 echo ""
 
 # --- Start coordinator on zzttpi (systemd service, serves client + dashboard over HTTPS) ---
-echo "=== Starting coordinator on $ZZTTPI ($ZZTTPI_IP) (ws:7870 https:7871) ==="
+echo "=== Starting coordinator on $ZZTTPI ($ZZTTPI_IP) (ws:$COORD_WS_PORT https:$COORD_HTTP_PORT) ==="
 ssh $ZZTTPI 'systemctl --user restart mesh-coordinator'
 sleep 1
 
 # --- Start sim-servers on boards ---
-echo "=== Starting sim-server 1 on $UNOQ ($UNOQ_IP) ==="
-ssh $UNOQ "nohup ~/mesh/sim-server \
-  --server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 \
-  --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ_IP} \
-  --initial-npcs 15 \
-  --tls-cert ~/mesh/certs/mesh-coordinator.crt \
-  --tls-key ~/mesh/certs/mesh-coordinator.key \
-  > ~/mesh/sim1.log 2>&1 &"
-
-echo "=== Starting sim-server 2 on $UNOQ2 ($UNOQ2_IP) ==="
-ssh $UNOQ2 "nohup ~/mesh/sim-server \
-  --server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 \
-  --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ2_IP} \
-  --initial-npcs 15 \
-  --tls-cert ~/mesh/certs/mesh-coordinator.crt \
-  --tls-key ~/mesh/certs/mesh-coordinator.key \
-  > ~/mesh/sim2.log 2>&1 &"
-
-echo "=== Starting sim-server 3 on $UNOQ3 ($UNOQ3_IP) ==="
-ssh $UNOQ3 "nohup ~/mesh/sim-server \
-  --server-id 3 --port 7880 --udp-port 9103 --metrics-port 8103 \
-  --coordinator ${ZZTTPI_IP}:7870 --advertise-host ${UNOQ3_IP} \
-  --initial-npcs 15 \
-  --tls-cert ~/mesh/certs/mesh-coordinator.crt \
-  --tls-key ~/mesh/certs/mesh-coordinator.key \
-  > ~/mesh/sim3.log 2>&1 &"
+for i in 1 2 3; do
+  echo "=== Starting sim-server $i on ${BOARD_HOSTS[$((i-1))]} (${BOARD_IPS[$((i-1))]}) ==="
+  ssh ${BOARD_HOSTS[$((i-1))]} "nohup ~/mesh/sim-server \
+    --server-id $i --port $(sim_ws_port $i) --udp-port $(sim_udp_port $i) --metrics-port $(sim_metrics_port $i) \
+    --coordinator ${ZZTTPI_IP}:${COORD_WS_PORT} --advertise-host ${BOARD_IPS[$((i-1))]} \
+    --initial-npcs $UNOQ_NPCS_PER_SERVER \
+    $TLS_ARGS \
+    > ~/mesh/sim${i}.log 2>&1 &"
+done
 
 sleep 2
 
 echo ""
 echo "================================================"
 echo "  Coordinator + Client (zzttpi — Pi Zero W2)"
-echo "    Client:     https://${ZZTTPI_IP}:7871  (self-signed TLS)"
-echo "    Dashboard:  https://${ZZTTPI_IP}:7871/dashboard"
-echo "    WebSocket:  ${ZZTTPI_IP}:7870"
+echo "    Client:     https://${ZZTTPI_IP}:${COORD_HTTP_PORT}  (self-signed TLS)"
+echo "    Dashboard:  https://${ZZTTPI_IP}:${COORD_HTTP_PORT}/dashboard"
+echo "    WebSocket:  ${ZZTTPI_IP}:${COORD_WS_PORT}"
 echo ""
 echo "  UNO Q boards (dashboard + sim-servers)"
-echo "    Board 1: http://$UNOQ_IP:3000  (S1: wss:7878 udp:9101 metrics:8101)"
-echo "    Board 2: http://$UNOQ2_IP:3000  (S2: wss:7879 udp:9102 metrics:8102)"
-echo "    Board 3: http://$UNOQ3_IP:3000  (S3: wss:7880 udp:9103 metrics:8103)"
+for i in 1 2 3; do
+  echo "    Board $i: http://${BOARD_IPS[$((i-1))]}:${BOARD_DASH_PORT}  (S$i: wss:$(sim_ws_port $i) udp:$(sim_udp_port $i) metrics:$(sim_metrics_port $i))"
+done
 echo ""
-echo "  Assignment:  curl -k https://${ZZTTPI_IP}:7871/assign"
+echo "  Assignment:  curl -k https://${ZZTTPI_IP}:${COORD_HTTP_PORT}/assign"
 echo "  Metrics:"
-echo "    curl $UNOQ_IP:8101/metrics"
-echo "    curl $UNOQ2_IP:8102/metrics"
-echo "    curl $UNOQ3_IP:8103/metrics"
+for i in 1 2 3; do
+  echo "    curl ${BOARD_IPS[$((i-1))]}:$(sim_metrics_port $i)/metrics"
+done
 echo ""
 echo "  NOTE: Self-signed cert — accept the browser warning on first visit."
 echo "        WebGPU requires secure context (HTTPS)."
@@ -217,8 +182,8 @@ echo "  Coordinator: ssh $ZZTTPI 'cat ~/mesh/coordinator.log'"
 echo "  Board logs:  ssh $UNOQ 'cat ~/mesh/sim1.log'"
 echo ""
 echo "Test (cap steady-scale for boards):"
-echo "  SERVER_URL=\$(curl -sk https://${ZZTTPI_IP}:7871/assign | python3 -c \"import sys,json; print(json.load(sys.stdin)['ws_url'])\")"
-echo "  COORDINATOR_URL=https://${ZZTTPI_IP}:7871 STEADY_SCALE_MAX=1500 METRICS_HOSTS=1=${UNOQ_IP},2=${UNOQ2_IP},3=${UNOQ3_IP} \\"
-echo "    npx tsx tools/test-suite/runner.ts \$SERVER_URL 8101 3"
+echo "  SERVER_URL=\$(curl -sk https://${ZZTTPI_IP}:${COORD_HTTP_PORT}/assign | python3 -c \"import sys,json; print(json.load(sys.stdin)['ws_url'])\")"
+echo "  COORDINATOR_URL=https://${ZZTTPI_IP}:${COORD_HTTP_PORT} STEADY_SCALE_MAX=1500 METRICS_HOSTS=1=${UNOQ_IP},2=${UNOQ2_IP},3=${UNOQ3_IP} \\"
+echo "    npx tsx tools/test-suite/runner.ts \$SERVER_URL $(sim_metrics_port 1) 3"
 echo ""
 echo "Stop: ./stop-unoq.sh"

@@ -2,6 +2,7 @@ import { WorldView } from './world-view';
 import { NetworkClient } from './network';
 import { Renderer } from './renderer';
 import { DebugOverlay } from './debug-overlay';
+import { DIAGNOSTICS } from './config';
 
 async function getServerUrl(): Promise<string> {
   const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || '';
@@ -28,7 +29,7 @@ async function main() {
     debug.setFollowMode(renderer.followPlayer);
     debug.setServerUrl(network.getServerUrl());
     debug.update();
-  }, 100);
+  }, DIAGNOSTICS.OVERLAY_UPDATE_MS);
 }
 
 main().catch(console.error);

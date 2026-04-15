@@ -1,6 +1,7 @@
 import { WorldView, WorldSnapshot } from './world-view';
 import { decodeBinaryFrame } from './binary-protocol';
 import { PredictionManager } from './prediction';
+import { NETCODE, PROTOCOL, DIAGNOSTICS } from './config';
 
 // Exposed to window for Playwright test access
 interface FrameRecord {
@@ -84,8 +85,7 @@ export class NetworkClient {
   private ws: WebSocket | null = null;
   private url: string;
   private worldView: WorldView;
-  private reconnectDelay = 1000;
-  private maxReconnectDelay = 10000;
+  private reconnectDelay: number = NETCODE.RECONNECT_DELAY_MS;
   private connected = false;
   playerId: string | null = null;
   prediction: PredictionManager;
@@ -108,7 +108,7 @@ export class NetworkClient {
     this.ws.onopen = () => {
       console.log('Connected to server');
       this.connected = true;
-      this.reconnectDelay = 1000;
+      this.reconnectDelay = NETCODE.RECONNECT_DELAY_MS;
     };
 
     this.ws.binaryType = 'arraybuffer';
@@ -160,11 +160,11 @@ export class NetworkClient {
           }
           diag.applied++;
 
-          // Send tick ACK (0x03) back to server for delta baseline tracking
+          // Send tick ACK back to server for delta baseline tracking
           if (this.ws && this.connected) {
             const ackBuf = new ArrayBuffer(9);
             const ackView = new DataView(ackBuf);
-            ackView.setUint8(0, 0x03);
+            ackView.setUint8(0, PROTOCOL.FRAME_ACK);
             ackView.setUint32(1, frame.tick & 0xFFFFFFFF, true);
             ackView.setUint32(5, Math.floor(frame.tick / 0x100000000), true);
             this.ws.send(ackBuf);
@@ -196,7 +196,7 @@ export class NetworkClient {
               const dx = entity.position.x - prev[0];
               const dz = entity.position.z - prev[2];
               const dist = Math.sqrt(dx * dx + dz * dz);
-              if (dist > 5.0) {
+              if (dist > DIAGNOSTICS.JUMP_THRESHOLD) {
                 diag.positionJumps++;
                 frameJumps++;
                 if (dist > diag.worstJump) diag.worstJump = dist;
@@ -236,10 +236,10 @@ export class NetworkClient {
             flickerIn: frameFlickerIn,
             flickerOut: frameFlickerOut,
           });
-          if (diag.perFrame.length > 200) diag.perFrame.shift();
+          if (diag.perFrame.length > DIAGNOSTICS.MAX_FRAME_HISTORY) diag.perFrame.shift();
 
-          // Periodic summary every 5 seconds (100 ticks at 20Hz)
-          if (frame.tick % 100 === 0) {
+          // Periodic summary
+          if (frame.tick % DIAGNOSTICS.SUMMARY_TICK_INTERVAL === 0) {
             const totalFrames = diag.fullFrames + diag.deltaFrames;
             const deltaRatio = totalFrames > 0
               ? ((diag.deltaFrames / totalFrames) * 100).toFixed(1)
@@ -300,7 +300,7 @@ export class NetworkClient {
   private scheduleReconnect(): void {
     console.log(`Reconnecting in ${this.reconnectDelay}ms...`);
     setTimeout(() => {
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, NETCODE.RECONNECT_MAX_DELAY_MS);
       this.connect();
     }, this.reconnectDelay);
   }
