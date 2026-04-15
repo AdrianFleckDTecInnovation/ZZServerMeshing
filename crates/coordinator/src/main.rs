@@ -453,9 +453,41 @@ function renderCard(s, metrics) {
     legend += `<span style="--c:${color}"><span style="background:${color};width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:3px;vertical-align:middle"></span>${PHASE_LABELS[key]} ${val.toFixed(1)}ms</span>`;
   }
 
-  const peerStatus = (m.peer_count ?? 0) > 0
-    ? `<span class="dot ok"></span>${m.peer_count} peer${m.peer_count > 1 ? 's' : ''}`
+  const peerCount = m.peer_count ?? 0;
+  const clientCount = m.connected_clients ?? 0;
+  const peerStatus = peerCount > 0
+    ? `<span class="dot ok"></span>${peerCount} peer${peerCount > 1 ? 's' : ''}`
     : `<span class="dot bad"></span>No peers`;
+  const clientStatus = `${clientCount} client${clientCount !== 1 ? 's' : ''}`;
+
+  // Replication info
+  const replMode = m.replication_mode ?? '-';
+  const replHot = m.replication_hot_count ?? 0;
+  const replCold = m.replication_cold_count ?? 0;
+  const replFull = m.replication_full_count ?? 0;
+  const replSaved = replFull > 0 ? Math.round((1 - (replHot + replCold) / replFull) * 100) : 0;
+
+  // Network health
+  const replDrops = m.udp_repl_drops ?? 0;
+  const ctrlDrops = m.udp_ctrl_drops ?? 0;
+  const bytesOut = m.udp_bytes_out ?? 0;
+  const bytesKB = (bytesOut / 1024).toFixed(1);
+  const dropDot = ctrlDrops > 0 ? 'bad' : replDrops > 0 ? 'warn' : 'ok';
+
+  // Per-peer health rows
+  const peerHealth = m.peer_health || {};
+  let peerRows = '';
+  for (const [pid, ph] of Object.entries(peerHealth)) {
+    const staleDot = ph.staleness_ticks > 20 ? 'bad' : ph.staleness_ticks > 5 ? 'warn' : 'ok';
+    const rxRate = ph.packets_received ?? 0;
+    const evictions = ph.chunk_evictions ?? 0;
+    peerRows += `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #1a1a1a">
+      <span><span class="dot ${staleDot}"></span>S${pid}</span>
+      <span style="color:#888">${ph.staleness_ticks}t stale</span>
+      <span style="color:#888">${rxRate} rx/5s</span>
+      <span style="color:${evictions > 0 ? '#f44' : '#888'}">${evictions} evict</span>
+    </div>`;
+  }
 
   return `<div class="card${offline ? ' offline' : ''}">
     <h3>
@@ -470,7 +502,14 @@ function renderCard(s, metrics) {
         <div><div class="stat-val">${m.tick ?? '-'}</div><div class="stat-lbl">Tick</div></div>
       </div>
     </div>
-    <div style="font-size:12px;margin-top:8px">${peerStatus} · Total p95: ${totalMs.toFixed(2)}ms</div>
+    <div style="font-size:12px;margin-top:8px">${peerStatus} · ${clientStatus} · p95: ${totalMs.toFixed(1)}ms</div>
+    <div style="font-size:11px;margin-top:6px;color:#888">
+      Repl: <span style="color:#0f0">${replMode}</span> · hot:${replHot} cold:${replCold} / ${replFull} (${replSaved}% saved)
+    </div>
+    <div style="font-size:11px;margin-top:4px;color:#888">
+      UDP: <span class="dot ${dropDot}"></span>repl:${replDrops} ctrl:${ctrlDrops} drops · ${bytesKB}KB/tick
+    </div>
+    ${peerRows ? `<div style="font-size:11px;margin-top:8px"><div style="color:#666;margin-bottom:4px">Peer Health</div>${peerRows}</div>` : ''}
     <div class="phase-bar">${phaseBar}</div>
     <div class="phase-legend">${legend}</div>
   </div>`;
@@ -490,7 +529,7 @@ async function poll() {
 
   const results = await Promise.all(servers.map(async (s) => {
     try {
-      const res = await fetch(`http://${s.host}:${s.metrics_port}/metrics`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch(`/metrics/${s.server_id}`, { signal: AbortSignal.timeout(3000) });
       return { server: s, metrics: await res.json() };
     } catch {
       return { server: s, metrics: null };
@@ -624,6 +663,80 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
             );
             let _ = stream.write_all(response.as_bytes()).await;
+        }
+        _ if path.starts_with("/metrics/") => {
+            // Proxy metrics from sim-servers so the HTTPS dashboard can fetch them
+            // without mixed-content issues.
+            let sid_str = &path["/metrics/".len()..];
+            if let Ok(sid) = sid_str.parse::<u16>() {
+                let r = registry.read().await;
+                let server_info = r.get_server_list();
+                drop(r);
+
+                let host = server_info.iter()
+                    .find(|s| s["server_id"].as_u64() == Some(sid as u64))
+                    .and_then(|s| s["host"].as_str())
+                    .map(|h| h.to_string());
+                let metrics_port = 8100 + sid;
+
+                if let Some(host) = host {
+                    match tokio::net::TcpStream::connect(format!("{host}:{metrics_port}")).await {
+                        Ok(mut upstream) => {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let req = format!(
+                                "GET /metrics HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = upstream.write_all(req.as_bytes()).await;
+                            let mut buf = Vec::new();
+                            let _ = upstream.read_to_end(&mut buf).await;
+                            let resp = String::from_utf8_lossy(&buf);
+                            if let Some(idx) = resp.find("\r\n\r\n") {
+                                let body = &resp[idx + 4..];
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                     Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                                     Connection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                            } else {
+                                let body = r#"{"error":"bad upstream response"}"#;
+                                let response = format!(
+                                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\n\
+                                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                            }
+                        }
+                        Err(_) => {
+                            let body = r#"{"error":"upstream unreachable"}"#;
+                            let response = format!(
+                                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                        }
+                    }
+                } else {
+                    let body = r#"{"error":"unknown server"}"#;
+                    let response = format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            } else {
+                let body = r#"{"error":"invalid server id"}"#;
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
         }
         _ => {
             if let Some(ref dir) = static_dir {

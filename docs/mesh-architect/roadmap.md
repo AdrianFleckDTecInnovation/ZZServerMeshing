@@ -4,6 +4,13 @@ Last updated: 2026-04-15
 
 ## Active
 
+### 011: Network Saturation Telemetry
+**Status:** Designed, ready for implementation
+**Priority:** High
+**Design:** `designs/011-network-saturation-telemetry.md`
+**Work Items:** `work-items/011-network-saturation-telemetry.md`
+**Summary:** Surface network health telemetry in the `/metrics` JSON endpoint so WiFi/UDP saturation can be detected before it causes functional problems (shadow loss, peer disconnects). Exposes UDP outbound drop counters (already tracked but only logged), outbound bytes per tick, and per-peer inbound health: shadow freshness (staleness in ticks), receive rate (packets/second), and chunk reassembly evictions. All data added to existing MetricsSnapshot JSON. Per-peer data keyed by server_id. Adds a PeerHealthAccumulator shared structure between the UDP receiver and game loop. 8 work items across 3 phases, estimated 4-6 hours. No breaking changes to existing consumers.
+
 ### 010: Tiered AoI-Aware Shadow Replication
 **Status:** Designed, ready for implementation
 **Priority:** High

@@ -119,9 +119,36 @@ pub struct SharedCoordEvents {
     pub queue: std::sync::Mutex<CoordEventQueue>,
 }
 
-/// Shared outbound buffer for ECS → coordinator messages (e.g., TransferResult).
+/// Shared outbound buffer for ECS -> coordinator messages (e.g., TransferResult).
 pub struct SharedCoordOutbound {
     pub queue: std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>,
+}
+
+/// Per-peer network health statistics accumulated by the UDP receiver.
+/// Read and reset by the game loop for metrics reporting.
+pub struct PeerHealthAccumulator {
+    /// Latest tick received from each peer.
+    pub latest_tick: std::collections::HashMap<u16, u64>,
+    /// Packets received from each peer since last reset.
+    pub packets_received: std::collections::HashMap<u16, u32>,
+    /// Chunk reassembly evictions per peer since last reset.
+    pub chunk_evictions: std::collections::HashMap<u16, u32>,
+}
+
+impl Default for PeerHealthAccumulator {
+    fn default() -> Self {
+        Self {
+            latest_tick: std::collections::HashMap::new(),
+            packets_received: std::collections::HashMap::new(),
+            chunk_evictions: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Thread-safe wrapper for PeerHealthAccumulator.
+/// Shared between the UDP receiver task (writes) and the game loop (reads/resets).
+pub struct SharedPeerHealth {
+    pub stats: std::sync::Mutex<PeerHealthAccumulator>,
 }
 
 /// Run the new ECS-based game loop.
@@ -138,6 +165,7 @@ pub async fn run_game_loop_ecs(
     full_repl_interval: u64,
     full_snapshot_enabled: bool,
     coord_outbound: Arc<SharedCoordOutbound>,
+    peer_health: Arc<SharedPeerHealth>,
 ) {
     // -- Create ECS World --
     let mut world = bevy_ecs::world::World::default();
@@ -197,6 +225,8 @@ pub async fn run_game_loop_ecs(
     let mut udp_ctrl_drops: u64 = 0;
     let mut udp_repl_closed = false;
     let mut udp_ctrl_closed = false;
+    // Outbound UDP byte counter, reset each tick (WI-101)
+    let mut udp_bytes_out: u64 = 0;
 
     // UDP backpressure: when the replication channel is saturated, skip non-full
     // replication ticks to cut outbound bandwidth. This breaks the feedback loop
@@ -324,15 +354,21 @@ pub async fn run_game_loop_ecs(
         // (1400 - 60) / 47 ≈ 28 entities per chunk.
         const ENTITIES_PER_CHUNK: usize = 28;
 
-        /// Try to send a UdpOutbound message. Returns true if the channel is closed
-        /// (sender task has crashed). On Full, increments the drop counter.
+        /// Try to send a UdpOutbound message. On Full, increments the drop counter.
+        /// Tracks outbound byte count in `bytes_out`.
         #[inline]
         fn try_enqueue(
             tx: &tokio::sync::mpsc::Sender<UdpOutbound>,
             msg: UdpOutbound,
             drops: &mut u64,
             closed: &mut bool,
+            bytes_out: &mut u64,
         ) {
+            // Count bytes before sending (whether or not it drops)
+            let msg_bytes = match &msg {
+                UdpOutbound::Send { data, .. } => data.len() as u64,
+                UdpOutbound::Batch(items) => items.iter().map(|(_, d)| d.len() as u64).sum(),
+            };
             if let Err(e) = tx.try_send(msg) {
                 match e {
                     TrySendError::Full(_) => *drops += 1,
@@ -343,11 +379,15 @@ pub async fn run_game_loop_ecs(
                         }
                     }
                 }
+            } else {
+                // Only count bytes that were actually enqueued (not dropped)
+                *bytes_out += msg_bytes;
             }
         }
 
         /// Serialize and enqueue entity replication to a single peer address.
         /// Handles chunking when entity count exceeds ENTITIES_PER_CHUNK.
+        /// Accumulates enqueued byte count in `bytes_out`.
         fn enqueue_entities_to_peer(
             entities: &[EntityState],
             tick: u64,
@@ -356,6 +396,7 @@ pub async fn run_game_loop_ecs(
             tx: &tokio::sync::mpsc::Sender<UdpOutbound>,
             drops: &mut u64,
             closed: &mut bool,
+            bytes_out: &mut u64,
         ) {
             if entities.is_empty() {
                 return;
@@ -367,7 +408,7 @@ pub async fn run_game_loop_ecs(
                     entities: entities.to_vec(),
                 };
                 if let Some(bytes) = serialize_versioned(&msg) {
-                    try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed);
+                    try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed, bytes_out);
                 }
             } else {
                 let total_chunks =
@@ -381,7 +422,7 @@ pub async fn run_game_loop_ecs(
                         entities: chunk.to_vec(),
                     };
                     if let Some(bytes) = serialize_versioned(&msg) {
-                        try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed);
+                        try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed, bytes_out);
                     }
                 }
             }
@@ -390,6 +431,7 @@ pub async fn run_game_loop_ecs(
         let t2 = Instant::now();
         let server_id_u16 = world.resource::<ServerConfig>().server_id;
         repl_drops_this_tick = 0;
+        udp_bytes_out = 0;
 
         if let Some(entities) = &repl_full {
             // Full replication tick: ALWAYS broadcast (1/sec crash recovery).
@@ -409,6 +451,7 @@ pub async fn run_game_loop_ecs(
                     &udp_repl_tx,
                     &mut udp_repl_drops,
                     &mut udp_repl_closed,
+                    &mut udp_bytes_out,
                 );
             }
         } else if !repl_per_peer.is_empty() {
@@ -429,6 +472,7 @@ pub async fn run_game_loop_ecs(
                         &udp_repl_tx,
                         &mut udp_repl_drops,
                         &mut udp_repl_closed,
+                        &mut udp_bytes_out,
                     );
                 }
             }
@@ -444,6 +488,7 @@ pub async fn run_game_loop_ecs(
                 UdpOutbound::Batch(transfers),
                 &mut udp_ctrl_drops,
                 &mut udp_ctrl_closed,
+                &mut udp_bytes_out,
             );
         }
 
@@ -454,6 +499,7 @@ pub async fn run_game_loop_ecs(
                 UdpOutbound::Batch(forwards),
                 &mut udp_ctrl_drops,
                 &mut udp_ctrl_closed,
+                &mut udp_bytes_out,
             );
         }
         let transfer_dur = t2.elapsed();
@@ -488,6 +534,32 @@ pub async fn run_game_loop_ecs(
                 m.replication_sent_count = repl_per_peer.values().map(|v| v.len()).sum();
                 m.replication_hot_count = repl_hot_count;
                 m.replication_cold_count = repl_cold_count;
+            }
+            // Network saturation telemetry (WI-101, WI-105)
+            m.udp_repl_drops = udp_repl_drops;
+            m.udp_ctrl_drops = udp_ctrl_drops;
+            m.udp_bytes_out = udp_bytes_out;
+            // Per-peer inbound health from receiver (WI-105)
+            {
+                let active_peers: std::collections::HashSet<u16> =
+                    world.resource::<PeerAddresses>().0.keys().copied().collect();
+                let ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let mut health_map = std::collections::HashMap::new();
+                for &pid in &active_peers {
+                    let latest = ph.latest_tick.get(&pid).copied().unwrap_or(0);
+                    let staleness = if latest > 0 {
+                        tick_val.saturating_sub(latest)
+                    } else {
+                        u64::MAX
+                    };
+                    health_map.insert(pid, crate::metrics::PeerHealthSnapshot {
+                        latest_tick: latest,
+                        staleness_ticks: staleness,
+                        packets_received: ph.packets_received.get(&pid).copied().unwrap_or(0),
+                        chunk_evictions: ph.chunk_evictions.get(&pid).copied().unwrap_or(0),
+                    });
+                }
+                m.peer_health = health_map;
             }
             m.record(TickTimings {
                 input_drain: input_drain_dur,
@@ -543,6 +615,13 @@ pub async fn run_game_loop_ecs(
                     udp_ctrl_drops
                 );
                 udp_ctrl_drops = 0;
+            }
+            // Reset per-peer health counters every 5s reporting window (WI-105)
+            {
+                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                ph.packets_received.clear();
+                ph.chunk_evictions.clear();
+                // Don't clear latest_tick -- it's a high-water mark, not a counter
             }
         }
     }
@@ -732,6 +811,9 @@ mod tests {
         let coord_outbound = Arc::new(SharedCoordOutbound {
             queue: std::sync::Mutex::new(Vec::new()),
         });
+        let peer_health = Arc::new(SharedPeerHealth {
+            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
+        });
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0, // no initial NPCs -- drain will find zero entities
@@ -745,6 +827,7 @@ mod tests {
             FULL_REPL_INTERVAL,
             false,
             coord_outbound,
+            peer_health,
         ));
 
         // The game loop should exit cleanly (break, not process::exit).
@@ -1120,6 +1203,9 @@ mod tests {
         let coord_outbound = Arc::new(SharedCoordOutbound {
             queue: std::sync::Mutex::new(Vec::new()),
         });
+        let peer_health = Arc::new(SharedPeerHealth {
+            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
+        });
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0,
@@ -1133,6 +1219,7 @@ mod tests {
             FULL_REPL_INTERVAL,
             false,
             coord_outbound,
+            peer_health,
         ));
 
         // The loop should complete (drain with 0 entities = immediate shutdown).
@@ -1202,6 +1289,7 @@ mod tests {
         drops: &mut u64,
         closed: &mut bool,
     ) {
+        // Test version: no bytes_out tracking (matches production logic sans telemetry)
         if let Err(e) = tx.try_send(msg) {
             match e {
                 TrySendError::Full(_) => *drops += 1,
@@ -1212,5 +1300,257 @@ mod tests {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // WI-102: PeerHealthAccumulator unit tests
+    // =========================================================================
+
+    #[test]
+    fn peer_health_accumulator_default() {
+        let acc = PeerHealthAccumulator::default();
+        assert!(acc.latest_tick.is_empty());
+        assert!(acc.packets_received.is_empty());
+        assert!(acc.chunk_evictions.is_empty());
+    }
+
+    #[test]
+    fn peer_health_accumulator_increment() {
+        let mut acc = PeerHealthAccumulator::default();
+        acc.latest_tick.insert(2, 100);
+        *acc.packets_received.entry(2).or_insert(0) += 1;
+        *acc.packets_received.entry(2).or_insert(0) += 1;
+        assert_eq!(acc.latest_tick[&2], 100);
+        assert_eq!(acc.packets_received[&2], 2);
+    }
+
+    #[test]
+    fn peer_health_accumulator_multiple_peers() {
+        let mut acc = PeerHealthAccumulator::default();
+        acc.latest_tick.insert(2, 50);
+        acc.latest_tick.insert(3, 48);
+        *acc.packets_received.entry(2).or_insert(0) += 5;
+        *acc.packets_received.entry(3).or_insert(0) += 3;
+        *acc.chunk_evictions.entry(3).or_insert(0) += 1;
+
+        assert_eq!(acc.latest_tick[&2], 50);
+        assert_eq!(acc.latest_tick[&3], 48);
+        assert_eq!(acc.packets_received[&2], 5);
+        assert_eq!(acc.packets_received[&3], 3);
+        assert_eq!(acc.chunk_evictions.get(&2), None);
+        assert_eq!(acc.chunk_evictions[&3], 1);
+    }
+
+    #[test]
+    fn shared_peer_health_lockable_from_non_async_context() {
+        // Proves SharedPeerHealth uses std::sync::Mutex (not tokio).
+        let sph = SharedPeerHealth {
+            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
+        };
+        let mut acc = sph.stats.lock().unwrap();
+        acc.latest_tick.insert(2, 42);
+        assert_eq!(acc.latest_tick[&2], 42);
+    }
+
+    #[test]
+    fn peer_health_accumulator_latest_tick_only_increases() {
+        // The receiver uses `if tick > *lt { *lt = tick }` -- verify that
+        // later ticks overwrite earlier ones but not vice versa.
+        let mut acc = PeerHealthAccumulator::default();
+        let lt = acc.latest_tick.entry(2).or_insert(0);
+        // Tick 50 arrives
+        if 50 > *lt { *lt = 50; }
+        assert_eq!(acc.latest_tick[&2], 50);
+        // Tick 30 arrives (out of order) -- should NOT overwrite
+        let lt = acc.latest_tick.entry(2).or_insert(0);
+        if 30 > *lt { *lt = 30; }
+        assert_eq!(acc.latest_tick[&2], 50, "later OOO tick should not reduce latest_tick");
+        // Tick 100 arrives -- should overwrite
+        let lt = acc.latest_tick.entry(2).or_insert(0);
+        if 100 > *lt { *lt = 100; }
+        assert_eq!(acc.latest_tick[&2], 100);
+    }
+
+    #[test]
+    fn peer_health_accumulator_clear_resets_counters_not_ticks() {
+        // The game loop clears packets_received and chunk_evictions every 5s
+        // but keeps latest_tick (high-water mark). Verify this pattern works.
+        let mut acc = PeerHealthAccumulator::default();
+        acc.latest_tick.insert(2, 500);
+        *acc.packets_received.entry(2).or_insert(0) += 10;
+        *acc.chunk_evictions.entry(2).or_insert(0) += 3;
+
+        // Simulate 5s reset (what game loop does)
+        acc.packets_received.clear();
+        acc.chunk_evictions.clear();
+        // Do NOT clear latest_tick
+
+        assert_eq!(acc.latest_tick[&2], 500, "latest_tick should survive reset");
+        assert!(acc.packets_received.is_empty(), "packets_received should be cleared");
+        assert!(acc.chunk_evictions.is_empty(), "chunk_evictions should be cleared");
+    }
+
+    #[test]
+    fn peer_health_accumulator_independent_peers() {
+        // Incrementing peer 2 should not affect peer 3.
+        let mut acc = PeerHealthAccumulator::default();
+        *acc.packets_received.entry(2).or_insert(0) += 1;
+        *acc.packets_received.entry(3).or_insert(0) += 5;
+        *acc.chunk_evictions.entry(2).or_insert(0) += 2;
+
+        assert_eq!(acc.packets_received[&2], 1);
+        assert_eq!(acc.packets_received[&3], 5);
+        assert_eq!(acc.chunk_evictions[&2], 2);
+        assert_eq!(acc.chunk_evictions.get(&3), None);
+    }
+
+    // =========================================================================
+    // WI-101: try_enqueue with bytes_out tracking
+    // =========================================================================
+
+    // Re-implement the production try_enqueue (with bytes_out) for testing.
+    fn try_enqueue_with_bytes(
+        tx: &tokio::sync::mpsc::Sender<UdpOutbound>,
+        msg: UdpOutbound,
+        drops: &mut u64,
+        closed: &mut bool,
+        bytes_out: &mut u64,
+    ) {
+        let msg_bytes = match &msg {
+            UdpOutbound::Send { data, .. } => data.len() as u64,
+            UdpOutbound::Batch(items) => items.iter().map(|(_, d)| d.len() as u64).sum(),
+        };
+        if let Err(e) = tx.try_send(msg) {
+            match e {
+                TrySendError::Full(_) => *drops += 1,
+                TrySendError::Closed(_) => {
+                    if !*closed {
+                        *closed = true;
+                    }
+                }
+            }
+        } else {
+            *bytes_out += msg_bytes;
+        }
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_counted_on_success() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        let msg = UdpOutbound::Send {
+            addr: "127.0.0.1:9101".parse().unwrap(),
+            data: vec![0u8; 100],
+        };
+        try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 100, "successful send should count bytes");
+        assert_eq!(drops, 0);
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_not_counted_on_drop() {
+        // Channel capacity 1, fill it, then verify bytes are NOT counted on drop.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(1);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        // First message fits
+        let msg1 = UdpOutbound::Send {
+            addr: "127.0.0.1:9101".parse().unwrap(),
+            data: vec![0u8; 50],
+        };
+        try_enqueue_with_bytes(&tx, msg1, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 50);
+
+        // Second message: channel full, should NOT count bytes
+        let msg2 = UdpOutbound::Send {
+            addr: "127.0.0.1:9101".parse().unwrap(),
+            data: vec![0u8; 200],
+        };
+        try_enqueue_with_bytes(&tx, msg2, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 50, "dropped message bytes should NOT be counted");
+        assert_eq!(drops, 1);
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_not_counted_on_closed() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        drop(rx);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        let msg = UdpOutbound::Send {
+            addr: "127.0.0.1:9101".parse().unwrap(),
+            data: vec![0u8; 75],
+        };
+        try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 0, "closed channel should NOT count bytes");
+        assert!(closed);
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_batch_sums_all_items() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        let items = vec![
+            ("127.0.0.1:9101".parse::<SocketAddr>().unwrap(), vec![0u8; 30]),
+            ("127.0.0.1:9102".parse::<SocketAddr>().unwrap(), vec![0u8; 70]),
+            ("127.0.0.1:9103".parse::<SocketAddr>().unwrap(), vec![0u8; 100]),
+        ];
+        let msg = UdpOutbound::Batch(items);
+        try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 200, "batch bytes should be sum of all items (30+70+100)");
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_accumulates_across_calls() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        for _ in 0..5 {
+            let msg = UdpOutbound::Send {
+                addr: "127.0.0.1:9101".parse().unwrap(),
+                data: vec![0u8; 40],
+            };
+            try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        }
+        assert_eq!(bytes_out, 200, "5 sends of 40 bytes = 200 total");
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_empty_send() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        let msg = UdpOutbound::Send {
+            addr: "127.0.0.1:9101".parse().unwrap(),
+            data: vec![],
+        };
+        try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 0, "empty payload should count 0 bytes");
+    }
+
+    #[test]
+    fn try_enqueue_bytes_out_empty_batch() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(8);
+        let mut drops: u64 = 0;
+        let mut closed = false;
+        let mut bytes_out: u64 = 0;
+
+        let msg = UdpOutbound::Batch(vec![]);
+        try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
+        assert_eq!(bytes_out, 0, "empty batch should count 0 bytes");
     }
 }

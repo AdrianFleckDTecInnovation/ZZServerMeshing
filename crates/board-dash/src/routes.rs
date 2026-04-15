@@ -255,8 +255,55 @@ async fn api_mesh_widget() -> Html<String> {
             let auth = m.get("entity_count").and_then(|v| v.as_u64()).unwrap_or(0);
             let shadow = m.get("shadow_count").and_then(|v| v.as_u64()).unwrap_or(0);
             let peers = m.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let clients = m.get("connected_clients").and_then(|v| v.as_u64()).unwrap_or(0);
             let budget = m.get("tick_budget_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let sid = m.get("server_id").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            // Replication
+            let repl_mode = m.get("replication_mode").and_then(|v| v.as_str()).unwrap_or("-");
+            let repl_hot = m.get("replication_hot_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let repl_cold = m.get("replication_cold_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let repl_full = m.get("replication_full_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let repl_saved = if repl_full > 0 {
+                100 - ((repl_hot + repl_cold) * 100 / repl_full)
+            } else { 0 };
+
+            // Network health
+            let repl_drops = m.get("udp_repl_drops").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ctrl_drops = m.get("udp_ctrl_drops").and_then(|v| v.as_u64()).unwrap_or(0);
+            let bytes_out = m.get("udp_bytes_out").and_then(|v| v.as_u64()).unwrap_or(0);
+            let bytes_kb = bytes_out as f64 / 1024.0;
+            let drop_color = if ctrl_drops > 0 { "#e57373" } else if repl_drops > 0 { "#ffb74d" } else { "#81c784" };
+
+            // Per-peer health
+            let mut peer_rows = String::new();
+            if let Some(ph) = m.get("peer_health").and_then(|v| v.as_object()) {
+                for (pid, entry) in ph {
+                    let stale = entry.get("staleness_ticks").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let rx = entry.get("packets_received").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let evict = entry.get("chunk_evictions").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let stale_color = if stale > 20 { "#e57373" } else if stale > 5 { "#ffb74d" } else { "#81c784" };
+                    let evict_color = if evict > 0 { "#e57373" } else { "inherit" };
+                    peer_rows.push_str(&format!(
+                        r#"<tr><td><span style="color:{stale_color}">S{pid}</span></td><td>{stale}t</td><td>{rx}/5s</td><td style="color:{evict_color}">{evict}</td></tr>"#
+                    ));
+                }
+            }
+
+            let peer_table = if peer_rows.is_empty() {
+                String::new()
+            } else {
+                format!(r#"
+                    <div style="margin-top:0.5rem">
+                        <small style="opacity:0.6">Peer Health</small>
+                        <table style="width:100%;font-size:0.85rem;margin-top:0.25rem">
+                            <thead><tr><th>Peer</th><th>Stale</th><th>Rx</th><th>Evict</th></tr></thead>
+                            <tbody>{peer_rows}</tbody>
+                        </table>
+                    </div>
+                "#)
+            };
+
             format!(r#"
                 <div class="grid">
                     <div><small>Server</small><br><strong>S{sid}</strong></div>
@@ -264,10 +311,20 @@ async fn api_mesh_widget() -> Html<String> {
                     <div><small>Auth</small><br><strong>{auth}</strong></div>
                     <div><small>Shadow</small><br><strong>{shadow}</strong></div>
                     <div><small>Peers</small><br><strong>{peers}</strong></div>
+                    <div><small>Clients</small><br><strong>{clients}</strong></div>
                     <div><small>Budget</small><br><strong>{budget:.1}%</strong>
                         <progress value="{budget}" max="100"></progress>
                     </div>
                 </div>
+                <div style="margin-top:0.5rem;font-size:0.85rem">
+                    <small style="opacity:0.6">Replication</small><br>
+                    <span>{repl_mode}</span> &middot; hot:{repl_hot} cold:{repl_cold} / {repl_full} ({repl_saved}% saved)
+                </div>
+                <div style="margin-top:0.5rem;font-size:0.85rem">
+                    <small style="opacity:0.6">UDP Network</small><br>
+                    <span style="color:{drop_color}">repl:{repl_drops} ctrl:{ctrl_drops} drops</span> &middot; {bytes_kb:.1}KB/tick
+                </div>
+                {peer_table}
             "#)
         } else {
             "<p>Running but metrics unavailable</p>".to_string()

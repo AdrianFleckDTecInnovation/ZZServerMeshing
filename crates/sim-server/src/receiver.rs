@@ -1,4 +1,4 @@
-use crate::game_loop::SharedInbound;
+use crate::game_loop::{SharedInbound, SharedPeerHealth};
 use crate::resources::{
     ForwardedInput, ForwardedRemove, InboundTransferAck, InboundTransfer, PeerUpdate,
 };
@@ -12,6 +12,7 @@ use tokio::net::UdpSocket;
 pub async fn run_udp_receiver(
     udp_socket: Arc<UdpSocket>,
     inbound: Arc<SharedInbound>,
+    peer_health: Arc<SharedPeerHealth>,
 ) {
     let mut buf = vec![0u8; 65536];
 
@@ -41,6 +42,15 @@ pub async fn run_udp_receiver(
         // Uses per-server tick instead of global max to avoid evicting entries from
         // legitimately slow peers (e.g., newly joined server at tick 0).
         if loop_counter % GLOBAL_SWEEP_INTERVAL == 0 {
+            // Collect evictions per peer before the retain call (WI-103)
+            let mut sweep_evictions: HashMap<u16, u32> = HashMap::new();
+            for (&(sid, t), _) in reassembly.iter() {
+                if let Some(&server_latest) = latest_tick.get(&sid) {
+                    if server_latest.saturating_sub(t) > GLOBAL_STALE_TICKS {
+                        *sweep_evictions.entry(sid).or_insert(0) += 1;
+                    }
+                }
+            }
             let before = reassembly.len();
             reassembly.retain(|&(sid, t), _| {
                 if let Some(&server_latest) = latest_tick.get(&sid) {
@@ -56,6 +66,11 @@ pub async fn run_udp_receiver(
                     remaining = reassembly.len(),
                     "Per-server reassembly sweep evicted stale entries"
                 );
+                // Record evictions per peer (WI-103)
+                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                for (sid, count) in sweep_evictions {
+                    *ph.chunk_evictions.entry(sid).or_insert(0) += count;
+                }
             }
         }
 
@@ -64,6 +79,11 @@ pub async fn run_udp_receiver(
             let mut entries: Vec<(u16, u64)> = reassembly.keys().copied().collect();
             entries.sort_by_key(|&(_sid, tick)| tick);
             let to_evict = reassembly.len() - MAX_REASSEMBLY_ENTRIES;
+            // Count evictions per peer (WI-103)
+            let mut cap_evictions: HashMap<u16, u32> = HashMap::new();
+            for &(sid, _) in entries.iter().take(to_evict) {
+                *cap_evictions.entry(sid).or_insert(0) += 1;
+            }
             for key in entries.into_iter().take(to_evict) {
                 reassembly.remove(&key);
             }
@@ -72,6 +92,12 @@ pub async fn run_udp_receiver(
                 remaining = reassembly.len(),
                 "Reassembly map exceeded {MAX_REASSEMBLY_ENTRIES} entries, evicted oldest"
             );
+            if !cap_evictions.is_empty() {
+                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                for (sid, count) in cap_evictions {
+                    *ph.chunk_evictions.entry(sid).or_insert(0) += count;
+                }
+            }
         }
         let (len, addr) = match udp_socket.recv_from(&mut buf).await {
             Ok(v) => v,
@@ -110,6 +136,15 @@ pub async fn run_udp_receiver(
                 server_id,
                 entities,
             } => {
+                // Per-peer health tracking (WI-103)
+                {
+                    let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    *ph.packets_received.entry(server_id.0).or_insert(0) += 1;
+                    let lt = ph.latest_tick.entry(server_id.0).or_insert(0);
+                    if tick > *lt {
+                        *lt = tick;
+                    }
+                }
                 let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.peer_updates.push(PeerUpdate {
                     tick,
@@ -177,12 +212,29 @@ pub async fn run_udp_receiver(
             } => {
                 let key = (server_id.0, tick);
 
+                // Per-peer health tracking (WI-103)
+                {
+                    let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    *ph.packets_received.entry(server_id.0).or_insert(0) += 1;
+                    let lt = ph.latest_tick.entry(server_id.0).or_insert(0);
+                    if tick > *lt {
+                        *lt = tick;
+                    }
+                }
+
                 // Update latest tick for this server
                 let prev_latest = latest_tick.entry(server_id.0).or_insert(0);
                 if tick > *prev_latest {
+                    // Count inline evictions before the retain (WI-103)
+                    let before_inline = reassembly.len();
                     *prev_latest = tick;
                     // Clean up stale reassemblies (more than 2 ticks behind)
                     reassembly.retain(|&(sid, t), _| sid != server_id.0 || tick - t <= 2);
+                    let inline_evicted = before_inline - reassembly.len();
+                    if inline_evicted > 0 {
+                        let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                        *ph.chunk_evictions.entry(server_id.0).or_insert(0) += inline_evicted as u32;
+                    }
                 }
 
                 let entry = reassembly.entry(key).or_insert_with(|| ChunkReassembly {

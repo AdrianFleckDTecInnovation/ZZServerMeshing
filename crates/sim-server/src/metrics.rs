@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 const RING_SIZE: usize = 200; // 10 seconds at 20Hz
@@ -34,6 +34,27 @@ pub struct MetricsCollector {
     pub replication_hot_count: usize,
     /// Cold-tier entities sent this tick (far from players, 5Hz on cold ticks only).
     pub replication_cold_count: usize,
+    /// UDP replication channel drops in the current 5-second window.
+    pub udp_repl_drops: u64,
+    /// UDP control channel drops in the current 5-second window.
+    pub udp_ctrl_drops: u64,
+    /// UDP bytes enqueued for outbound send this tick.
+    pub udp_bytes_out: u64,
+    /// Per-peer network health. Key is peer server_id.
+    pub peer_health: HashMap<u16, PeerHealthSnapshot>,
+}
+
+/// Per-peer network health snapshot for the metrics endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerHealthSnapshot {
+    /// Latest tick received from this peer.
+    pub latest_tick: u64,
+    /// How many ticks behind our current tick this peer's latest data is.
+    pub staleness_ticks: u64,
+    /// Packets received from this peer in the current reporting window (~5s).
+    pub packets_received: u32,
+    /// Incomplete chunk reassemblies evicted for this peer in the current reporting window.
+    pub chunk_evictions: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +84,14 @@ pub struct MetricsSnapshot {
     pub replication_hot_count: usize,
     /// Cold-tier entities sent (far from players, sent on cold ticks at 5Hz).
     pub replication_cold_count: usize,
+    /// UDP replication channel drops in the current 5-second window.
+    pub udp_repl_drops: u64,
+    /// UDP control channel drops in the current 5-second window.
+    pub udp_ctrl_drops: u64,
+    /// UDP bytes enqueued for outbound send this tick.
+    pub udp_bytes_out: u64,
+    /// Per-peer network health. Key is peer server_id.
+    pub peer_health: HashMap<u16, PeerHealthSnapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +119,10 @@ impl MetricsCollector {
             replication_sent_count: 0,
             replication_hot_count: 0,
             replication_cold_count: 0,
+            udp_repl_drops: 0,
+            udp_ctrl_drops: 0,
+            udp_bytes_out: 0,
+            peer_health: HashMap::new(),
         }
     }
 
@@ -127,6 +160,10 @@ impl MetricsCollector {
             replication_sent_count: self.replication_sent_count,
             replication_hot_count: self.replication_hot_count,
             replication_cold_count: self.replication_cold_count,
+            udp_repl_drops: self.udp_repl_drops,
+            udp_ctrl_drops: self.udp_ctrl_drops,
+            udp_bytes_out: self.udp_bytes_out,
+            peer_health: self.peer_health.clone(),
         }
     }
 
@@ -313,6 +350,108 @@ mod tests {
         assert_eq!(snap.replication_mode, "full");
     }
 
+    // =========================================================================
+    // WI-100: UDP drop counters and bytes out
+    // =========================================================================
+
+    #[test]
+    fn snapshot_udp_drops_default_zero() {
+        let c = MetricsCollector::new(1);
+        let snap = c.snapshot();
+        assert_eq!(snap.udp_repl_drops, 0);
+        assert_eq!(snap.udp_ctrl_drops, 0);
+        assert_eq!(snap.udp_bytes_out, 0);
+    }
+
+    #[test]
+    fn snapshot_udp_drops_in_json() {
+        let mut c = MetricsCollector::new(1);
+        c.udp_repl_drops = 5;
+        c.udp_ctrl_drops = 2;
+        c.udp_bytes_out = 12345;
+        c.record(timing(5));
+        let snap = c.snapshot();
+        assert_eq!(snap.udp_repl_drops, 5);
+        assert_eq!(snap.udp_ctrl_drops, 2);
+        assert_eq!(snap.udp_bytes_out, 12345);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"udp_repl_drops\":5"), "udp_repl_drops missing: {json}");
+        assert!(json.contains("\"udp_ctrl_drops\":2"), "udp_ctrl_drops missing: {json}");
+        assert!(json.contains("\"udp_bytes_out\":12345"), "udp_bytes_out missing: {json}");
+    }
+
+    #[test]
+    fn snapshot_udp_drops_accumulate() {
+        let mut c = MetricsCollector::new(1);
+        c.udp_repl_drops = 3;
+        c.record(timing(5));
+        let snap1 = c.snapshot();
+        assert_eq!(snap1.udp_repl_drops, 3);
+
+        c.udp_repl_drops = 10;
+        let snap2 = c.snapshot();
+        assert_eq!(snap2.udp_repl_drops, 10);
+    }
+
+    // =========================================================================
+    // WI-104: Per-peer health snapshots
+    // =========================================================================
+
+    #[test]
+    fn snapshot_peer_health_default_empty() {
+        let c = MetricsCollector::new(1);
+        let snap = c.snapshot();
+        assert!(snap.peer_health.is_empty());
+    }
+
+    #[test]
+    fn snapshot_peer_health_in_json() {
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 49998,
+            staleness_ticks: 2,
+            packets_received: 19,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health.len(), 1);
+        let p2 = &snap.peer_health[&2];
+        assert_eq!(p2.latest_tick, 49998);
+        assert_eq!(p2.staleness_ticks, 2);
+        assert_eq!(p2.packets_received, 19);
+        assert_eq!(p2.chunk_evictions, 0);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"peer_health\""), "peer_health missing: {json}");
+        assert!(json.contains("\"latest_tick\":49998"), "latest_tick missing: {json}");
+        assert!(json.contains("\"staleness_ticks\":2"), "staleness_ticks missing: {json}");
+    }
+
+    #[test]
+    fn snapshot_peer_health_multiple_peers() {
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 100,
+            staleness_ticks: 5,
+            packets_received: 20,
+            chunk_evictions: 0,
+        });
+        c.peer_health.insert(3, PeerHealthSnapshot {
+            latest_tick: 95,
+            staleness_ticks: 10,
+            packets_received: 14,
+            chunk_evictions: 2,
+        });
+        c.record(timing(5));
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health.len(), 2);
+        assert!(snap.peer_health.contains_key(&2));
+        assert!(snap.peer_health.contains_key(&3));
+        assert_eq!(snap.peer_health[&3].chunk_evictions, 2);
+    }
+
     #[test]
     fn snapshot_full_mode_resets_hot_cold() {
         // When replication_mode is "full", hot/cold counts should reflect
@@ -330,5 +469,208 @@ mod tests {
         assert_eq!(snap.replication_cold_count, 0);
         assert_eq!(snap.replication_full_count, 100);
         assert_eq!(snap.replication_sent_count, 200);
+    }
+
+    // =========================================================================
+    // WI-105: Peer health edge cases
+    // =========================================================================
+
+    #[test]
+    fn peer_health_snapshot_staleness_max() {
+        // When a peer has never sent data (latest_tick=0), the game loop sets
+        // staleness to u64::MAX. Verify that serializes without overflow.
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 0,
+            staleness_ticks: u64::MAX,
+            packets_received: 0,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health[&2].staleness_ticks, u64::MAX);
+
+        // Must serialize without panic
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"staleness_ticks\":18446744073709551615"),
+            "u64::MAX staleness should serialize: {json}");
+    }
+
+    #[test]
+    fn peer_health_snapshot_zero_staleness() {
+        // Peer is exactly caught up (latest_tick == current_tick).
+        let mut c = MetricsCollector::new(1);
+        c.current_tick = 500;
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 500,
+            staleness_ticks: 0,
+            packets_received: 100,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health[&2].staleness_ticks, 0);
+        assert_eq!(snap.peer_health[&2].latest_tick, 500);
+    }
+
+    #[test]
+    fn peer_health_json_keys_are_string() {
+        // HashMap<u16, _> serializes with string keys in JSON.
+        // Verify the peer_health map uses "2" not 2 as keys.
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 10,
+            staleness_ticks: 5,
+            packets_received: 3,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+
+        let json = serde_json::to_string(&c.snapshot()).unwrap();
+        // serde_json serializes HashMap<u16, _> with string keys
+        assert!(json.contains("\"2\":{") || json.contains("\"2\": {"),
+            "peer_health key should be a string: {json}");
+    }
+
+    #[test]
+    fn peer_health_overwrite_replaces_previous() {
+        // Setting peer_health on the collector replaces the previous value.
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 10,
+            staleness_ticks: 90,
+            packets_received: 5,
+            chunk_evictions: 1,
+        });
+        // Simulate next reporting window
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 110,
+            staleness_ticks: 0,
+            packets_received: 20,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health.len(), 1);
+        assert_eq!(snap.peer_health[&2].latest_tick, 110);
+        assert_eq!(snap.peer_health[&2].packets_received, 20);
+        assert_eq!(snap.peer_health[&2].chunk_evictions, 0);
+    }
+
+    #[test]
+    fn peer_health_removed_peer_disappears() {
+        // If a peer is removed from peer_health (e.g., disconnected),
+        // it should no longer appear in the snapshot.
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 50,
+            staleness_ticks: 10,
+            packets_received: 8,
+            chunk_evictions: 0,
+        });
+        c.peer_health.insert(3, PeerHealthSnapshot {
+            latest_tick: 48,
+            staleness_ticks: 12,
+            packets_received: 6,
+            chunk_evictions: 1,
+        });
+        c.record(timing(5));
+
+        // Remove peer 2 (simulates peer disconnect)
+        c.peer_health.remove(&2);
+        let snap = c.snapshot();
+        assert_eq!(snap.peer_health.len(), 1);
+        assert!(!snap.peer_health.contains_key(&2));
+        assert!(snap.peer_health.contains_key(&3));
+    }
+
+    #[test]
+    fn udp_bytes_out_large_value() {
+        // Verify u64 bytes_out handles large values without truncation.
+        let mut c = MetricsCollector::new(1);
+        c.udp_bytes_out = 1_000_000_000; // 1 GB
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.udp_bytes_out, 1_000_000_000);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"udp_bytes_out\":1000000000"),
+            "large bytes_out should serialize: {json}");
+    }
+
+    #[test]
+    fn snapshot_all_new_fields_present_in_json() {
+        // Comprehensive check: every new telemetry field appears in the JSON output.
+        let mut c = MetricsCollector::new(1);
+        c.udp_repl_drops = 7;
+        c.udp_ctrl_drops = 3;
+        c.udp_bytes_out = 9999;
+        c.peer_health.insert(5, PeerHealthSnapshot {
+            latest_tick: 200,
+            staleness_ticks: 10,
+            packets_received: 50,
+            chunk_evictions: 2,
+        });
+        c.record(timing(5));
+
+        let json = serde_json::to_string(&c.snapshot()).unwrap();
+        let required_fields = [
+            "udp_repl_drops",
+            "udp_ctrl_drops",
+            "udp_bytes_out",
+            "peer_health",
+            "latest_tick",
+            "staleness_ticks",
+            "packets_received",
+            "chunk_evictions",
+        ];
+        for field in &required_fields {
+            assert!(json.contains(field),
+                "field '{}' missing from JSON: {json}", field);
+        }
+    }
+
+    #[test]
+    fn snapshot_deserializes_back() {
+        // Verify MetricsSnapshot can round-trip through JSON.
+        let mut c = MetricsCollector::new(1);
+        c.udp_repl_drops = 3;
+        c.udp_ctrl_drops = 1;
+        c.udp_bytes_out = 4096;
+        c.current_tick = 500;
+        c.entity_count = 10;
+        c.peer_health.insert(2, PeerHealthSnapshot {
+            latest_tick: 498,
+            staleness_ticks: 2,
+            packets_received: 40,
+            chunk_evictions: 0,
+        });
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["udp_repl_drops"], 3);
+        assert_eq!(parsed["udp_ctrl_drops"], 1);
+        assert_eq!(parsed["udp_bytes_out"], 4096);
+        assert_eq!(parsed["peer_health"]["2"]["latest_tick"], 498);
+        assert_eq!(parsed["peer_health"]["2"]["staleness_ticks"], 2);
+        assert_eq!(parsed["peer_health"]["2"]["packets_received"], 40);
+        assert_eq!(parsed["peer_health"]["2"]["chunk_evictions"], 0);
+    }
+
+    #[test]
+    fn peer_health_empty_serializes_as_empty_object() {
+        // No peers -> peer_health should be {} not null.
+        let c = MetricsCollector::new(1);
+        let json = serde_json::to_string(&c.snapshot()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["peer_health"].is_object());
+        assert_eq!(parsed["peer_health"].as_object().unwrap().len(), 0);
     }
 }

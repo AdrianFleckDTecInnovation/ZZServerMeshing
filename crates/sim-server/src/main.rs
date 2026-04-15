@@ -125,6 +125,11 @@ async fn main() {
     // Create metrics collector
     let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
 
+    // Shared peer health accumulator (WI-102/105): receiver writes, game loop reads
+    let peer_health = Arc::new(game_loop::SharedPeerHealth {
+        stats: std::sync::Mutex::new(game_loop::PeerHealthAccumulator::default()),
+    });
+
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
         UdpSocket::bind(format!("0.0.0.0:{}", args.udp_port))
@@ -150,6 +155,7 @@ async fn main() {
     let recv_handle = tokio::spawn(receiver::run_udp_receiver(
         Arc::clone(&udp_socket),
         Arc::clone(&shared_inbound),
+        Arc::clone(&peer_health),
     ));
 
     // Connect to coordinator
@@ -194,6 +200,7 @@ async fn main() {
         args.full_repl_interval,
         args.full_snapshot,
         Arc::clone(&coord_outbound),
+        Arc::clone(&peer_health),
     ));
 
     tokio::select! {

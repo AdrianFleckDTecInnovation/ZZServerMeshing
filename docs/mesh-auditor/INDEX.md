@@ -128,6 +128,29 @@ Audited: 2026-04-15
 
 ---
 
+## Audit 9: Network Saturation Telemetry (Design 011)
+Audited: 2026-04-15
+
+6 new findings (068-073). 0 high, 3 medium, 3 low.
+
+**Implementation overview**: New telemetry fields added to the `/metrics` JSON endpoint for detecting WiFi/UDP saturation. Outbound: `udp_repl_drops`, `udp_ctrl_drops`, `udp_bytes_out` (already tracked in game loop, now exposed via MetricsCollector). Per-peer inbound: `peer_health` map with `staleness_ticks`, `packets_received`, `chunk_evictions`, `latest_tick`. The receiver writes to a shared `PeerHealthAccumulator` (std::sync::Mutex), the game loop reads it in Phase 6 and writes to MetricsCollector.
+
+**Mutex contention assessment**: The `SharedPeerHealth` uses `std::sync::Mutex`, consistent with the project convention established in design 005 and validated in audit 6. The mutex is never held across an `.await` point. Critical sections are sub-microsecond HashMap operations. Contention between the receiver (~40-60 packets/sec) and the game loop (20 reads/sec + 0.2 resets/sec) is negligible. On the UNO Q boards (single-core ARM), the tokio runtime runs both tasks on the same core, but since `std::sync::Mutex` cannot be preempted during synchronous code, the lock is always released before the next yield point. **No contention risk at any realistic scale.** See audit 6 deadlock analysis for the full reasoning.
+
+**Memory assessment**: The `PeerHealthAccumulator` contains three HashMaps keyed by `u16` (server_id). At 3 peers: ~192 bytes total. The maps grow per unique server_id ever seen but are not pruned (#068). In the current fixed-server deployment this is a non-issue, but would grow unbounded in a dynamic mesh. The receiver also maintains a separate local `latest_tick` HashMap (#073) that duplicates the shared accumulator's map with slightly different update semantics.
+
+**Counter accuracy**: The counters are accurate in the steady state. `packets_received` and `chunk_evictions` are incremented atomically with respect to the mutex -- no packets are miscounted. The `latest_tick` high-water mark correctly handles out-of-order packets. However, the drop counters (`udp_repl_drops`, `udp_ctrl_drops`) have a sawtooth reporting pattern (#069): they accumulate over a 5-second window but the metrics endpoint samples them at any point in the cycle. A poll immediately after the 5-second reset sees zero drops even during sustained saturation.
+
+**Performance assessment**: The receiver acquires the mutex on every packet (plus up to 2 additional times for eviction counting on chunked updates). At 60 packets/sec, this is ~60-180 mutex acquisitions/sec, each holding for ~100-300ns. Total lock-hold time: ~6-54 microseconds/sec out of 1,000,000 available. **Not a bottleneck.** The batching opportunity (#070) exists but would save negligible time.
+
+**Staleness calculation**: `tick_val.saturating_sub(latest)` is correct for the primary use case (detecting peers falling behind). When a peer is AHEAD of the local tick (which happens during staggered server startup), `saturating_sub` returns 0, which is misleading but not harmful (#071). The `u64::MAX` sentinel for never-seen peers serializes correctly (tested). Tick wraparound is not a concern: at 20Hz, u64 overflow would take 29 billion years.
+
+**Test coverage**: 30+ unit tests cover MetricsCollector fields, PeerHealthSnapshot serialization, PeerHealthAccumulator behavior, edge cases (u64::MAX staleness, zero staleness, JSON key format, multiple peers, overwrite, removal). Tests are thorough. One gap: no integration test that verifies the full receiver-to-metrics-endpoint pipeline with actual UDP packets, though the design is simple enough that the unit test coverage is sufficient.
+
+**Overall assessment**: The implementation is clean, low-risk, and well-tested. No high-severity issues. The two medium findings (#068 and #069) are both about long-term correctness in production -- accumulator memory growth and counter accuracy for automated monitoring. Neither affects the current deployment.
+
+---
+
 ## All Findings by Severity
 
 | # | Severity | Category | Title | Status | Effort |
@@ -181,6 +204,8 @@ Audited: 2026-04-15
 | [061](061-cold-tick-entities-clone-per-peer.md) | **medium** | bottleneck | Cold tick clones full entity Vec per peer, ~288KB at 2000 entities with 3 peers | **new** | small |
 | [062](062-design-doc-shadow-stale-ticks-mismatch.md) | **medium** | operational | Design doc claims SHADOW_STALE_TICKS=100 but code uses 300, safety analysis based on wrong values | **new** | small |
 | [066](066-cold-tick-burst-amplifies-udp-chunking.md) | **medium** | bottleneck | Cold tick sends 4-10x more UDP chunks than hot ticks, overflows replication channel at 2500+ entities | **new** | medium |
+| [068](068-peer-health-accumulator-never-prunes-departed-peers.md) | **medium** | scalability | PeerHealthAccumulator latest_tick map grows unbounded as peers come and go | **new** | small |
+| [069](069-drop-counters-snapshot-timing-mismatch.md) | **medium** | operational | Drop counters report sawtooth values depending on poll timing within 5-second window | **new** | small |
 | [014](014-tick-counter-u64-not-synchronized.md) | low | protocol | Tick counter u64 not synchronized across servers | open | small |
 | [017](017-behavioral-divergence-rebalance-ignores-entity-ids.md) | low | protocol | Rebalance directive entity_ids field ignored | open | small |
 | [025](025-ack-parsing-no-validation.md) | low | protocol | Binary ACK parsing accepts any tick value without validation | **resolved** | small |
@@ -199,6 +224,10 @@ Audited: 2026-04-15
 | [064](064-fallback-peerbounds-no-cold-tier.md) | **medium** | scalability | PeerBounds fallback sends at 20Hz with no cold-tier distinction | **new** | small |
 | [065](065-shadow-positions-one-tick-stale-for-hot-classification.md) | **low** | race-condition | Shadow player positions 1 tick stale for hot classification, absorbed by 250-unit margin | **new** (accepted) | small |
 | [067](067-transfer-outbound-entities-replicated-at-full-rate.md) | **low** | bottleneck | Frozen TransferOutbound entities replicated at full rate despite unchanged state | **new** | small |
+| [070](070-receiver-mutex-acquisition-per-packet.md) | **low** | bottleneck | Receiver acquires SharedPeerHealth mutex up to 3 times per chunked packet | **new** | small |
+| [071](071-staleness-underflow-on-peer-ahead-of-local-tick.md) | **medium** | protocol | Staleness reports 0 when peer is ahead of local tick, masking startup stagger | **new** | small |
+| [072](072-peer-health-snapshot-clone-every-tick.md) | **low** | bottleneck | peer_health HashMap allocated and cloned every tick unconditionally | **new** | small |
+| [073](073-duplicate-latest-tick-maps-in-receiver.md) | **low** | operational | Receiver maintains two latest_tick maps with divergent update semantics | **new** | small |
 
 ## Re-Audit Fix Verification Detail
 
@@ -283,6 +312,15 @@ The fix did not change the probability of ACK loss, but the consequence is clean
 8. **#067** (low, small effort) -- Consider excluding TransferOutbound from replication (optional, low impact).
 9. **#065** (low, n/a) -- Document margin rationale in code comment (accepted design tradeoff).
 10. **#063** (low, small effort) -- Add total_sent_count metric or document hot/cold semantics.
+
+## Recommended Fix Order (Network Saturation Telemetry)
+
+1. **#069** (medium, small effort) -- Fix drop counter reporting: reset per-tick to match `udp_bytes_out` semantics. Use separate shadow counters for 5-second log messages. **Fixes misleading automated monitoring.**
+2. **#068** (medium, small effort) -- Prune `PeerHealthAccumulator.latest_tick` for departed peers in 5-second reset. **Prevents unbounded growth in dynamic meshes.**
+3. **#071** (medium, small effort) -- Document or fix staleness semantics when peer is ahead of local tick. Option C (document) is sufficient for current deployment.
+4. **#073** (low, small effort) -- Update local `latest_tick` in `EntityStateUpdate` arm for consistency, or add comment explaining the divergence.
+5. **#070** (low, small effort) -- Batch mutex acquisitions in receiver for ChunkedEntityUpdate. Saves ~200ns per packet.
+6. **#072** (low, small effort) -- Reuse peer_health HashMap in Phase 6 via clear() instead of replace. Saves one allocation per tick.
 
 ## Two-Phase Transfer Findings Detail
 
