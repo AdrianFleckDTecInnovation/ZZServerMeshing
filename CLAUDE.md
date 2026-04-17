@@ -4,7 +4,7 @@ True server meshing: multiple Rust simulation servers share authority over the S
 
 ## Architecture
 
-- `crates/shared/` — Shared types: entities, protocol messages, spatial grid, tick constants
+- `crates/shared/` — Shared types: entities, protocol messages, spatial grid, tick constants, TLS utilities, gameplay constants
 - `crates/sim-server/` — Rust game simulation server (run N instances, each with unique `--server-id`)
 - `crates/coordinator/` — Mesh coordinator: server registry, peer discovery, health monitoring, client assignment
 - `client/` — Three.js WebGPU browser client: renders entities, debug overlay

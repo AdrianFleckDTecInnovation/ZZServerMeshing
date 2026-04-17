@@ -23,7 +23,7 @@ Browser ←─WSS─→ Sim-Server 1 ←─UDP─→ Sim-Server 2
 
 3. **Client** (`client/`, Three.js WebGPU, port 4321 dev) — Browser app. Renders entities as colored spheres (NPCs) and boxes (players). Color = which server owns the entity. WASD moves your player. Click spawns NPCs. Debug overlay shows per-server load bars and network metrics. Connects directly to a sim-server after getting an assignment from the coordinator.
 
-4. **Shared** (`crates/shared/`) — Types used by both Rust crates: `EntityId`, `EntityState`, `ServerId`, all protocol message enums, spatial grid helpers, tick constants.
+4. **Shared** (`crates/shared/`) — Types used by both Rust crates: `EntityId`, `EntityState`, `ServerId`, all protocol message enums, spatial grid helpers, tick constants, gameplay constants (`PLAYER_SPEED`, `NPC_SPEED`), and `tls::build_tls_acceptor`.
 
 Additional: **Board Dashboard** (`crates/board-dash/`, Rust, port 3000) — Per-board system health monitoring + sim-server start/stop control. Only deployed on UNO Q boards.
 
@@ -41,13 +41,15 @@ Authority can transfer between servers. The coordinator detects load imbalance a
 | All protocol messages | `crates/shared/src/protocol.rs` | 5 enums: `ServerMessage`, `ClientMessage`, `PeerMessage`, `CoordClientMsg`, `CoordServerMsg` |
 | ECS components | `crates/sim-server/src/components.rs` | Position, Velocity, EntityTypeComp, AuthorityServer, NetworkId, LastInputSeq |
 | ECS ↔ network conversion | `crates/sim-server/src/conversion.rs` | Converts between Bevy ECS components and EntityState for serialization |
-| ECS systems | `crates/sim-server/src/systems.rs` | Simulation, NPC AI, input processing, peer list updates |
+| ECS systems | `crates/sim-server/src/systems/` | Directory module: `inbound.rs`, `input.rs`, `transfers.rs`, `drain.rs`, `replication.rs`, `snapshot.rs`, `simulation.rs`, `coordinator.rs`, `shadow.rs`, `metrics.rs` |
 | Game loop & phases | `crates/sim-server/src/game_loop.rs` | 20Hz tick, phase timing (input, sim, transfers, replication, shadow cleanup) |
 | UDP replication | `crates/sim-server/src/replication.rs` + `receiver.rs` | Outbound: bincode serialize all auth entities to peers. Inbound: merge into shadows with tick-based conflict resolution |
 | Coordinator client | `crates/sim-server/src/coordinator_client.rs` | Registration (with `tls` flag), heartbeats, handling PeerList/RebalanceDirective/DrainDirective/RecoverEntities |
 | WebSocket server | `crates/sim-server/src/network.rs` | WS/WSS server, broadcasts binary frames each tick, receives ClientMessage |
 | Metrics server | `crates/sim-server/src/metrics_server.rs` | HTTP endpoint with per-tick phase timing (p50/p95/p99) |
-| Server registry | `crates/coordinator/src/registry.rs` | Peer tracking, rebalance algorithm, crash detection (5s heartbeat timeout), drain orchestration |
+| Server registry | `crates/coordinator/src/registry.rs` | Peer tracking, rebalance algorithm, crash detection (15s heartbeat timeout), drain orchestration |
+| TLS utilities | `crates/shared/src/tls.rs` | `build_tls_acceptor` -- single shared implementation used by both sim-server and coordinator |
+| Peer spatial bounds | `crates/sim-server/src/peer_bounds.rs` | `PeerBounds` struct for per-peer replication filtering (moved from shared) |
 | HTTP/HTTPS server | `crates/coordinator/src/main.rs` | `/assign` (client assignment), `/servers` (server list), `/dashboard` (HTML dashboard), static file serving |
 | Client rendering | `client/src/renderer.ts` | Three.js WebGPU, shared material cache, mesh pooling, camera follow |
 | Client entity state | `client/src/world-view.ts` | Tick-based interpolation (previousPosition/currentPosition with alpha), server color mapping |
@@ -100,12 +102,15 @@ Verify: `cargo build` for Rust, `cd client && npx tsc --noEmit` for TypeScript.
 |------|-------|-------|
 | `TICK_RATE` | 20 Hz | `shared/tick.rs` |
 | `TICK_DURATION_MS` | 50 ms | `shared/tick.rs` |
+| `TICK_DURATION` | 50ms Duration | `shared/tick.rs` — single `std::time::Duration` constant |
+| `PLAYER_SPEED` | 5.0 | `shared/tick.rs` — must match `client/src/config.ts` |
+| `NPC_SPEED` | 2.0 | `shared/tick.rs` — fallback speed for non-player entities |
 | `WORLD_EXTENT` | 5000 | `shared/spatial.rs` — bounds are [-5000, 5000] |
 | `AOI_RADIUS` | 500 | `shared/spatial.rs` — client AoI filter radius |
 | `CELL_SIZE` | 50 | `shared/spatial.rs` — spatial grid |
-| `SHADOW_STALE_TICKS` | 100 (5s) | `sim-server` — shadow cleanup |
+| `SHADOW_STALE_TICKS` | 300 (15s) | `sim-server/systems/shadow.rs` — shadow cleanup |
 | Rebalance interval | 5s | `coordinator/main.rs` |
-| Heartbeat timeout | 5s | `coordinator/registry.rs` |
+| Heartbeat timeout | 15s | `coordinator/registry.rs` |
 
 ## Conventions
 
@@ -119,8 +124,10 @@ Verify: `cargo build` for Rust, `cd client && npx tsc --noEmit` for TypeScript.
 
 **Add a new entity field**: Add component in `components.rs`, update `EntityState` in `shared/entity.rs`, update conversion in `conversion.rs`. Update `RawEntity` in `client/world-view.ts` and binary decoder in `binary-protocol.ts` to match.
 
-**Add a new coordinator→server message**: Add variant to `CoordServerMsg` in `shared/protocol.rs`. Handle in `coordinator_client.rs` match arm. Handle exhaustiveness errors in any other match sites.
+**Add a new coordinator→server message**: Add variant to `CoordServerMsg` in `shared/protocol.rs`. Handle in `coordinator_client.rs` match arm. Handle in `systems/coordinator.rs`. Handle exhaustiveness errors in any other match sites.
 
-**Add a new client→server message**: Add variant to `ClientMessage` in `shared/protocol.rs`. Handle in the input processing system. If the input targets a non-local entity, add forwarding logic.
+**Add a new client→server message**: Add variant to `ClientMessage` in `shared/protocol.rs`. Handle in `systems/input.rs` (`process_client_inputs`). If the input targets a non-local entity, add forwarding logic.
 
-**Change tick rate**: Update `TICK_RATE` in `shared/tick.rs`. Update `TICK_DURATION_MS` accordingly. Client interpolation in `world-view.ts` uses a hardcoded 50ms — update `TICK_DURATION_MS` there too.
+**Add a new ECS system**: Create the system function in the appropriate `systems/*.rs` module. Re-export it from `systems/mod.rs`. Add it to the schedule in `schedule.rs` and the tick loop in `game_loop.rs`.
+
+**Change tick rate**: Update `TICK_RATE` in `shared/tick.rs`. `TICK_DURATION_MS` and `TICK_DURATION` update automatically. Client interpolation in `world-view.ts` uses a hardcoded 50ms — update `TICK_DURATION_MS` there too.
