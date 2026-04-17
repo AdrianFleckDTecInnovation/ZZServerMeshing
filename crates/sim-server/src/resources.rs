@@ -110,14 +110,15 @@ pub struct OutboundForwards {
     pub messages: Vec<(SocketAddr, Vec<u8>)>,
 }
 
+/// Info about an active drain operation.
+pub struct DrainInfo {
+    pub targets: Vec<ServerId>,
+    pub started_tick: u64,
+}
+
 /// Graceful drain state.
 #[derive(Resource, Default)]
-pub struct DrainState {
-    pub draining: bool,
-    pub targets: Option<Vec<ServerId>>,
-    /// Tick when drain was started. Used for drain timeout.
-    pub started_tick: Option<u64>,
-}
+pub struct DrainState(pub Option<DrainInfo>);
 
 /// Shutdown requested (set when drain completes).
 #[derive(Resource, Default)]
@@ -260,7 +261,7 @@ mod tests {
         assert!(world.resource::<PendingTransfers>().transfers.is_none());
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
         assert!(world.resource::<OutboundForwards>().messages.is_empty());
-        assert!(!world.resource::<DrainState>().draining);
+        assert!(world.resource::<DrainState>().0.is_none());
         assert!(!world.resource::<ShutdownRequested>().0);
     }
 

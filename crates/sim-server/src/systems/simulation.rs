@@ -15,12 +15,12 @@ const NPC_DIRECTION_CHANGE_INTERVAL: u64 = (TICK_RATE as u64) * 3; // every 3 se
 pub fn npc_behavior(
     tick: Res<TickCounter>,
     mut query: Query<
-        (&NetworkId, &mut Velocity, &EntityKind),
+        (&NetworkId, &mut Velocity, &EntityTypeComp),
         (With<Authoritative>, Without<TransferOutbound>),
     >,
 ) {
     let current_tick = tick.0;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for (nid, mut vel, kind) in query.iter_mut() {
         if kind.0 != EntityType::Npc {
@@ -29,8 +29,8 @@ pub fn npc_behavior(
 
         let phase = (nid.0 .0.as_u128() % NPC_DIRECTION_CHANGE_INTERVAL as u128) as u64;
         if current_tick % NPC_DIRECTION_CHANGE_INTERVAL == phase {
-            let angle = rng.gen_range(0.0..std::f32::consts::TAU);
-            let speed = rng.gen_range(1.0..3.0);
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
+            let speed = rng.random_range(1.0..3.0);
             vel.0 = Vec3::new(angle.cos() * speed, 0.0, angle.sin() * speed);
         }
     }

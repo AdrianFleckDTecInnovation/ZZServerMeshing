@@ -120,6 +120,40 @@ export const crashRecovery: Scenario = {
         } catch {}
       }
 
+      // Restart the killed server so subsequent tests have a full cluster
+      try {
+        const wsPort = 7877 + targetId;
+        const udpPort = 9100 + targetId;
+        const metricsPort = 8100 + targetId;
+        const projectRoot = process.cwd().replace(/\/tools$/, '');
+        const { spawn: spawnChild } = await import('child_process');
+        const { openSync } = await import('fs');
+        const logFd = openSync(`${projectRoot}/.sim-server-${targetId}.log`, 'a');
+        const child = spawnChild('cargo', [
+          'run', '--manifest-path', `${projectRoot}/Cargo.toml`, '-p', 'sim-server', '--',
+          '--server-id', `${targetId}`, '--port', `${wsPort}`, '--udp-port', `${udpPort}`,
+          '--metrics-port', `${metricsPort}`,
+          '--coordinator', `127.0.0.1:7870`, '--advertise-host', '127.0.0.1', '--initial-npcs', '0',
+        ], { stdio: ['ignore', logFd, logFd], detached: true });
+        child.unref();
+        ctx.log(`Restarted S${targetId} (pid ${child.pid})`);
+        details.push(`Restarted S${targetId} with 0 NPCs for subsequent tests`);
+
+        // Wait for the restarted server to register with coordinator
+        for (let w = 0; w < 15; w++) {
+          await ctx.sleep(2000);
+          try {
+            const m = await ctx.getMetrics(targetId);
+            if (m.server_id === targetId) {
+              ctx.log(`S${targetId} back online (tick ${m.tick})`);
+              break;
+            }
+          } catch {}
+        }
+      } catch (err) {
+        ctx.log(`Warning: could not restart S${targetId}: ${err}`);
+      }
+
       return {
         name: 'crash-recovery',
         status: recoveryTime > 10 ? 'warn' : 'pass',

@@ -15,7 +15,7 @@ pub fn spawn_from_entity_state_direct(
         NetworkId(state.id),
         Position(state.position),
         Velocity(state.velocity),
-        EntityKind(state.entity_type),
+        EntityTypeComp(state.entity_type),
         AuthorityServer(state.authority_server),
     ));
 
@@ -47,7 +47,7 @@ pub fn to_entity_state(
     network_id: &NetworkId,
     position: &Position,
     velocity: &Velocity,
-    kind: &EntityKind,
+    kind: &EntityTypeComp,
     authority: &AuthorityServer,
     last_seq: Option<&LastInputSeq>,
 ) -> EntityState {
@@ -101,7 +101,7 @@ mod tests {
         let nid = world.get::<NetworkId>(entity).unwrap();
         let pos = world.get::<Position>(entity).unwrap();
         let vel = world.get::<Velocity>(entity).unwrap();
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         let auth = world.get::<AuthorityServer>(entity).unwrap();
         let seq = world.get::<LastInputSeq>(entity);
 
@@ -126,7 +126,7 @@ mod tests {
         let nid = world.get::<NetworkId>(entity).unwrap();
         let pos = world.get::<Position>(entity).unwrap();
         let vel = world.get::<Velocity>(entity).unwrap();
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         let auth = world.get::<AuthorityServer>(entity).unwrap();
         let seq = world.get::<LastInputSeq>(entity);
 
@@ -195,7 +195,7 @@ mod tests {
         let nid = world.get::<NetworkId>(entity).unwrap();
         let pos = world.get::<Position>(entity).unwrap();
         let vel = world.get::<Velocity>(entity).unwrap();
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         let auth = world.get::<AuthorityServer>(entity).unwrap();
         let seq = world.get::<LastInputSeq>(entity);
 
@@ -285,7 +285,7 @@ mod tests {
         let nid = world.get::<NetworkId>(entity).unwrap();
         let pos = world.get::<Position>(entity).unwrap();
         let vel = world.get::<Velocity>(entity).unwrap();
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         let auth = world.get::<AuthorityServer>(entity).unwrap();
         let seq = world.get::<LastInputSeq>(entity);
 

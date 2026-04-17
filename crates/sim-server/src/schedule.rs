@@ -490,7 +490,7 @@ mod tests {
         schedule.run(&mut world);
 
         // After first tick: drain active, entities have TransferOutbound, NOT yet shutdown
-        assert!(world.resource::<DrainState>().draining);
+        assert!(world.resource::<DrainState>().0.is_some());
         let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
         assert_eq!(outbound_count, 3, "all 3 entities should have TransferOutbound");
         assert!(!world.resource::<ShutdownRequested>().0, "should not shutdown yet (waiting for ACKs)");

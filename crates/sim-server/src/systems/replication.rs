@@ -4,7 +4,7 @@ use crate::resources::*;
 use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityState, EntityType};
-use shared::spatial::{PeerBounds, PEER_AOI_RADIUS, PEER_AOI_RADIUS_SQ};
+use crate::peer_bounds::{PeerBounds, PEER_AOI_RADIUS, PEER_AOI_RADIUS_SQ};
 
 pub fn prepare_replication(
     tick: Res<TickCounter>,
@@ -16,13 +16,13 @@ pub fn prepare_replication(
             &NetworkId,
             &Position,
             &Velocity,
-            &EntityKind,
+            &EntityTypeComp,
             &AuthorityServer,
             Option<&LastInputSeq>,
         ),
         With<Authoritative>,
     >,
-    shadow_query: Query<(&AuthorityServer, &Position, &EntityKind), With<Shadow>>,
+    shadow_query: Query<(&AuthorityServer, &Position, &EntityTypeComp), With<Shadow>>,
 ) {
     let entities: Vec<EntityState> = auth_query
         .iter()

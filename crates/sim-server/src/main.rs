@@ -11,6 +11,7 @@ mod delta;
 mod systems;
 mod schedule;
 mod game_loop;
+pub mod peer_bounds;
 
 use clap::Parser;
 use shared::entity::ServerId;
@@ -72,7 +73,7 @@ async fn main() {
     // Build TLS config if cert+key provided
     let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
         (Some(cert_path), Some(key_path)) => {
-            let acceptor = build_tls_acceptor(cert_path, key_path)
+            let acceptor = shared::tls::build_tls_acceptor(cert_path, key_path)
                 .expect("Failed to build TLS config from provided cert/key");
             tracing::info!(
                 "TLS enabled for WebSocket server (cert={}, key={})",
@@ -95,29 +96,21 @@ async fn main() {
     );
 
     // Create shared async-to-ECS buffers
-    let shared_inbound = Arc::new(game_loop::SharedInbound {
-        queue: std::sync::Mutex::new(resources::InboundQueue::default()),
-    });
-    let shared_coord_events = Arc::new(game_loop::SharedCoordEvents {
-        queue: std::sync::Mutex::new(resources::CoordEventQueue::default()),
-    });
+    let shared_inbound = Arc::new(std::sync::Mutex::new(resources::InboundQueue::default()));
+    let shared_coord_events = Arc::new(std::sync::Mutex::new(resources::CoordEventQueue::default()));
 
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
     // Weighted load: players count 3x, NPCs count 1x
     let weighted_load_atomic = Arc::new(AtomicU32::new(0));
     // Outbound coordinator messages (TransferResult, etc.) from game loop
-    let coord_outbound = Arc::new(game_loop::SharedCoordOutbound {
-        queue: std::sync::Mutex::new(Vec::new()),
-    });
+    let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Create metrics collector
     let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
 
     // Shared peer health accumulator (WI-102/105): receiver writes, game loop reads
-    let peer_health = Arc::new(game_loop::SharedPeerHealth {
-        stats: std::sync::Mutex::new(game_loop::PeerHealthAccumulator::default()),
-    });
+    let peer_health = Arc::new(std::sync::Mutex::new(game_loop::PeerHealthAccumulator::default()));
 
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
@@ -201,7 +194,7 @@ async fn main() {
             tracing::info!("Received shutdown signal -- initiating graceful drain");
             // Push drain event through the coordinator event queue
             {
-                let mut q = shared_coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = shared_coord_events.lock().unwrap_or_else(|e| e.into_inner());
                 // Drain targets: we need the peer addresses, but we don't have direct access
                 // to the ECS world. Instead, push an empty drain directive -- the game loop
                 // will use whatever peers it knows about.
@@ -215,35 +208,3 @@ async fn main() {
     }
 }
 
-/// Build a tokio-rustls TLS acceptor from PEM certificate and key files.
-fn build_tls_acceptor(
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
-    use rustls::pki_types::PrivateKeyDer;
-    use std::io::BufReader;
-
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| format!("Failed to open cert file {}: {e}", cert_path.display()))?;
-    let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to parse certs: {e}"))?;
-    if certs.is_empty() {
-        return Err("No certificates found in cert file".into());
-    }
-
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| format!("Failed to open key file {}: {e}", key_path.display()))?;
-    let mut key_reader = BufReader::new(key_file);
-    let key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("Failed to parse private key: {e}"))?
-        .ok_or("No private key found in key file")?;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("Failed to build TLS config: {e}"))?;
-
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
-}

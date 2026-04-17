@@ -1,6 +1,5 @@
 use crate::components::*;
 use crate::conversion::{despawn_and_remove, to_entity_state};
-use crate::game_loop::serialize_versioned;
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use shared::entity::{EntityId, EntityType, ServerId};
@@ -86,7 +85,7 @@ pub fn process_transfer_timeouts(world: &mut World) {
         let nid = world.get::<NetworkId>(entity).unwrap();
         let pos = world.get::<Position>(entity).unwrap();
         let vel = world.get::<Velocity>(entity).unwrap();
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         let seq = world.get::<LastInputSeq>(entity);
 
         let entity_state = to_entity_state(
@@ -103,12 +102,11 @@ pub fn process_transfer_timeouts(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Some(bytes) = serialize_versioned(&msg) {
-            world
-                .resource_mut::<OutboundTransfers>()
-                .messages
-                .push((target_addr, bytes));
-        }
+        super::enqueue_outbound(
+            &mut world.resource_mut::<OutboundTransfers>().messages,
+            target_addr,
+            &msg,
+        );
 
         if let Some(mut outbound) = world.get_mut::<TransferOutbound>(entity) {
             outbound.retry_count += 1;
@@ -178,7 +176,7 @@ pub fn process_transfers(world: &mut World) {
     let mut npc_candidates: Vec<(Entity, EntityId, f32)> = Vec::new();
     let mut total_auth = 0usize;
 
-    let mut query = world.query_filtered::<(Entity, &NetworkId, &Position, &EntityKind), With<Authoritative>>();
+    let mut query = world.query_filtered::<(Entity, &NetworkId, &Position, &EntityTypeComp), With<Authoritative>>();
     for (entity, nid, pos, kind) in query.iter(&world) {
         total_auth += 1;
         if kind.0 == EntityType::Npc && world.get::<TransferOutbound>(entity).is_none() {
@@ -198,7 +196,7 @@ pub fn process_transfers(world: &mut World) {
         let nid = world.get::<NetworkId>(*entity).unwrap();
         let pos = world.get::<Position>(*entity).unwrap();
         let vel = world.get::<Velocity>(*entity).unwrap();
-        let kind = world.get::<EntityKind>(*entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(*entity).unwrap();
         let seq = world.get::<LastInputSeq>(*entity);
 
         let entity_state = to_entity_state(nid, pos, vel, kind, &AuthorityServer(target_server), seq);
@@ -211,22 +209,21 @@ pub fn process_transfers(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Some(bytes) = serialize_versioned(&msg) {
-            world
-                .resource_mut::<OutboundTransfers>()
-                .messages
-                .push((target_addr, bytes));
+        super::enqueue_outbound(
+            &mut world.resource_mut::<OutboundTransfers>().messages,
+            target_addr,
+            &msg,
+        );
 
-            // Two-phase: mark entity as TransferOutbound instead of despawning.
-            // Entity keeps Authoritative but is frozen (excluded from sim/replication via query filters).
-            world.entity_mut(*entity).insert(TransferOutbound {
-                target_server: target_server.0,
-                target_addr,
-                sent_tick: tick,
-                retry_count: 0,
-            });
-            transferred += 1;
-        }
+        // Two-phase: mark entity as TransferOutbound instead of despawning.
+        // Entity keeps Authoritative but is frozen (excluded from sim/replication via query filters).
+        world.entity_mut(*entity).insert(TransferOutbound {
+            target_server: target_server.0,
+            target_addr,
+            sent_tick: tick,
+            retry_count: 0,
+        });
+        transferred += 1;
         // DO NOT despawn -- entity will be despawned when process_transfer_acks receives the ACK.
     }
 

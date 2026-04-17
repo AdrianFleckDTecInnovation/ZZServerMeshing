@@ -1,11 +1,11 @@
 use crate::components::*;
 use crate::conversion::{despawn_and_remove, spawn_from_entity_state_direct};
-use crate::game_loop::serialize_versioned;
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityId, EntityState, EntityType, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
+use shared::tick::{PLAYER_SPEED, NPC_SPEED};
 
 /// Send a TransferAck back to the source server of an authority transfer.
 /// Looks up the source server's UDP address in PeerAddresses. If the source
@@ -18,17 +18,16 @@ pub(super) fn send_transfer_ack(
 ) {
     if let Some(&source_addr) = world.resource::<PeerAddresses>().0.get(&from_server.0) {
         let ack_msg = PeerMessage::TransferAck { entity_id, tick };
-        if let Some(bytes) = serialize_versioned(&ack_msg) {
-            world
-                .resource_mut::<OutboundTransfers>()
-                .messages
-                .push((source_addr, bytes));
-            tracing::debug!(
-                entity = %entity_id,
-                to = from_server.0,
-                "Sent TransferAck"
-            );
-        }
+        super::enqueue_outbound(
+            &mut world.resource_mut::<OutboundTransfers>().messages,
+            source_addr,
+            &ack_msg,
+        );
+        tracing::debug!(
+            entity = %entity_id,
+            to = from_server.0,
+            "Sent TransferAck"
+        );
     } else {
         tracing::debug!(
             entity = %entity_id,
@@ -36,6 +35,18 @@ pub(super) fn send_transfer_ack(
             "Skipping TransferAck: source server not in peer list"
         );
     }
+}
+
+/// Spawn an entity from state and record client ownership in one step.
+fn spawn_and_track_ownership(
+    world: &mut World,
+    state: &EntityState,
+    client_id: u64,
+) -> bevy_ecs::entity::Entity {
+    let eid = state.id;
+    let entity = spawn_from_entity_state_direct(world, state, true, None);
+    world.resource_mut::<EntityOwnership>().owners.insert(eid, client_id);
+    entity
 }
 
 /// Process client inputs from WebSocket connections.
@@ -59,9 +70,7 @@ pub fn process_client_inputs(world: &mut World) {
                     EntityType::Npc => EntityState::new_npc(pos, server_id),
                 };
                 let eid = state.id;
-                spawn_from_entity_state_direct(world, &state, true, None);
-                // Track entity ownership for RemoveEntity validation
-                world.resource_mut::<EntityOwnership>().owners.insert(eid, client_id);
+                spawn_and_track_ownership(world, &state, client_id);
                 tracing::debug!("Spawned {:?} entity {}", etype, eid);
             }
             ClientMessage::SpawnPlayer {
@@ -77,9 +86,7 @@ pub fn process_client_inputs(world: &mut World) {
                     authority_server: server_id,
                     last_input_seq: 0,
                 };
-                spawn_from_entity_state_direct(world, &state, true, None);
-                // Track player entity ownership
-                world.resource_mut::<EntityOwnership>().owners.insert(player_id, client_id);
+                spawn_and_track_ownership(world, &state, client_id);
                 tracing::info!("Spawned player {}", player_id);
             }
             ClientMessage::MoveInput {
@@ -102,12 +109,11 @@ pub fn process_client_inputs(world: &mut World) {
                                 direction,
                                 seq,
                             };
-                            if let Some(bytes) = serialize_versioned(&fwd_msg) {
-                                world
-                                    .resource_mut::<OutboundForwards>()
-                                    .messages
-                                    .push((target_addr, bytes));
-                            }
+                            super::enqueue_outbound(
+                                &mut world.resource_mut::<OutboundForwards>().messages,
+                                target_addr,
+                                &fwd_msg,
+                            );
                             tracing::debug!(
                                 entity = %entity_id,
                                 target = target_server,
@@ -118,10 +124,10 @@ pub fn process_client_inputs(world: &mut World) {
                         }
 
                         // Process locally
-                        let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
+                        let kind = world.get::<EntityTypeComp>(bevy_entity).map(|k| k.0);
                         let speed = match kind {
-                            Some(EntityType::Player) => 5.0,
-                            _ => 2.0,
+                            Some(EntityType::Player) => PLAYER_SPEED,
+                            _ => NPC_SPEED,
                         };
                         if let Some(mut vel) = world.get_mut::<Velocity>(bevy_entity) {
                             vel.0 = dir.normalize_or_zero() * speed;
@@ -155,12 +161,11 @@ pub fn process_client_inputs(world: &mut World) {
                                     direction,
                                     seq,
                                 };
-                                if let Some(bytes) = serialize_versioned(&msg) {
-                                    world
-                                        .resource_mut::<OutboundForwards>()
-                                        .messages
-                                        .push((peer_addr, bytes));
-                                }
+                                super::enqueue_outbound(
+                                    &mut world.resource_mut::<OutboundForwards>().messages,
+                                    peer_addr,
+                                    &msg,
+                                );
                             }
                             tracing::debug!(
                                 entity = %entity_id,
@@ -205,12 +210,11 @@ pub fn process_client_inputs(world: &mut World) {
                             let msg = PeerMessage::ForwardedRemove {
                                 entity_id,
                             };
-                            if let Some(bytes) = serialize_versioned(&msg) {
-                                world
-                                    .resource_mut::<OutboundForwards>()
-                                    .messages
-                                    .push((target_addr, bytes));
-                            }
+                            super::enqueue_outbound(
+                                &mut world.resource_mut::<OutboundForwards>().messages,
+                                target_addr,
+                                &msg,
+                            );
                             tracing::info!(
                                 entity = %entity_id,
                                 target = target_server,
@@ -234,12 +238,11 @@ pub fn process_client_inputs(world: &mut World) {
                                 let msg = PeerMessage::ForwardedRemove {
                                     entity_id,
                                 };
-                                if let Some(bytes) = serialize_versioned(&msg) {
-                                    world
-                                        .resource_mut::<OutboundForwards>()
-                                        .messages
-                                        .push((peer_addr, bytes));
-                                }
+                                super::enqueue_outbound(
+                                    &mut world.resource_mut::<OutboundForwards>().messages,
+                                    peer_addr,
+                                    &msg,
+                                );
                                 tracing::info!(
                                     entity = %entity_id,
                                     target = target_server,
@@ -348,7 +351,7 @@ mod tests {
 
         process_client_inputs(&mut world);
 
-        let mut query = world.query::<&EntityKind>();
+        let mut query = world.query::<&EntityTypeComp>();
         let kind = query.iter(&world).next().unwrap();
         assert_eq!(kind.0, EntityType::Player);
     }
@@ -440,8 +443,8 @@ mod tests {
         process_client_inputs(&mut world);
 
         let vel = world.get::<Velocity>(entity).unwrap();
-        // Speed should be 5.0 (player), direction should be normalized
-        assert!((vel.0.length() - 5.0).abs() < 0.01, "velocity magnitude should be player speed 5.0");
+        // Speed should be PLAYER_SPEED, direction should be normalized
+        assert!((vel.0.length() - PLAYER_SPEED).abs() < 0.01, "velocity magnitude should be PLAYER_SPEED");
     }
 
     // -- Client input: zero direction gives zero velocity --
@@ -749,7 +752,7 @@ mod tests {
         // 4. Remove NPC by entity_id
         // Find the NPC entity ID
         let mut npc_eid = None;
-        let mut npc_query = world.query::<(&NetworkId, &EntityKind)>();
+        let mut npc_query = world.query::<(&NetworkId, &EntityTypeComp)>();
         for (nid, kind) in npc_query.iter(&world) {
             if kind.0 == EntityType::Npc {
                 npc_eid = Some(nid.0);

@@ -134,7 +134,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // The player entity is created on the next game loop tick.
     let player_id = shared::entity::EntityId(uuid::Uuid::new_v4());
     {
-        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push((client_id, ClientMessage::SpawnPlayer {
             player_id,
             position: [0.0, 0.0, 0.0],
@@ -156,7 +156,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     if let Ok(json) = serde_json::to_string(&assign_msg) {
         if ws_sink.send(Message::Text(json.into())).await.is_err() {
             // Client disconnected during assignment -- remove the player
-            let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
             q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
                 entity_id: player_id,
             }));
@@ -196,12 +196,12 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(ClientMessage::RequestSnapshot) => {
-                                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                 q.force_full_snapshot_clients.push(client_id);
                             }
                             Ok(msg @ (ClientMessage::SpawnEntity { .. } | ClientMessage::SpawnPlayer { .. })) => {
                                 if spawn_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, msg));
                                 } else {
                                     tracing::warn!(client_id, "Spawn rate limited for client {addr}");
@@ -209,14 +209,14 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                             Ok(msg @ ClientMessage::MoveInput { .. }) => {
                                 if input_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, msg));
                                 }
                                 // Silently drop excess move inputs (too noisy to log)
                             }
                             Ok(input) => {
                                 if input_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, input));
                                 }
                             }
@@ -257,7 +257,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Client disconnected -- push RemoveEntity and unregister
     {
-        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
             entity_id: player_id,
         }));

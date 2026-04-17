@@ -8,15 +8,13 @@ use glam::Vec3;
 use rand::Rng;
 use shared::entity::{EntityState, ServerId};
 use shared::protocol::PeerMessage;
-use shared::tick::TICK_DURATION_MS;
+use shared::tick::TICK_DURATION;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::error::TrySendError;
-
-const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
 
 /// Serialize a PeerMessage with protocol version prefix (2 bytes LE).
 /// All UDP datagrams use this format so the receiver can reject version mismatches.
@@ -109,19 +107,13 @@ pub async fn run_udp_sender(
 }
 
 /// Shared inbound buffer for async tasks to push events into.
-pub struct SharedInbound {
-    pub queue: std::sync::Mutex<InboundQueue>,
-}
+pub type SharedInbound = std::sync::Mutex<InboundQueue>;
 
 /// Shared coordinator event buffer.
-pub struct SharedCoordEvents {
-    pub queue: std::sync::Mutex<CoordEventQueue>,
-}
+pub type SharedCoordEvents = std::sync::Mutex<CoordEventQueue>;
 
 /// Shared outbound buffer for ECS -> coordinator messages (e.g., TransferResult).
-pub struct SharedCoordOutbound {
-    pub queue: std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>,
-}
+pub type SharedCoordOutbound = std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>;
 
 /// Per-peer network health statistics accumulated by the UDP receiver.
 /// Read and reset by the game loop for metrics reporting.
@@ -146,9 +138,7 @@ impl Default for PeerHealthAccumulator {
 
 /// Thread-safe wrapper for PeerHealthAccumulator.
 /// Shared between the UDP receiver task (writes) and the game loop (reads/resets).
-pub struct SharedPeerHealth {
-    pub stats: std::sync::Mutex<PeerHealthAccumulator>,
-}
+pub type SharedPeerHealth = std::sync::Mutex<PeerHealthAccumulator>;
 
 /// Run the new ECS-based game loop.
 pub async fn run_game_loop_ecs(
@@ -188,13 +178,13 @@ pub async fn run_game_loop_ecs(
     // origin where players spawn. With AoI filtering (500 unit radius), spreading
     // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
     {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let spawn_range = 400.0_f32;
         for _ in 0..initial_npcs {
             let pos = Vec3::new(
-                rng.gen_range(-spawn_range..spawn_range),
+                rng.random_range(-spawn_range..spawn_range),
                 0.0,
-                rng.gen_range(-spawn_range..spawn_range),
+                rng.random_range(-spawn_range..spawn_range),
             );
             let state = EntityState::new_npc(pos, server_id);
             spawn_from_entity_state_direct(&mut world, &state, true, None);
@@ -232,42 +222,25 @@ pub async fn run_game_loop_ecs(
         // -- Phase 1: Swap inbound data from async buffers into ECS resources --
         let t0 = Instant::now();
         {
-            let mut iq = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-            // Swap: move async buffer contents into ECS resource, leave empty buffer behind
-            let peer_updates = std::mem::take(&mut iq.peer_updates);
-            let authority_transfers = std::mem::take(&mut iq.authority_transfers);
-            let forwarded_inputs = std::mem::take(&mut iq.forwarded_inputs);
-            let client_inputs = std::mem::take(&mut iq.client_inputs);
-            let forwarded_removes = std::mem::take(&mut iq.forwarded_removes);
-            let register_clients = std::mem::take(&mut iq.register_clients);
-            let unregister_clients = std::mem::take(&mut iq.unregister_clients);
-            let client_player_assignments = std::mem::take(&mut iq.client_player_assignments);
-            let force_full_snapshot_clients = std::mem::take(&mut iq.force_full_snapshot_clients);
-            let transfer_acks = std::mem::take(&mut iq.transfer_acks);
+            let mut iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<InboundQueue>();
-            ecs_queue.peer_updates = peer_updates;
-            ecs_queue.authority_transfers = authority_transfers;
-            ecs_queue.forwarded_inputs = forwarded_inputs;
-            ecs_queue.client_inputs = client_inputs;
-            ecs_queue.forwarded_removes = forwarded_removes;
-            ecs_queue.register_clients = register_clients;
-            ecs_queue.unregister_clients = unregister_clients;
-            ecs_queue.client_player_assignments = client_player_assignments;
-            ecs_queue.force_full_snapshot_clients = force_full_snapshot_clients;
-            ecs_queue.transfer_acks = transfer_acks;
+            std::mem::swap(&mut *iq, &mut *ecs_queue);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(iq.peer_updates.is_empty(), "InboundQueue.peer_updates was not drained last tick");
+            debug_assert!(iq.client_inputs.is_empty(), "InboundQueue.client_inputs was not drained last tick");
         }
         {
-            let mut cq = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
-            let peer_list_updates = std::mem::take(&mut cq.peer_list_updates);
-            let rebalance_directives = std::mem::take(&mut cq.rebalance_directives);
-            let drain_directives = std::mem::take(&mut cq.drain_directives);
-            let recover_events = std::mem::take(&mut cq.recover_events);
-
+            let mut cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<CoordEventQueue>();
-            ecs_queue.peer_list_updates = peer_list_updates;
-            ecs_queue.rebalance_directives = rebalance_directives;
-            ecs_queue.drain_directives = drain_directives;
-            ecs_queue.recover_events = recover_events;
+            std::mem::swap(&mut *cq, &mut *ecs_queue);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(cq.peer_list_updates.is_empty(), "CoordEventQueue.peer_list_updates was not drained last tick");
         }
         let input_drain_dur = t0.elapsed();
 
@@ -299,7 +272,7 @@ pub async fn run_game_loop_ecs(
 
         // Push coordinator-bound messages to the shared outbound queue
         if !coord_msgs.is_empty() {
-            let mut q = coord_outbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut q = coord_outbound.lock().unwrap_or_else(|e| e.into_inner());
             q.extend(coord_msgs);
         }
 
@@ -323,7 +296,7 @@ pub async fn run_game_loop_ecs(
         // Used by coordinator for smarter rebalance decisions.
         let mut weighted = 0u32;
         for kind in world
-            .query_filtered::<&EntityKind, (With<Authoritative>, Without<TransferOutbound>)>()
+            .query_filtered::<&EntityTypeComp, (With<Authoritative>, Without<TransferOutbound>)>()
             .iter(&world)
         {
             weighted += match kind.0 {
@@ -524,7 +497,7 @@ pub async fn run_game_loop_ecs(
             {
                 let active_peers: std::collections::HashSet<u16> =
                     world.resource::<PeerAddresses>().0.keys().copied().collect();
-                let ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 let mut health_map = std::collections::HashMap::new();
                 for &pid in &active_peers {
                     let latest = ph.latest_tick.get(&pid).copied().unwrap_or(0);
@@ -588,7 +561,7 @@ pub async fn run_game_loop_ecs(
             }
             // Reset per-peer health counters every 5s reporting window (WI-105)
             {
-                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 ph.packets_received.clear();
                 ph.chunk_evictions.clear();
                 // Don't clear latest_tick -- it's a high-water mark, not a counter
@@ -604,7 +577,7 @@ mod tests {
     use super::*;
     use crate::conversion::spawn_from_entity_state_direct;
     use crate::resources::{
-        ClientRegistry, CoordEventQueue, DrainState, EntityLookup,
+        ClientRegistry, CoordEventQueue, DrainInfo, DrainState, EntityLookup,
         InboundQueue, OutboundForwards, OutboundReplication, OutboundTransfers,
         PeerAddresses, PendingTransfers, ServerConfig, ShutdownRequested,
     };
@@ -643,11 +616,9 @@ mod tests {
         // If SharedInbound used tokio::sync::Mutex, calling .lock() would require
         // .await and would not compile. The fact that this compiles and runs
         // proves it uses std::sync::Mutex.
-        let inbound = SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        };
+        let inbound = std::sync::Mutex::new(InboundQueue::default());
 
-        let mut q = inbound.queue.lock().unwrap();
+        let mut q = inbound.lock().unwrap();
         q.forwarded_inputs.push(crate::resources::ForwardedInput {
             entity_id: shared::entity::EntityId::new(),
             direction: [1.0, 0.0, 0.0],
@@ -660,11 +631,9 @@ mod tests {
     #[test]
     fn shared_coord_events_lockable_from_non_async_context() {
         // Same proof for SharedCoordEvents.
-        let coord = SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        };
+        let coord = std::sync::Mutex::new(CoordEventQueue::default());
 
-        let mut q = coord.queue.lock().unwrap();
+        let mut q = coord.lock().unwrap();
         q.drain_directives.push(vec![shared::entity::ServerId(2), shared::entity::ServerId(3)]);
         assert_eq!(q.drain_directives.len(), 1);
         assert_eq!(q.drain_directives[0], vec![shared::entity::ServerId(2), shared::entity::ServerId(3)]);
@@ -676,24 +645,21 @@ mod tests {
         // std::sync::Mutex can become poisoned; tokio::sync::Mutex cannot.
         // This test proves both that we use std::sync::Mutex AND that the
         // poison-recovery pattern works correctly.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
 
         // Poison the mutex by panicking while holding the lock
         let inbound_clone = Arc::clone(&inbound);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = inbound_clone.queue.lock().unwrap();
+            let _guard = inbound_clone.lock().unwrap();
             panic!("intentional poison");
         }));
         assert!(result.is_err(), "panic should have been caught");
 
         // The mutex is now poisoned. lock() returns Err.
-        assert!(inbound.queue.lock().is_err(), "mutex should be poisoned");
+        assert!(inbound.lock().is_err(), "mutex should be poisoned");
 
         // But the recovery pattern should still work
         let mut q = inbound
-            .queue
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         q.forwarded_inputs.push(crate::resources::ForwardedInput {
@@ -710,16 +676,14 @@ mod tests {
         // Verify multiple threads can use SharedInbound safely.
         // This would also compile with tokio::sync::Mutex (via block_on),
         // but combined with the non-async tests above, proves the migration.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
 
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 let inbound = Arc::clone(&inbound);
                 std::thread::spawn(move || {
                     for seq in 0..10 {
-                        let mut q = inbound.queue.lock().unwrap();
+                        let mut q = inbound.lock().unwrap();
                         q.forwarded_inputs.push(crate::resources::ForwardedInput {
                             entity_id: shared::entity::EntityId::new(),
                             direction: [i as f32, 0.0, 0.0],
@@ -734,7 +698,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        let q = inbound.queue.lock().unwrap();
+        let q = inbound.lock().unwrap();
         assert_eq!(q.forwarded_inputs.len(), 40); // 4 threads x 10 items
     }
 
@@ -747,12 +711,8 @@ mod tests {
         // If the old code used process::exit(0), this test would kill the
         // entire test process. The fact that the test completes normally
         // proves the game loop uses `break` instead.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
-        let coord_events = Arc::new(SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
+        let coord_events = Arc::new(std::sync::Mutex::new(CoordEventQueue::default()));
         let metrics = Arc::new(std::sync::Mutex::new(
             crate::metrics::MetricsCollector::new(1),
         ));
@@ -769,17 +729,13 @@ mod tests {
         // no auth entities remain. With 0 initial NPCs, drain completes in 1 tick.
         // targets must be non-empty (process_drain returns early if empty).
         {
-            let mut q = coord_events.queue.lock().unwrap();
+            let mut q = coord_events.lock().unwrap();
             q.drain_directives.push(vec![shared::entity::ServerId(2)]); // target server 2 (no peer needed with 0 entities)
         }
 
         let weighted_load = Arc::new(AtomicU32::new(0));
-        let coord_outbound = Arc::new(SharedCoordOutbound {
-            queue: std::sync::Mutex::new(Vec::new()),
-        });
-        let peer_health = Arc::new(SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        });
+        let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0, // no initial NPCs -- drain will find zero entities
@@ -820,9 +776,10 @@ mod tests {
         let mut world = setup_world(1);
 
         // Activate drain with non-empty targets (process_drain returns early if targets empty)
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![shared::entity::ServerId(2)]);
-        world.resource_mut::<DrainState>().started_tick = Some(1);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![shared::entity::ServerId(2)],
+            started_tick: 1,
+        });
         world.resource_mut::<TickCounter>().0 = 2;
 
         let mut schedule = build_schedule();
@@ -1139,12 +1096,8 @@ mod tests {
     async fn game_loop_produces_replication_through_std_mutex() {
         // Full integration: push peer data through SharedInbound (std::sync::Mutex),
         // run the game loop for 1 tick, verify replication output is produced.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
-        let coord_events = Arc::new(SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
+        let coord_events = Arc::new(std::sync::Mutex::new(CoordEventQueue::default()));
         let metrics = Arc::new(std::sync::Mutex::new(
             crate::metrics::MetricsCollector::new(1),
         ));
@@ -1158,18 +1111,14 @@ mod tests {
         // Pre-drain: set a drain directive so the loop will exit after one tick.
         // targets must be non-empty (process_drain returns early if empty).
         {
-            let mut q = coord_events.queue.lock().unwrap();
+            let mut q = coord_events.lock().unwrap();
             q.drain_directives.push(vec![shared::entity::ServerId(2)]);
         }
 
         // Start with 0 NPCs so drain completes immediately (no entities to transfer).
         let weighted_load = Arc::new(AtomicU32::new(0));
-        let coord_outbound = Arc::new(SharedCoordOutbound {
-            queue: std::sync::Mutex::new(Vec::new()),
-        });
-        let peer_health = Arc::new(SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        });
+        let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0,
@@ -1311,10 +1260,8 @@ mod tests {
     #[test]
     fn shared_peer_health_lockable_from_non_async_context() {
         // Proves SharedPeerHealth uses std::sync::Mutex (not tokio).
-        let sph = SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        };
-        let mut acc = sph.stats.lock().unwrap();
+        let sph = std::sync::Mutex::new(PeerHealthAccumulator::default());
+        let mut acc = sph.lock().unwrap();
         acc.latest_tick.insert(2, 42);
         assert_eq!(acc.latest_tick[&2], 42);
     }

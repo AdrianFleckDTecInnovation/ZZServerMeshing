@@ -67,7 +67,7 @@ pub async fn run_udp_receiver(
                     "Per-server reassembly sweep evicted stale entries"
                 );
                 // Record evictions per peer (WI-103)
-                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 for (sid, count) in sweep_evictions {
                     *ph.chunk_evictions.entry(sid).or_insert(0) += count;
                 }
@@ -93,7 +93,7 @@ pub async fn run_udp_receiver(
                 "Reassembly map exceeded {MAX_REASSEMBLY_ENTRIES} entries, evicted oldest"
             );
             if !cap_evictions.is_empty() {
-                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 for (sid, count) in cap_evictions {
                     *ph.chunk_evictions.entry(sid).or_insert(0) += count;
                 }
@@ -138,14 +138,14 @@ pub async fn run_udp_receiver(
             } => {
                 // Per-peer health tracking (WI-103)
                 {
-                    let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                     *ph.packets_received.entry(server_id.0).or_insert(0) += 1;
                     let lt = ph.latest_tick.entry(server_id.0).or_insert(0);
                     if tick > *lt {
                         *lt = tick;
                     }
                 }
-                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.peer_updates.push(PeerUpdate {
                     tick,
                     entities,
@@ -158,7 +158,7 @@ pub async fn run_udp_receiver(
                 to_server,
                 full_state,
             } => {
-                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.authority_transfers.push(InboundTransfer {
                     entity_id,
                     from_server,
@@ -177,7 +177,7 @@ pub async fn run_udp_receiver(
                 direction,
                 seq,
             } => {
-                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.forwarded_inputs.push(ForwardedInput {
                     entity_id,
                     direction,
@@ -185,7 +185,7 @@ pub async fn run_udp_receiver(
                 });
             }
             PeerMessage::ForwardedRemove { entity_id } => {
-                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.forwarded_removes.push(ForwardedRemove { entity_id });
                 tracing::info!(
                     entity = %entity_id,
@@ -193,7 +193,7 @@ pub async fn run_udp_receiver(
                 );
             }
             PeerMessage::TransferAck { entity_id, tick } => {
-                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.transfer_acks.push(InboundTransferAck { entity_id, tick });
                 tracing::debug!(
                     entity = %entity_id,
@@ -212,7 +212,7 @@ pub async fn run_udp_receiver(
 
                 // Per-peer health tracking (WI-103)
                 {
-                    let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                     *ph.packets_received.entry(server_id.0).or_insert(0) += 1;
                     let lt = ph.latest_tick.entry(server_id.0).or_insert(0);
                     if tick > *lt {
@@ -230,7 +230,7 @@ pub async fn run_udp_receiver(
                     reassembly.retain(|&(sid, t), _| sid != server_id.0 || tick - t <= 2);
                     let inline_evicted = before_inline - reassembly.len();
                     if inline_evicted > 0 {
-                        let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                         *ph.chunk_evictions.entry(server_id.0).or_insert(0) += inline_evicted as u32;
                     }
                 }
@@ -251,7 +251,7 @@ pub async fn run_udp_receiver(
                 if entry.received.len() == entry.total_chunks as usize {
                     // Complete! Push to inbound queue
                     let complete = reassembly.remove(&key).unwrap();
-                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                     q.peer_updates.push(PeerUpdate {
                         tick,
                         entities: complete.entities,

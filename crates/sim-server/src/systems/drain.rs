@@ -1,6 +1,5 @@
 use crate::components::*;
 use crate::conversion::to_entity_state;
-use crate::game_loop::serialize_versioned;
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use shared::entity::EntityId;
@@ -13,22 +12,19 @@ const DRAIN_TIMEOUT_TICKS: u64 = 600; // 30 seconds at 20Hz
 /// Uses two-phase transfers: entities get TransferOutbound instead of being despawned.
 /// Drain completes (ShutdownRequested) only when all entities are ACK'd or timed out.
 pub fn process_drain(world: &mut World) {
-    let draining = world.resource::<DrainState>().draining;
-    if !draining {
-        return;
-    }
-
-    let targets = match &world.resource::<DrainState>().targets {
-        Some(t) if !t.is_empty() => t.clone(),
+    let (targets, started_tick) = match &world.resource::<DrainState>().0 {
+        Some(info) if !info.targets.is_empty() => (info.targets.clone(), info.started_tick),
         _ => return,
     };
 
     let server_id = world.resource::<ServerConfig>().server_id;
     let tick = world.resource::<TickCounter>().0;
 
-    // Record drain start tick if not set
-    if world.resource::<DrainState>().started_tick.is_none() {
-        world.resource_mut::<DrainState>().started_tick = Some(tick);
+    // Record drain start tick if not yet set (started_tick == 0 means just activated)
+    if started_tick == 0 {
+        if let Some(info) = &mut world.resource_mut::<DrainState>().0 {
+            info.started_tick = tick;
+        }
     }
 
     // Collect authoritative entities that do NOT already have TransferOutbound
@@ -53,7 +49,7 @@ pub fn process_drain(world: &mut World) {
         let nid = world.get::<NetworkId>(*entity).unwrap();
         let pos = world.get::<Position>(*entity).unwrap();
         let vel = world.get::<Velocity>(*entity).unwrap();
-        let kind = world.get::<EntityKind>(*entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(*entity).unwrap();
         let auth_comp = world.get::<AuthorityServer>(*entity).unwrap();
         let seq = world.get::<LastInputSeq>(*entity);
 
@@ -68,22 +64,21 @@ pub fn process_drain(world: &mut World) {
             full_state: entity_state,
         };
 
-        if let Some(bytes) = serialize_versioned(&msg) {
-            world
-                .resource_mut::<OutboundTransfers>()
-                .messages
-                .push((target_addr, bytes));
+        super::enqueue_outbound(
+            &mut world.resource_mut::<OutboundTransfers>().messages,
+            target_addr,
+            &msg,
+        );
 
-            // Two-phase: mark with TransferOutbound instead of despawning.
-            // Entity is frozen (excluded from sim/replication via query filters).
-            world.entity_mut(*entity).insert(TransferOutbound {
-                target_server: target_server.0,
-                target_addr,
-                sent_tick: tick,
-                retry_count: 0,
-            });
-            transferred += 1;
-        }
+        // Two-phase: mark with TransferOutbound instead of despawning.
+        // Entity is frozen (excluded from sim/replication via query filters).
+        world.entity_mut(*entity).insert(TransferOutbound {
+            target_server: target_server.0,
+            target_addr,
+            sent_tick: tick,
+            retry_count: 0,
+        });
+        transferred += 1;
         // DO NOT despawn -- entity will be despawned when ACK arrives
     }
 
@@ -109,8 +104,9 @@ pub fn process_drain(world: &mut World) {
     }
 
     // Drain timeout: if drain has been active too long, force shutdown
-    if let Some(started) = world.resource::<DrainState>().started_tick {
-        if tick.saturating_sub(started) > DRAIN_TIMEOUT_TICKS {
+    if let Some(info) = &world.resource::<DrainState>().0 {
+        let started = info.started_tick;
+        if started > 0 && tick.saturating_sub(started) > DRAIN_TIMEOUT_TICKS {
             tracing::error!(
                 remaining,
                 pending_transfers,
@@ -168,8 +164,7 @@ mod tests {
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         spawn_auth_npc(&mut world, Vec3::X, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -204,8 +199,7 @@ mod tests {
             spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         }
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2), ServerId(3)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2), ServerId(3)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -233,8 +227,7 @@ mod tests {
         let mut world = setup_world(1);
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![] as Vec<ServerId>);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![], started_tick: 0 });
 
         process_drain(&mut world);
 
@@ -247,8 +240,7 @@ mod tests {
         let mut world = setup_world(1);
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = None;
+        world.resource_mut::<DrainState>().0 = None;
 
         process_drain(&mut world);
 
@@ -274,8 +266,7 @@ mod tests {
             retry_count: 0,
         });
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -296,8 +287,7 @@ mod tests {
             spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         }
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -317,8 +307,7 @@ mod tests {
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -361,8 +350,7 @@ mod tests {
             });
         }
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -388,8 +376,7 @@ mod tests {
 
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -407,8 +394,7 @@ mod tests {
 
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -426,8 +412,7 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // No entities
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -445,8 +430,7 @@ mod tests {
 
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -465,12 +449,11 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![ServerId(2)]);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
         world.resource_mut::<TickCounter>().0 = 42;
 
         process_drain(&mut world);
 
-        assert_eq!(world.resource::<DrainState>().started_tick, Some(42));
+        assert_eq!(world.resource::<DrainState>().0.as_ref().unwrap().started_tick, 42);
     }
 }

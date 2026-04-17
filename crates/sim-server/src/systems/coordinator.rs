@@ -48,8 +48,10 @@ pub fn process_coord_events(world: &mut World) {
     // DrainDirective
     for target_servers in drain_directives {
         let mut drain = world.resource_mut::<DrainState>();
-        drain.draining = true;
-        drain.targets = Some(target_servers.clone());
+        drain.0 = Some(DrainInfo {
+            targets: target_servers.clone(),
+            started_tick: 0,
+        });
         tracing::info!(
             "Received drain directive -> {:?}",
             target_servers
@@ -193,15 +195,20 @@ mod tests {
 
         process_coord_events(&mut world);
 
-        assert!(world.resource::<DrainState>().draining);
+        assert!(world.resource::<DrainState>().0.is_some());
     }
 
     #[test]
     fn coord_recover_promotes_correct_subset() {
         let mut world = setup_world(1);
-        // Spawn some shadows from server 3
-        let (_, eid1) = spawn_shadow_npc(&mut world, Vec3::ZERO, 3);
-        let (_, eid2) = spawn_shadow_npc(&mut world, Vec3::X, 3);
+        // Spawn enough shadows so it's statistically near-impossible for all to
+        // hash away from server 1 (probability = (1/2)^10 < 0.1%).
+        let mut eids = Vec::new();
+        for i in 0..10 {
+            let pos = Vec3::new(i as f32, 0.0, 0.0);
+            let (_, eid) = spawn_shadow_npc(&mut world, pos, 3);
+            eids.push(eid);
+        }
 
         // Server 3 is dead, survivors are [1, 2]
         world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1), ServerId(2)]));
@@ -210,7 +217,7 @@ mod tests {
 
         // At least one entity should be promoted (hash determines which)
         let lookup = world.resource::<EntityLookup>();
-        let promoted = [eid1, eid2].iter().filter(|eid| {
+        let promoted = eids.iter().filter(|eid| {
             let bevy_entity = lookup.0[eid];
             world.get::<Authoritative>(bevy_entity).is_some()
         }).count();

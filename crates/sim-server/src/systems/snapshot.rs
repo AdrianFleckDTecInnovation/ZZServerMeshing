@@ -21,7 +21,7 @@ pub fn prepare_client_snapshot(
             &NetworkId,
             &Position,
             &Velocity,
-            &EntityKind,
+            &EntityTypeComp,
             &AuthorityServer,
             Option<&LastInputSeq>,
         ),
@@ -32,7 +32,7 @@ pub fn prepare_client_snapshot(
             &NetworkId,
             &Position,
             &Velocity,
-            &EntityKind,
+            &EntityTypeComp,
             &AuthorityServer,
             Option<&LastInputSeq>,
         ),
@@ -43,7 +43,7 @@ pub fn prepare_client_snapshot(
             &NetworkId,
             &Position,
             &Velocity,
-            &EntityKind,
+            &EntityTypeComp,
             &TransferOutbound,
             Option<&LastInputSeq>,
         ),
@@ -297,13 +297,6 @@ mod tests {
         (entity, eid)
     }
 
-    fn spawn_shadow_npc(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
-        let state = EntityState::new_npc(pos, ServerId(owner_server));
-        let eid = state.id;
-        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
-        (entity, eid)
-    }
-
     fn spawn_shadow_player(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
         let state = EntityState::new_player(pos, ServerId(owner_server));
         let eid = state.id;
@@ -363,7 +356,7 @@ mod tests {
         assert!(world.get::<Shadow>(entity).is_some());
         assert!(world.get::<Authoritative>(entity).is_none());
         // Should be Player type
-        assert_eq!(world.get::<EntityKind>(entity).unwrap().0, EntityType::Player);
+        assert_eq!(world.get::<EntityTypeComp>(entity).unwrap().0, EntityType::Player);
         // Should be owned by server 2
         assert_eq!(world.get::<AuthorityServer>(entity).unwrap().0, ServerId(2));
     }
@@ -1489,7 +1482,7 @@ mod tests {
             NetworkId(eid),
             Position(Vec3::new(99.0, 0.0, 99.0)),
             Velocity(Vec3::ZERO),
-            EntityKind(EntityType::Npc),
+            EntityTypeComp(EntityType::Npc),
             AuthorityServer(ServerId(2)),
             Shadow { last_seen_tick: 10 },
         )).id();

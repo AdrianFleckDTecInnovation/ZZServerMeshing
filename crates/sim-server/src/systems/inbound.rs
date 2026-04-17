@@ -104,7 +104,7 @@ pub fn drain_inbound_events(world: &mut World) {
                 if let Some(mut auth) = world.get_mut::<AuthorityServer>(bevy_entity) {
                     auth.0 = transfer.full_state.authority_server;
                 }
-                if let Some(mut kind) = world.get_mut::<EntityKind>(bevy_entity) {
+                if let Some(mut kind) = world.get_mut::<EntityTypeComp>(bevy_entity) {
                     kind.0 = transfer.full_state.entity_type;
                 }
                 if transfer.full_state.entity_type == EntityType::Player {
@@ -164,7 +164,7 @@ pub fn drain_inbound_events(world: &mut World) {
                 }
 
                 let dir = Vec3::new(fwd.direction[0], fwd.direction[1], fwd.direction[2]);
-                let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
+                let kind = world.get::<EntityTypeComp>(bevy_entity).map(|k| k.0);
                 let speed = match kind {
                     Some(EntityType::Player) => 5.0,
                     _ => 2.0,
