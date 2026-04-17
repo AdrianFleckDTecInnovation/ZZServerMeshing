@@ -132,11 +132,11 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Generate player UUID and push SpawnPlayer to the inbound queue.
     // The player entity is created on the next game loop tick.
-    let player_uuid = uuid::Uuid::new_v4();
+    let player_id = shared::entity::EntityId(uuid::Uuid::new_v4());
     {
         let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push((client_id, ClientMessage::SpawnPlayer {
-            player_id: player_uuid.to_string(),
+            player_id,
             position: [0.0, 0.0, 0.0],
         }));
         // Register this client in the ECS via the inbound queue
@@ -144,13 +144,13 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             client_id,
             tx: frame_tx,
             acked_tick: Arc::clone(&acked_tick),
-            player_uuid: player_uuid.to_string(),
+            player_uuid: player_id,
         });
     }
 
     // Send PlayerAssigned as JSON text frame
     let assign_msg = ServerMessage::PlayerAssigned {
-        player_id: player_uuid.to_string(),
+        player_id: player_id.to_string(),
         protocol_version: shared::PROTOCOL_VERSION,
     };
     if let Ok(json) = serde_json::to_string(&assign_msg) {
@@ -158,7 +158,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             // Client disconnected during assignment -- remove the player
             let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
             q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
-                entity_id: player_uuid.to_string(),
+                entity_id: player_id,
             }));
             q.unregister_clients.push(client_id);
             return;
@@ -168,7 +168,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     tracing::info!(
         client_id,
         "Assigned player {} to client {addr}",
-        &player_uuid.to_string()[..8]
+        &player_id.to_string()[..8]
     );
 
     let mut input_limiter = RateLimiter::new(INPUT_RATE_LIMIT);
@@ -259,14 +259,14 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     {
         let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
-            entity_id: player_uuid.to_string(),
+            entity_id: player_id,
         }));
         q.unregister_clients.push(client_id);
     }
     tracing::info!(
         client_id,
         "Removed player {} on disconnect",
-        &player_uuid.to_string()[..8]
+        &player_id.to_string()[..8]
     );
 }
 

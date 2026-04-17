@@ -23,7 +23,7 @@ pub fn process_coord_events(world: &mut World) {
             // in sync context so we only use direct parse here.
             let addr: Option<std::net::SocketAddr> = peer.udp_addr.parse().ok();
             if let Some(addr) = addr {
-                addrs.0.insert(peer.server_id, addr);
+                addrs.0.insert(peer.server_id.0, addr);
             } else {
                 tracing::warn!("Could not parse peer address: {}", peer.udp_addr);
             }
@@ -33,7 +33,7 @@ pub fn process_coord_events(world: &mut World) {
             peers.len(),
             peers
                 .iter()
-                .map(|p| format!("S{}", p.server_id))
+                .map(|p| format!("{}", p.server_id))
                 .collect::<Vec<_>>()
         );
     }
@@ -42,7 +42,7 @@ pub fn process_coord_events(world: &mut World) {
     for (entity_ids, target_server) in rebalance_directives {
         world.resource_mut::<PendingTransfers>().transfers =
             Some((entity_ids, target_server));
-        tracing::info!("Received rebalance directive -> S{target_server}");
+        tracing::info!("Received rebalance directive -> {target_server}");
     }
 
     // DrainDirective
@@ -54,14 +54,14 @@ pub fn process_coord_events(world: &mut World) {
             "Received drain directive -> {:?}",
             target_servers
                 .iter()
-                .map(|s| format!("S{s}"))
+                .map(|s| format!("{s}"))
                 .collect::<Vec<_>>()
         );
     }
 
     // RecoverEntities
     for (dead_server_id, survivors) in recover_events {
-        let my_index = survivors.iter().position(|&id| id == server_id.0);
+        let my_index = survivors.iter().position(|&id| id == server_id);
         let my_index = match my_index {
             Some(i) => i,
             None => continue,
@@ -72,7 +72,7 @@ pub fn process_coord_events(world: &mut World) {
         let mut to_promote: Vec<Entity> = Vec::new();
         let mut query = world.query_filtered::<(Entity, &NetworkId, &AuthorityServer), With<Shadow>>();
         for (entity, nid, auth) in query.iter(&world) {
-            if auth.0 .0 == dead_server_id {
+            if auth.0 == dead_server_id {
                 if (nid.0 .0.as_u128() as usize) % survivor_count == my_index {
                     to_promote.push(entity);
                 }
@@ -90,7 +90,7 @@ pub fn process_coord_events(world: &mut World) {
         }
 
         if adopted > 0 {
-            tracing::info!("Recovered {} entities from dead S{}", adopted, dead_server_id);
+            tracing::info!("Recovered {} entities from dead {}", adopted, dead_server_id);
         }
 
         // Abort any in-progress transfers targeting the dead server.
@@ -100,9 +100,9 @@ pub fn process_coord_events(world: &mut World) {
         let mut transfer_query =
             world.query_filtered::<(Entity, &NetworkId, &TransferOutbound), With<Authoritative>>();
         for (entity, nid, outbound) in transfer_query.iter(&world) {
-            if outbound.target_server == dead_server_id {
+            if outbound.target_server == dead_server_id.0 {
                 tracing::info!(
-                    "Aborting transfer for entity {} to dead server S{}",
+                    "Aborting transfer for entity {} to dead server {}",
                     nid.0, dead_server_id
                 );
                 to_unfreeze.push(entity);
@@ -122,6 +122,7 @@ mod tests {
     use glam::Vec3;
     use shared::entity::{EntityId, EntityState, ServerId};
     use shared::protocol::PeerInfo;
+    use shared::entity::ServerId as SId;
 
     fn setup_world(server_id: u16) -> World {
         let mut world = World::default();
@@ -165,7 +166,7 @@ mod tests {
     fn coord_peer_list_updates_addresses() {
         let mut world = setup_world(1);
         world.resource_mut::<CoordEventQueue>().peer_list_updates.push(vec![
-            PeerInfo { server_id: 2, udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
+            PeerInfo { server_id: SId(2), udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
         ]);
 
         process_coord_events(&mut world);
@@ -177,7 +178,7 @@ mod tests {
     fn coord_rebalance_sets_pending() {
         let mut world = setup_world(1);
         world.resource_mut::<CoordEventQueue>().rebalance_directives.push(
-            (vec!["entity-1".into()], 2)
+            (vec![EntityId::new()], ServerId(2))
         );
 
         process_coord_events(&mut world);
@@ -188,7 +189,7 @@ mod tests {
     #[test]
     fn coord_drain_sets_state() {
         let mut world = setup_world(1);
-        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![2, 3]);
+        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![ServerId(2), ServerId(3)]);
 
         process_coord_events(&mut world);
 
@@ -203,7 +204,7 @@ mod tests {
         let (_, eid2) = spawn_shadow_npc(&mut world, Vec3::X, 3);
 
         // Server 3 is dead, survivors are [1, 2]
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1, 2]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1), ServerId(2)]));
 
         process_coord_events(&mut world);
 
@@ -223,12 +224,12 @@ mod tests {
         let mut world = setup_world(1);
         world.resource_mut::<CoordEventQueue>().peer_list_updates.push(vec![
             PeerInfo {
-                server_id: 2,
+                server_id: SId(2),
                 udp_addr: "not-a-valid-address".into(),
                 ws_addr: "127.0.0.1:7879".into(),
             },
             PeerInfo {
-                server_id: 3,
+                server_id: SId(3),
                 udp_addr: "127.0.0.1:9103".into(),
                 ws_addr: "127.0.0.1:7880".into(),
             },
@@ -249,11 +250,11 @@ mod tests {
 
         // Two peer list updates (second should overwrite first)
         world.resource_mut::<CoordEventQueue>().peer_list_updates.push(vec![
-            PeerInfo { server_id: 2, udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
+            PeerInfo { server_id: SId(2), udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
         ]);
         world.resource_mut::<CoordEventQueue>().peer_list_updates.push(vec![
-            PeerInfo { server_id: 3, udp_addr: "127.0.0.1:9103".into(), ws_addr: "127.0.0.1:7880".into() },
-            PeerInfo { server_id: 4, udp_addr: "127.0.0.1:9104".into(), ws_addr: "127.0.0.1:7881".into() },
+            PeerInfo { server_id: SId(3), udp_addr: "127.0.0.1:9103".into(), ws_addr: "127.0.0.1:7880".into() },
+            PeerInfo { server_id: SId(4), udp_addr: "127.0.0.1:9104".into(), ws_addr: "127.0.0.1:7881".into() },
         ]);
 
         process_coord_events(&mut world);
@@ -274,7 +275,7 @@ mod tests {
         let (_, eid2) = spawn_shadow_npc(&mut world, Vec3::X, 3);
         let (_, eid3) = spawn_shadow_npc(&mut world, Vec3::Z, 3);
 
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1)]));
 
         process_coord_events(&mut world);
 
@@ -294,7 +295,7 @@ mod tests {
         // Shadows from server 2, but recovery is for server 3
         spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
 
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1)]));
 
         process_coord_events(&mut world);
 
@@ -311,7 +312,7 @@ mod tests {
         spawn_shadow_npc(&mut world, Vec3::ZERO, 3);
 
         // Survivors are [2, 4] -- we are server 1, not in list
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![2, 4]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(2), ServerId(4)]));
 
         process_coord_events(&mut world);
 
@@ -326,7 +327,7 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 3);
 
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1)]));
 
         process_coord_events(&mut world);
 
@@ -345,10 +346,10 @@ mod tests {
 
         // Push two rebalance directives
         world.resource_mut::<CoordEventQueue>().rebalance_directives.push(
-            (vec!["e1".into()], 2)
+            (vec![EntityId::new()], ServerId(2))
         );
         world.resource_mut::<CoordEventQueue>().rebalance_directives.push(
-            (vec!["e2".into(), "e3".into()], 3)
+            (vec![EntityId::new(), EntityId::new()], ServerId(3))
         );
 
         process_coord_events(&mut world);
@@ -356,7 +357,7 @@ mod tests {
         // Last directive wins (each overwrites PendingTransfers)
         let pending = world.resource::<PendingTransfers>();
         let (ids, target) = pending.transfers.as_ref().unwrap();
-        assert_eq!(*target, 3);
+        assert_eq!(*target, ServerId(3));
         assert_eq!(ids.len(), 2);
     }
 
@@ -375,7 +376,7 @@ mod tests {
         });
 
         // Server 3 crashes, we are in survivor list
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1, 2]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1), ServerId(2)]));
 
         process_coord_events(&mut world);
 
@@ -405,7 +406,7 @@ mod tests {
         spawn_shadow_npc(&mut world, Vec3::new(100.0, 0.0, 0.0), 3);
 
         // Server 3 crashes
-        world.resource_mut::<CoordEventQueue>().recover_events.push((3, vec![1]));
+        world.resource_mut::<CoordEventQueue>().recover_events.push((ServerId(3), vec![ServerId(1)]));
 
         process_coord_events(&mut world);
 

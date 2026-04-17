@@ -33,8 +33,8 @@ pub fn process_transfer_acks(world: &mut World) {
                 // Report success to coordinator (closed-loop rebalancing)
                 world.resource_mut::<OutboundCoordMessages>().messages.push(
                     CoordClientMsg::TransferResult {
-                        entity_id: ack.entity_id.to_string(),
-                        target_server,
+                        entity_id: ack.entity_id,
+                        target_server: ServerId(target_server),
                         success: true,
                     },
                 );
@@ -139,8 +139,8 @@ pub fn process_transfer_timeouts(world: &mut World) {
         // Report failure to coordinator (closed-loop rebalancing)
         world.resource_mut::<OutboundCoordMessages>().messages.push(
             CoordClientMsg::TransferResult {
-                entity_id: eid.to_string(),
-                target_server: target,
+                entity_id: eid,
+                target_server: ServerId(target),
                 success: false,
             },
         );
@@ -165,10 +165,10 @@ pub fn process_transfers(world: &mut World) {
     let tick = world.resource::<TickCounter>().0;
 
     // Look up target server's UDP address
-    let target_addr = match world.resource::<PeerAddresses>().0.get(&target_server) {
+    let target_addr = match world.resource::<PeerAddresses>().0.get(&target_server.0) {
         Some(addr) => *addr,
         None => {
-            tracing::warn!("Rebalance target S{target_server} not in peer list");
+            tracing::warn!("Rebalance target {target_server} not in peer list");
             return;
         }
     };
@@ -201,13 +201,13 @@ pub fn process_transfers(world: &mut World) {
         let kind = world.get::<EntityKind>(*entity).unwrap();
         let seq = world.get::<LastInputSeq>(*entity);
 
-        let entity_state = to_entity_state(nid, pos, vel, kind, &AuthorityServer(ServerId(target_server)), seq);
+        let entity_state = to_entity_state(nid, pos, vel, kind, &AuthorityServer(target_server), seq);
 
         let msg = PeerMessage::AuthorityTransfer {
             tick,
             entity_id: *eid,
             from_server: server_id,
-            to_server: ServerId(target_server),
+            to_server: target_server,
             full_state: entity_state,
         };
 
@@ -220,7 +220,7 @@ pub fn process_transfers(world: &mut World) {
             // Two-phase: mark entity as TransferOutbound instead of despawning.
             // Entity keeps Authoritative but is frozen (excluded from sim/replication via query filters).
             world.entity_mut(*entity).insert(TransferOutbound {
-                target_server,
+                target_server: target_server.0,
                 target_addr,
                 sent_tick: tick,
                 retry_count: 0,
@@ -233,7 +233,7 @@ pub fn process_transfers(world: &mut World) {
     if transferred > 0 {
         let remaining = total_auth - transferred;
         tracing::info!(
-            "Transferred {transferred} entities to S{target_server} ({remaining} remaining)"
+            "Transferred {transferred} entities to {target_server} ({remaining} remaining)"
         );
     }
 }
@@ -298,7 +298,7 @@ mod tests {
         let player_state = EntityState::new_player(Vec3::ZERO, ServerId(1));
         let player_entity = spawn_from_entity_state_direct(&mut world, &player_state, true, None);
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -313,7 +313,7 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -329,7 +329,7 @@ mod tests {
         // Do NOT add peer address for server 2
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -354,7 +354,7 @@ mod tests {
         }
         let (outer_entity, _) = spawn_auth_npc(&mut world, Vec3::new(4000.0, 0.0, 4000.0), 1);
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -373,7 +373,7 @@ mod tests {
 
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -562,7 +562,7 @@ mod tests {
             });
         }
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 5;
 
         process_transfers(&mut world);
@@ -796,7 +796,7 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
         world.resource_mut::<TickCounter>().0 = 10;
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         process_transfers(&mut world);
 
         let first_outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
@@ -804,7 +804,7 @@ mod tests {
 
         world.resource_mut::<OutboundTransfers>().messages.clear();
 
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         process_transfers(&mut world);
 
         let total = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();

@@ -11,8 +11,9 @@ use glam::Vec3;
 
 #[test]
 fn move_input_json_roundtrip_with_seq() {
+    let eid = EntityId(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
     let msg = ClientMessage::MoveInput {
-        entity_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        entity_id: eid,
         direction: [1.0, 0.0, -0.5],
         seq: 17,
     };
@@ -20,7 +21,7 @@ fn move_input_json_roundtrip_with_seq() {
     let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
     match decoded {
         ClientMessage::MoveInput { entity_id, direction, seq } => {
-            assert_eq!(entity_id, "550e8400-e29b-41d4-a716-446655440000");
+            assert_eq!(entity_id, eid);
             assert_eq!(direction, [1.0, 0.0, -0.5]);
             assert_eq!(seq, 17);
         }

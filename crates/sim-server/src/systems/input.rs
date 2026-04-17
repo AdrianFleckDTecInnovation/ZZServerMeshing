@@ -68,202 +68,193 @@ pub fn process_client_inputs(world: &mut World) {
                 player_id,
                 position,
             } => {
-                if let Ok(uuid) = uuid::Uuid::parse_str(&player_id) {
-                    let pos = Vec3::new(position[0], position[1], position[2]);
-                    let id = EntityId(uuid);
-                    let state = EntityState {
-                        id,
-                        position: pos,
-                        velocity: Vec3::ZERO,
-                        entity_type: EntityType::Player,
-                        authority_server: server_id,
-                        last_input_seq: 0,
-                    };
-                    spawn_from_entity_state_direct(world, &state, true, None);
-                    // Track player entity ownership
-                    world.resource_mut::<EntityOwnership>().owners.insert(id, client_id);
-                    tracing::info!("Spawned player {}", id);
-                }
+                let pos = Vec3::new(position[0], position[1], position[2]);
+                let state = EntityState {
+                    id: player_id,
+                    position: pos,
+                    velocity: Vec3::ZERO,
+                    entity_type: EntityType::Player,
+                    authority_server: server_id,
+                    last_input_seq: 0,
+                };
+                spawn_from_entity_state_direct(world, &state, true, None);
+                // Track player entity ownership
+                world.resource_mut::<EntityOwnership>().owners.insert(player_id, client_id);
+                tracing::info!("Spawned player {}", player_id);
             }
             ClientMessage::MoveInput {
                 entity_id,
                 direction,
                 seq,
             } => {
-                if let Ok(uuid) = uuid::Uuid::parse_str(&entity_id) {
-                    let eid = EntityId(uuid);
-                    let dir = Vec3::new(direction[0], direction[1], direction[2]);
+                let dir = Vec3::new(direction[0], direction[1], direction[2]);
 
-                    if let Some(&bevy_entity) =
-                        world.resource::<EntityLookup>().0.get(&eid)
-                    {
-                        if world.get::<Authoritative>(bevy_entity).is_some() {
-                            // Check if entity is being transferred -- forward to target instead
-                            if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
-                                let target_addr = outbound.target_addr;
-                                let target_server = outbound.target_server;
-                                let fwd_msg = PeerMessage::ForwardedInput {
-                                    entity_id: eid,
-                                    direction,
-                                    seq,
-                                };
-                                if let Some(bytes) = serialize_versioned(&fwd_msg) {
-                                    world
-                                        .resource_mut::<OutboundForwards>()
-                                        .messages
-                                        .push((target_addr, bytes));
-                                }
-                                tracing::debug!(
-                                    entity = %eid,
-                                    target = target_server,
-                                    seq = seq,
-                                    "Forwarding input to transfer target"
-                                );
-                                continue;
-                            }
-
-                            // Process locally
-                            let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
-                            let speed = match kind {
-                                Some(EntityType::Player) => 5.0,
-                                _ => 2.0,
+                if let Some(&bevy_entity) =
+                    world.resource::<EntityLookup>().0.get(&entity_id)
+                {
+                    if world.get::<Authoritative>(bevy_entity).is_some() {
+                        // Check if entity is being transferred -- forward to target instead
+                        if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                            let target_addr = outbound.target_addr;
+                            let target_server = outbound.target_server;
+                            let fwd_msg = PeerMessage::ForwardedInput {
+                                entity_id,
+                                direction,
+                                seq,
                             };
-                            if let Some(mut vel) = world.get_mut::<Velocity>(bevy_entity) {
-                                vel.0 = dir.normalize_or_zero() * speed;
-                            }
-                            if let Some(mut input_seq) =
-                                world.get_mut::<LastInputSeq>(bevy_entity)
-                            {
-                                input_seq.0 = seq;
+                            if let Some(bytes) = serialize_versioned(&fwd_msg) {
+                                world
+                                    .resource_mut::<OutboundForwards>()
+                                    .messages
+                                    .push((target_addr, bytes));
                             }
                             tracing::debug!(
-                                entity = %eid,
+                                entity = %entity_id,
+                                target = target_server,
                                 seq = seq,
-                                "MoveInput processed"
+                                "Forwarding input to transfer target"
                             );
                             continue;
                         }
 
-                        // Shadow -- produce forward
-                        if let Some(shadow_auth) =
-                            world.get::<AuthorityServer>(bevy_entity)
+                        // Process locally
+                        let kind = world.get::<EntityKind>(bevy_entity).map(|k| k.0);
+                        let speed = match kind {
+                            Some(EntityType::Player) => 5.0,
+                            _ => 2.0,
+                        };
+                        if let Some(mut vel) = world.get_mut::<Velocity>(bevy_entity) {
+                            vel.0 = dir.normalize_or_zero() * speed;
+                        }
+                        if let Some(mut input_seq) =
+                            world.get_mut::<LastInputSeq>(bevy_entity)
                         {
-                            if world.get::<Shadow>(bevy_entity).is_some() {
-                                let target_server = shadow_auth.0 .0;
-                                if let Some(&peer_addr) = world
-                                    .resource::<PeerAddresses>()
-                                    .0
-                                    .get(&target_server)
-                                {
-                                    let msg = PeerMessage::ForwardedInput {
-                                        entity_id: eid,
-                                        direction,
-                                        seq,
-                                    };
-                                    if let Some(bytes) = serialize_versioned(&msg) {
-                                        world
-                                            .resource_mut::<OutboundForwards>()
-                                            .messages
-                                            .push((peer_addr, bytes));
-                                    }
-                                }
-                                tracing::debug!(
-                                    entity = %eid,
-                                    target = target_server,
-                                    seq = seq,
-                                    "Forwarding input to authority"
-                                );
-                                continue;
-                            }
+                            input_seq.0 = seq;
                         }
+                        tracing::debug!(
+                            entity = %entity_id,
+                            seq = seq,
+                            "MoveInput processed"
+                        );
+                        continue;
                     }
-                    tracing::debug!("MoveInput for unknown entity {}", eid);
-                }
-            }
-            ClientMessage::RemoveEntity { entity_id } => {
-                if let Ok(uuid) = uuid::Uuid::parse_str(&entity_id) {
-                    let eid = EntityId(uuid);
-                    // Ownership check: only the client that spawned an entity can remove it.
-                    // client_id 0 means server-initiated (always allowed).
-                    if client_id != 0 {
-                        if let Some(&owner) = world.resource::<EntityOwnership>().owners.get(&eid) {
-                            if owner != client_id {
-                                tracing::warn!(
-                                    entity = %eid,
-                                    client_id,
-                                    owner,
-                                    "RemoveEntity rejected: client doesn't own entity"
-                                );
-                                continue;
-                            }
-                        }
-                        // Entities not in the ownership map (e.g., adopted via crash recovery,
-                        // transferred from another server) can be removed by anyone — they
-                        // have no original client owner on this server.
-                    }
-                    if let Some(&bevy_entity) =
-                        world.resource::<EntityLookup>().0.get(&eid)
+
+                    // Shadow -- produce forward
+                    if let Some(shadow_auth) =
+                        world.get::<AuthorityServer>(bevy_entity)
                     {
-                        if world.get::<Authoritative>(bevy_entity).is_some() {
-                            // If entity is mid-transfer, forward the remove to the target
-                            // server so it doesn't become permanently orphaned there.
-                            if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
-                                let target_addr = outbound.target_addr;
-                                let target_server = outbound.target_server;
-                                let msg = PeerMessage::ForwardedRemove {
-                                    entity_id: eid,
+                        if world.get::<Shadow>(bevy_entity).is_some() {
+                            let target_server = shadow_auth.0 .0;
+                            if let Some(&peer_addr) = world
+                                .resource::<PeerAddresses>()
+                                .0
+                                .get(&target_server)
+                            {
+                                let msg = PeerMessage::ForwardedInput {
+                                    entity_id,
+                                    direction,
+                                    seq,
                                 };
                                 if let Some(bytes) = serialize_versioned(&msg) {
                                     world
                                         .resource_mut::<OutboundForwards>()
                                         .messages
-                                        .push((target_addr, bytes));
+                                        .push((peer_addr, bytes));
+                                }
+                            }
+                            tracing::debug!(
+                                entity = %entity_id,
+                                target = target_server,
+                                seq = seq,
+                                "Forwarding input to authority"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                tracing::debug!("MoveInput for unknown entity {}", entity_id);
+            }
+            ClientMessage::RemoveEntity { entity_id } => {
+                // Ownership check: only the client that spawned an entity can remove it.
+                // client_id 0 means server-initiated (always allowed).
+                if client_id != 0 {
+                    if let Some(&owner) = world.resource::<EntityOwnership>().owners.get(&entity_id) {
+                        if owner != client_id {
+                            tracing::warn!(
+                                entity = %entity_id,
+                                client_id,
+                                owner,
+                                "RemoveEntity rejected: client doesn't own entity"
+                            );
+                            continue;
+                        }
+                    }
+                    // Entities not in the ownership map (e.g., adopted via crash recovery,
+                    // transferred from another server) can be removed by anyone — they
+                    // have no original client owner on this server.
+                }
+                if let Some(&bevy_entity) =
+                    world.resource::<EntityLookup>().0.get(&entity_id)
+                {
+                    if world.get::<Authoritative>(bevy_entity).is_some() {
+                        // If entity is mid-transfer, forward the remove to the target
+                        // server so it doesn't become permanently orphaned there.
+                        if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
+                            let target_addr = outbound.target_addr;
+                            let target_server = outbound.target_server;
+                            let msg = PeerMessage::ForwardedRemove {
+                                entity_id,
+                            };
+                            if let Some(bytes) = serialize_versioned(&msg) {
+                                world
+                                    .resource_mut::<OutboundForwards>()
+                                    .messages
+                                    .push((target_addr, bytes));
+                            }
+                            tracing::info!(
+                                entity = %entity_id,
+                                target = target_server,
+                                "Forwarding remove to transfer target before local despawn"
+                            );
+                        }
+                        // Case A: We are authoritative -- remove locally
+                        despawn_and_remove(world, bevy_entity, entity_id);
+                        tracing::info!(entity = %entity_id, "Removed authoritative entity on disconnect");
+                    } else if world.get::<Shadow>(bevy_entity).is_some() {
+                        // Case B: Entity was transferred -- forward remove to authority
+                        if let Some(shadow_auth) =
+                            world.get::<AuthorityServer>(bevy_entity)
+                        {
+                            let target_server = shadow_auth.0 .0;
+                            if let Some(&peer_addr) = world
+                                .resource::<PeerAddresses>()
+                                .0
+                                .get(&target_server)
+                            {
+                                let msg = PeerMessage::ForwardedRemove {
+                                    entity_id,
+                                };
+                                if let Some(bytes) = serialize_versioned(&msg) {
+                                    world
+                                        .resource_mut::<OutboundForwards>()
+                                        .messages
+                                        .push((peer_addr, bytes));
                                 }
                                 tracing::info!(
-                                    entity = %eid,
+                                    entity = %entity_id,
                                     target = target_server,
-                                    "Forwarding remove to transfer target before local despawn"
+                                    "Forwarding remove to authority server"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    entity = %entity_id,
+                                    target = target_server,
+                                    "Cannot forward remove: no peer address for authority server"
                                 );
                             }
-                            // Case A: We are authoritative -- remove locally
-                            despawn_and_remove(world, bevy_entity, eid);
-                            tracing::info!(entity = %eid, "Removed authoritative entity on disconnect");
-                        } else if world.get::<Shadow>(bevy_entity).is_some() {
-                            // Case B: Entity was transferred -- forward remove to authority
-                            if let Some(shadow_auth) =
-                                world.get::<AuthorityServer>(bevy_entity)
-                            {
-                                let target_server = shadow_auth.0 .0;
-                                if let Some(&peer_addr) = world
-                                    .resource::<PeerAddresses>()
-                                    .0
-                                    .get(&target_server)
-                                {
-                                    let msg = PeerMessage::ForwardedRemove {
-                                        entity_id: eid,
-                                    };
-                                    if let Some(bytes) = serialize_versioned(&msg) {
-                                        world
-                                            .resource_mut::<OutboundForwards>()
-                                            .messages
-                                            .push((peer_addr, bytes));
-                                    }
-                                    tracing::info!(
-                                        entity = %eid,
-                                        target = target_server,
-                                        "Forwarding remove to authority server"
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        entity = %eid,
-                                        target = target_server,
-                                        "Cannot forward remove: no peer address for authority server"
-                                    );
-                                }
-                            }
-                            // Also remove the local shadow copy
-                            despawn_and_remove(world, bevy_entity, eid);
                         }
+                        // Also remove the local shadow copy
+                        despawn_and_remove(world, bevy_entity, entity_id);
                     }
                 }
             }
@@ -365,15 +356,14 @@ mod tests {
     #[test]
     fn client_spawn_player_with_uuid() {
         let mut world = setup_world(1);
-        let uuid = uuid::Uuid::new_v4();
+        let eid = EntityId::new();
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
-            player_id: uuid.to_string(),
+            player_id: eid,
             position: [5.0, 0.0, 5.0],
         }));
 
         process_client_inputs(&mut world);
 
-        let eid = EntityId(uuid);
         assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
     }
 
@@ -383,7 +373,7 @@ mod tests {
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
             direction: [1.0, 0.0, 0.0],
             seq: 1,
         }));
@@ -401,7 +391,7 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
             direction: [1.0, 0.0, 0.0],
             seq: 1,
         }));
@@ -417,7 +407,7 @@ mod tests {
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -442,7 +432,7 @@ mod tests {
 
         // Unnormalized direction (length > 1)
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
             direction: [3.0, 0.0, 4.0], // length = 5
             seq: 1,
         }));
@@ -462,7 +452,7 @@ mod tests {
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
             direction: [0.0, 0.0, 0.0],
             seq: 1,
         }));
@@ -473,13 +463,13 @@ mod tests {
         assert_eq!(vel.0, Vec3::ZERO, "zero direction should give zero velocity");
     }
 
-    // -- Client input: invalid UUID ignored --
+    // -- Client input: nonexistent entity noop --
 
     #[test]
-    fn client_move_input_invalid_uuid_ignored() {
+    fn client_move_input_nonexistent_entity_noop() {
         let mut world = setup_world(1);
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: "not-a-uuid".into(),
+            entity_id: EntityId::new(),
             direction: [1.0, 0.0, 0.0],
             seq: 1,
         }));
@@ -489,20 +479,10 @@ mod tests {
     }
 
     #[test]
-    fn client_remove_invalid_uuid_ignored() {
-        let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: "not-a-uuid".into(),
-        }));
-
-        process_client_inputs(&mut world);
-    }
-
-    #[test]
     fn client_remove_nonexistent_entity_noop() {
         let mut world = setup_world(1);
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: uuid::Uuid::new_v4().to_string(),
+            entity_id: EntityId::new(),
         }));
 
         process_client_inputs(&mut world);
@@ -525,7 +505,7 @@ mod tests {
 
         // Client sends RemoveEntity
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -555,7 +535,7 @@ mod tests {
 
         // No TransferOutbound -- normal remove
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -600,21 +580,21 @@ mod tests {
         assert_eq!(auth_count, 3);
     }
 
-    // -- Client SpawnPlayer with invalid UUID --
+    // -- Client SpawnPlayer always spawns (EntityId is already valid) --
 
     #[test]
-    fn client_spawn_player_invalid_uuid_ignored() {
+    fn client_spawn_player_always_spawns() {
         let mut world = setup_world(1);
+        let eid = EntityId::new();
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
-            player_id: "not-a-uuid".into(),
+            player_id: eid,
             position: [0.0, 0.0, 0.0],
         }));
 
-        // Should not panic
         process_client_inputs(&mut world);
 
         let mut query = world.query_filtered::<(), With<Authoritative>>();
-        assert_eq!(query.iter(&world).count(), 0, "invalid UUID should not spawn entity");
+        assert_eq!(query.iter(&world).count(), 1, "SpawnPlayer should always spawn with typed EntityId");
     }
 
     // -- MoveInput for transfer outbound forwarded to target --
@@ -634,7 +614,7 @@ mod tests {
 
         // Client sends MoveInput for this entity
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
             direction: [1.0, 0.0, 0.0],
             seq: 5,
         }));
@@ -670,7 +650,7 @@ mod tests {
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -694,7 +674,7 @@ mod tests {
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -713,7 +693,7 @@ mod tests {
         // Do NOT set up peer address for server 2
 
         world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid.0.to_string(),
+            entity_id: eid,
         }));
 
         process_client_inputs(&mut world);
@@ -732,9 +712,9 @@ mod tests {
         let mut world = setup_world(1);
 
         // 1. Spawn player entity via client input
-        let player_uuid = uuid::Uuid::new_v4();
+        let player_eid = EntityId::new();
         world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::SpawnPlayer {
-            player_id: player_uuid.to_string(),
+            player_id: player_eid,
             position: [10.0, 0.0, 20.0],
         }));
 
@@ -742,12 +722,11 @@ mod tests {
         schedule.add_systems(process_client_inputs);
         schedule.run(&mut world);
 
-        let player_eid = EntityId(player_uuid);
         assert!(world.resource::<EntityLookup>().0.contains_key(&player_eid));
 
         // 2. Move the player
         world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::MoveInput {
-            entity_id: player_uuid.to_string(),
+            entity_id: player_eid,
             direction: [1.0, 0.0, 0.0],
             seq: 1,
         }));
@@ -779,7 +758,7 @@ mod tests {
         let npc_eid = npc_eid.unwrap();
 
         world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::RemoveEntity {
-            entity_id: npc_eid.0.to_string(),
+            entity_id: npc_eid,
         }));
         schedule.run(&mut world);
 

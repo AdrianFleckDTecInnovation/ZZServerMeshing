@@ -1,5 +1,6 @@
 use crate::game_loop::SharedCoordEvents;
 use futures_util::{SinkExt, StreamExt};
+use shared::entity::ServerId;
 use shared::protocol::{CoordClientMsg, CoordServerMsg};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -36,7 +37,7 @@ pub async fn run_coordinator_client(
 
         // Register
         let reg = CoordClientMsg::Register {
-            server_id,
+            server_id: ServerId(server_id),
             udp_port,
             ws_port,
             host: advertise_host.clone(),
@@ -73,7 +74,7 @@ pub async fn run_coordinator_client(
                 let count = hb_entity_count.load(Ordering::Relaxed);
                 let wl = hb_weighted_load.load(Ordering::Relaxed);
                 let hb = CoordClientMsg::Heartbeat {
-                    server_id,
+                    server_id: ServerId(server_id),
                     entity_count: count,
                     weighted_load: wl,
                 };
@@ -125,7 +126,7 @@ pub async fn run_coordinator_client(
                     }) => {
                         let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.rebalance_directives.push((entity_ids, target_server));
-                        tracing::info!("Received rebalance directive -> S{target_server}");
+                        tracing::info!("Received rebalance directive -> {target_server}");
                     }
                     Ok(CoordServerMsg::DrainDirective { target_servers }) => {
                         let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -134,7 +135,7 @@ pub async fn run_coordinator_client(
                             "Received drain directive -> {:?}",
                             target_servers
                                 .iter()
-                                .map(|s| format!("S{s}"))
+                                .map(|s| format!("{s}"))
                                 .collect::<Vec<_>>()
                         );
                     }

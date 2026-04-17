@@ -665,9 +665,9 @@ mod tests {
         };
 
         let mut q = coord.queue.lock().unwrap();
-        q.drain_directives.push(vec![2, 3]);
+        q.drain_directives.push(vec![shared::entity::ServerId(2), shared::entity::ServerId(3)]);
         assert_eq!(q.drain_directives.len(), 1);
-        assert_eq!(q.drain_directives[0], vec![2, 3]);
+        assert_eq!(q.drain_directives[0], vec![shared::entity::ServerId(2), shared::entity::ServerId(3)]);
     }
 
     #[test]
@@ -770,7 +770,7 @@ mod tests {
         // targets must be non-empty (process_drain returns early if empty).
         {
             let mut q = coord_events.queue.lock().unwrap();
-            q.drain_directives.push(vec![2]); // target server 2 (no peer needed with 0 entities)
+            q.drain_directives.push(vec![shared::entity::ServerId(2)]); // target server 2 (no peer needed with 0 entities)
         }
 
         let weighted_load = Arc::new(AtomicU32::new(0));
@@ -821,7 +821,7 @@ mod tests {
 
         // Activate drain with non-empty targets (process_drain returns early if targets empty)
         world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![2]);
+        world.resource_mut::<DrainState>().targets = Some(vec![shared::entity::ServerId(2)]);
         world.resource_mut::<DrainState>().started_tick = Some(1);
         world.resource_mut::<TickCounter>().0 = 2;
 
@@ -1159,7 +1159,7 @@ mod tests {
         // targets must be non-empty (process_drain returns early if empty).
         {
             let mut q = coord_events.queue.lock().unwrap();
-            q.drain_directives.push(vec![2]);
+            q.drain_directives.push(vec![shared::entity::ServerId(2)]);
         }
 
         // Start with 0 NPCs so drain completes immediately (no entities to transfer).

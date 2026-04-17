@@ -57,16 +57,16 @@ pub struct ClientRegistrationEvent {
     pub client_id: u64,
     pub tx: tokio::sync::mpsc::Sender<ClientFrame>,
     pub acked_tick: Arc<AtomicU64>,
-    pub player_uuid: String,
+    pub player_uuid: EntityId,
 }
 
 /// Coordinator events received between ticks.
 #[derive(Resource, Default)]
 pub struct CoordEventQueue {
     pub peer_list_updates: Vec<Vec<PeerInfo>>,
-    pub rebalance_directives: Vec<(Vec<String>, u16)>,
-    pub drain_directives: Vec<Vec<u16>>,
-    pub recover_events: Vec<(u16, Vec<u16>)>,
+    pub rebalance_directives: Vec<(Vec<EntityId>, ServerId)>,
+    pub drain_directives: Vec<Vec<ServerId>>,
+    pub recover_events: Vec<(ServerId, Vec<ServerId>)>,
 }
 
 /// Outbound replication data, written by prepare_replication system,
@@ -95,7 +95,7 @@ pub struct OutboundReplication {
 /// Pending authority transfers to send this tick.
 #[derive(Resource, Default)]
 pub struct PendingTransfers {
-    pub transfers: Option<(Vec<String>, u16)>,
+    pub transfers: Option<(Vec<EntityId>, ServerId)>,
 }
 
 /// Outbound transfer messages to send via UDP.
@@ -114,7 +114,7 @@ pub struct OutboundForwards {
 #[derive(Resource, Default)]
 pub struct DrainState {
     pub draining: bool,
-    pub targets: Option<Vec<u16>>,
+    pub targets: Option<Vec<ServerId>>,
     /// Tick when drain was started. Used for drain timeout.
     pub started_tick: Option<u64>,
 }

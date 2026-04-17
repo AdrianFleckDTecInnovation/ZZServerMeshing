@@ -227,9 +227,7 @@ pub fn drain_client_events(
         // once SpawnPlayer is processed (matched by player_uuid).
         inbound.client_player_assignments.push((
             event.client_id,
-            shared::entity::EntityId(uuid::Uuid::parse_str(&event.player_uuid).unwrap_or_else(
-                |_| uuid::Uuid::nil(),
-            )),
+            event.player_uuid,
         ));
         tracing::debug!(client_id = event.client_id, "Registered client in ECS");
     }
@@ -981,7 +979,7 @@ mod tests {
                 client_id: 42,
                 tx,
                 acked_tick: acked,
-                player_uuid: uuid::Uuid::new_v4().to_string(),
+                player_uuid: shared::entity::EntityId::new(),
             }
         );
 

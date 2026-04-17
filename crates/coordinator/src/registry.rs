@@ -1,3 +1,4 @@
+use shared::entity::ServerId;
 use shared::protocol::{CoordServerMsg, PeerInfo};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -135,9 +136,9 @@ impl Registry {
 
     /// Tell a draining server which targets to distribute entities to.
     pub fn drain_server(&self, server_id: u16) {
-        let targets: Vec<u16> = self.servers.keys()
+        let targets: Vec<ServerId> = self.servers.keys()
             .filter(|&&id| id != server_id && id > 0)
-            .copied()
+            .map(|&id| ServerId(id))
             .collect();
 
         if targets.is_empty() {
@@ -155,13 +156,13 @@ impl Registry {
 
     /// Broadcast recovery directive for a dead server to all surviving servers.
     pub fn broadcast_recovery(&self, dead_server_id: u16) {
-        let mut survivors: Vec<u16> = self.servers.keys()
+        let mut survivors: Vec<ServerId> = self.servers.keys()
             .filter(|&&id| id > 0)
-            .copied()
+            .map(|&id| ServerId(id))
             .collect();
-        survivors.sort();
+        survivors.sort_by_key(|s| s.0);
 
-        let msg = CoordServerMsg::RecoverEntities { dead_server_id, survivors };
+        let msg = CoordServerMsg::RecoverEntities { dead_server_id: ServerId(dead_server_id), survivors };
         if let Ok(json) = serde_json::to_string(&msg) {
             for entry in self.servers.values() {
                 if entry.server_id > 0 {
@@ -276,7 +277,7 @@ impl Registry {
         // Tell the overloaded server to transfer N entities to the underloaded server.
         let msg = CoordServerMsg::RebalanceDirective {
             entity_ids: Vec::new(), // empty = server picks
-            target_server: underloaded_id,
+            target_server: ServerId(underloaded_id),
         };
 
         if let Some(entry) = self.servers.get(&overloaded_id) {
@@ -352,7 +353,7 @@ impl Registry {
             .values()
             .filter(|s| s.server_id > 0)
             .map(|s| PeerInfo {
-                server_id: s.server_id,
+                server_id: ServerId(s.server_id),
                 udp_addr: format!("{}:{}", s.host, s.udp_port),
                 ws_addr: format!("{}:{}", s.host, s.ws_port),
             })
@@ -362,7 +363,7 @@ impl Registry {
             // Exclude self from peer list
             let peers: Vec<PeerInfo> = sim_peers
                 .iter()
-                .filter(|p| p.server_id != entry.server_id)
+                .filter(|p| p.server_id.0 != entry.server_id)
                 .cloned()
                 .collect();
 
@@ -523,7 +524,7 @@ mod tests {
         let msg: CoordServerMsg = serde_json::from_str(&msg_json).unwrap();
         match msg {
             CoordServerMsg::RebalanceDirective { target_server, .. } => {
-                assert_eq!(target_server, 2); // targets the underloaded server
+                assert_eq!(target_server, ServerId(2)); // targets the underloaded server
             }
             _ => panic!("expected RebalanceDirective, got {:?}", msg),
         }
@@ -541,7 +542,7 @@ mod tests {
         match msg1 {
             CoordServerMsg::PeerList { peers } => {
                 assert_eq!(peers.len(), 1);
-                assert_eq!(peers[0].server_id, 2);
+                assert_eq!(peers[0].server_id, ServerId(2));
             }
             _ => panic!("expected PeerList"),
         }
@@ -551,7 +552,7 @@ mod tests {
         match msg2 {
             CoordServerMsg::PeerList { peers } => {
                 assert_eq!(peers.len(), 1);
-                assert_eq!(peers[0].server_id, 1);
+                assert_eq!(peers[0].server_id, ServerId(1));
             }
             _ => panic!("expected PeerList"),
         }
@@ -570,7 +571,7 @@ mod tests {
         match msg0 {
             CoordServerMsg::PeerList { peers } => {
                 assert_eq!(peers.len(), 1);
-                assert_eq!(peers[0].server_id, 1);
+                assert_eq!(peers[0].server_id, ServerId(1));
             }
             _ => panic!("expected PeerList"),
         }
@@ -598,8 +599,8 @@ mod tests {
             let msg: CoordServerMsg = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
             match msg {
                 CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
-                    assert_eq!(dead_server_id, 3);
-                    assert_eq!(survivors, vec![1, 2]); // sorted
+                    assert_eq!(dead_server_id, ServerId(3));
+                    assert_eq!(survivors, vec![ServerId(1), ServerId(2)]); // sorted
                 }
                 _ => panic!("expected RecoverEntities"),
             }
@@ -619,9 +620,9 @@ mod tests {
         match msg {
             CoordServerMsg::DrainDirective { target_servers } => {
                 // Should include servers 2 and 3, but not 1 (self)
-                assert!(target_servers.contains(&2));
-                assert!(target_servers.contains(&3));
-                assert!(!target_servers.contains(&1));
+                assert!(target_servers.contains(&ServerId(2)));
+                assert!(target_servers.contains(&ServerId(3)));
+                assert!(!target_servers.contains(&ServerId(1)));
             }
             _ => panic!("expected DrainDirective"),
         }
@@ -790,7 +791,7 @@ mod tests {
         let msg: CoordServerMsg = serde_json::from_str(&rx1.try_recv().unwrap()).unwrap();
         match msg {
             CoordServerMsg::RebalanceDirective { target_server, .. } => {
-                assert_eq!(target_server, 3);
+                assert_eq!(target_server, ServerId(3));
             }
             _ => panic!("expected RebalanceDirective"),
         }
@@ -840,7 +841,7 @@ mod tests {
         let msg: CoordServerMsg = serde_json::from_str(&rx3.try_recv().unwrap()).unwrap();
         match msg {
             CoordServerMsg::RecoverEntities { survivors, .. } => {
-                assert_eq!(survivors, vec![1, 2, 3], "survivors should be sorted");
+                assert_eq!(survivors, vec![ServerId(1), ServerId(2), ServerId(3)], "survivors should be sorted");
             }
             _ => panic!("expected RecoverEntities"),
         }

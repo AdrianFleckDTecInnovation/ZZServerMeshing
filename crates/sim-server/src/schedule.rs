@@ -209,18 +209,18 @@ mod tests {
     #[test]
     fn spawn_then_move_same_tick() {
         let mut world = setup_world(1);
-        let uuid = uuid::Uuid::new_v4();
+        let eid = shared::entity::EntityId::new();
 
         // Queue both spawn and move for same entity on same tick
         world.resource_mut::<InboundQueue>().client_inputs.push((0,
             shared::protocol::ClientMessage::SpawnPlayer {
-                player_id: uuid.to_string(),
+                player_id: eid,
                 position: [0.0, 0.0, 0.0],
             },
         ));
         world.resource_mut::<InboundQueue>().client_inputs.push((0,
             shared::protocol::ClientMessage::MoveInput {
-                entity_id: uuid.to_string(),
+                entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
                 seq: 1,
             },
@@ -231,7 +231,6 @@ mod tests {
         let mut schedule = build_schedule();
         schedule.run(&mut world);
 
-        let eid = shared::entity::EntityId(uuid);
         assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
 
         let &bevy_entity = world.resource::<EntityLookup>().0.get(&eid).unwrap();
@@ -253,7 +252,7 @@ mod tests {
         }
 
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], 2));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], shared::entity::ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -428,7 +427,7 @@ mod tests {
                 client_id: 42,
                 tx,
                 acked_tick: acked,
-                player_uuid: uuid::Uuid::new_v4().to_string(),
+                player_uuid: shared::entity::EntityId::new(),
             }
         );
 
@@ -484,7 +483,7 @@ mod tests {
         }
 
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![2]);
+        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![shared::entity::ServerId(2)]);
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -524,7 +523,7 @@ mod tests {
         }
 
         world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![2]);
+        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![shared::entity::ServerId(2)]);
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
