@@ -8,7 +8,6 @@ use glam::Vec3;
 use rand::Rng;
 use shared::entity::{EntityState, ServerId};
 use shared::protocol::PeerMessage;
-use shared::spatial::WORLD_EXTENT;
 use shared::tick::TICK_DURATION_MS;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -162,8 +161,6 @@ pub async fn run_game_loop_ecs(
     metrics: Arc<std::sync::Mutex<MetricsCollector>>,
     entity_count_atomic: Arc<AtomicU32>,
     weighted_load_atomic: Arc<AtomicU32>,
-    full_repl_interval: u64,
-    full_snapshot_enabled: bool,
     coord_outbound: Arc<SharedCoordOutbound>,
     peer_health: Arc<SharedPeerHealth>,
 ) {
@@ -178,17 +175,11 @@ pub async fn run_game_loop_ecs(
     world.init_resource::<InboundQueue>();
     world.init_resource::<CoordEventQueue>();
     world.init_resource::<OutboundReplication>();
-    world.insert_resource(ReplicationConfig {
-        full_interval: full_repl_interval,
-        full_snapshot_enabled,
-    });
-    world.init_resource::<ClientSnapshot>();
     world.init_resource::<PendingTransfers>();
     world.init_resource::<OutboundTransfers>();
     world.init_resource::<OutboundForwards>();
     world.init_resource::<DrainState>();
     world.init_resource::<ShutdownRequested>();
-    world.init_resource::<TimingAccumulator>();
     world.init_resource::<ClientRegistry>();
     world.init_resource::<OutboundCoordMessages>();
     world.init_resource::<EntityOwnership>();
@@ -227,12 +218,6 @@ pub async fn run_game_loop_ecs(
     let mut udp_ctrl_closed = false;
     // Outbound UDP byte counter, reset each tick (WI-101)
     let mut udp_bytes_out: u64 = 0;
-
-    // UDP backpressure: when the replication channel is saturated, skip non-full
-    // replication ticks to cut outbound bandwidth. This breaks the feedback loop
-    // where dropped packets → shadow loss → full replication → more drops.
-    let mut repl_backpressure = false;
-    let mut repl_drops_this_tick: u64 = 0;
 
     loop {
         interval.tick().await;
@@ -430,12 +415,11 @@ pub async fn run_game_loop_ecs(
 
         let t2 = Instant::now();
         let server_id_u16 = world.resource::<ServerConfig>().server_id;
-        repl_drops_this_tick = 0;
         udp_bytes_out = 0;
 
         if let Some(entities) = &repl_full {
-            // Full replication tick: ALWAYS broadcast (1/sec crash recovery).
-            // These go through even under backpressure.
+            // Full snapshot fallback: broadcast to all peers when filtering
+            // provides no benefit (e.g., no shadows to compute bounds from).
             let peer_addrs: Vec<_> = world
                 .resource::<PeerAddresses>()
                 .0
@@ -477,9 +461,6 @@ pub async fn run_game_loop_ecs(
                 }
             }
         }
-
-        // Track per-tick drops for backpressure detection
-        repl_drops_this_tick = udp_repl_drops;
 
         // Enqueue authority transfers (control channel -- latency-critical)
         if !transfers.is_empty() {
@@ -588,25 +569,14 @@ pub async fn run_game_loop_ecs(
                 client_count,
             );
 
-            // Rate-limited UDP sender drop logging + backpressure control
+            // Rate-limited UDP sender drop logging
             if udp_repl_drops > 0 {
-                if !repl_backpressure {
-                    tracing::warn!(
-                        drops = udp_repl_drops,
-                        "UDP replication saturated, enabling backpressure (skipping per-tick replication)"
-                    );
-                } else {
-                    tracing::warn!(
-                        drops = udp_repl_drops,
-                        "UDP replication still saturated: {} drops in last 5s",
-                        udp_repl_drops
-                    );
-                }
-                repl_backpressure = true;
+                tracing::warn!(
+                    drops = udp_repl_drops,
+                    "UDP replication channel saturated: {} drops in last 5s",
+                    udp_repl_drops
+                );
                 udp_repl_drops = 0;
-            } else if repl_backpressure {
-                tracing::info!("UDP replication recovered, disabling backpressure");
-                repl_backpressure = false;
             }
             if udp_ctrl_drops > 0 {
                 tracing::warn!(
@@ -634,10 +604,9 @@ mod tests {
     use super::*;
     use crate::conversion::spawn_from_entity_state_direct;
     use crate::resources::{
-        ClientRegistry, ClientSnapshot, CoordEventQueue, DrainState, EntityLookup,
+        ClientRegistry, CoordEventQueue, DrainState, EntityLookup,
         InboundQueue, OutboundForwards, OutboundReplication, OutboundTransfers,
         PeerAddresses, PendingTransfers, ServerConfig, ShutdownRequested,
-        TimingAccumulator,
     };
     use crate::schedule::build_schedule;
     use shared::entity::{EntityState, ServerId};
@@ -654,14 +623,11 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
-        world.init_resource::<ReplicationConfig>();
-        world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
         world.init_resource::<OutboundForwards>();
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
-        world.init_resource::<TimingAccumulator>();
         world.init_resource::<ClientRegistry>();
         world
     }
@@ -824,8 +790,6 @@ mod tests {
             metrics,
             entity_count,
             weighted_load,
-            FULL_REPL_INTERVAL,
-            false,
             coord_outbound,
             peer_health,
         ));
@@ -1216,8 +1180,6 @@ mod tests {
             Arc::clone(&metrics),
             entity_count.clone(),
             weighted_load,
-            FULL_REPL_INTERVAL,
-            false,
             coord_outbound,
             peer_health,
         ));
@@ -1252,6 +1214,11 @@ mod tests {
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
+        // Register a test client so prepare_client_snapshot sends a frame
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::resources::ClientFrame>(8);
+        let acked = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -1268,8 +1235,8 @@ mod tests {
             assert_eq!(e.authority_server, ServerId(1));
         }
 
-        // Verify client snapshot frame
-        let frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
+        // Verify client snapshot frame via test client channel
+        let frame = rx.try_recv().unwrap();
         assert_eq!(frame[0], 0x01); // full snapshot
         let count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(count, 3);

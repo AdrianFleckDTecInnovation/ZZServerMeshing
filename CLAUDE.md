@@ -248,6 +248,18 @@ Use it for:
 
 Defined in `.claude/agents/mesh-auditor.md`. Writes to `docs/mesh-auditor/`.
 
+### @mesh-cleanup
+Implements codebase simplification work items from design 012. Removes dead code, splits monoliths, deduplicates, cleans abstractions. Pure refactoring with zero behavior change. Follows the work items in `docs/mesh-architect/work-items/012-codebase-simplification.md`.
+
+Use it for:
+- "Remove dead code (WI-120 to WI-125)"
+- "Split systems.rs into modules"
+- "Make the protocol types type-safe"
+- "Continue the simplification work"
+- "Run the next batch of cleanup"
+
+Defined in `.claude/agents/mesh-cleanup.md`. Writes worklogs to `worklogs/mesh-cleanup/`.
+
 ### @cluster-ops
 Manages the Pi/UNO Q hardware cluster. SSHs into boards, monitors CPU/memory/network/temperature, deploys binaries, checks logs, diagnoses issues, and verifies fixes on live hardware. Knows all board IPs, systemd services, and deployment layout.
 

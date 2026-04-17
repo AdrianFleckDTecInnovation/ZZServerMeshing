@@ -53,14 +53,11 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
-        world.init_resource::<ReplicationConfig>();
-        world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
         world.init_resource::<OutboundForwards>();
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
-        world.init_resource::<TimingAccumulator>();
         world.init_resource::<ClientRegistry>();
         world.init_resource::<OutboundCoordMessages>();
         world.init_resource::<EntityOwnership>();
@@ -81,6 +78,12 @@ mod tests {
 
         // Give it a velocity
         world.get_mut::<Velocity>(entity).unwrap().0 = Vec3::new(5.0, 0.0, 0.0);
+
+        // Register a test client so prepare_client_snapshot sends a frame
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -97,9 +100,9 @@ mod tests {
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].id, eid);
 
-        // Client snapshot should have a binary frame
-        let snapshot = world.resource::<ClientSnapshot>();
-        assert!(snapshot.frame.is_some());
+        // Client snapshot should have a binary frame via test client channel
+        let frame = rx.try_recv().unwrap();
+        assert_eq!(frame[0], 0x01); // full snapshot
     }
 
     #[test]
@@ -117,7 +120,6 @@ mod tests {
             // Clear outputs from previous tick
             world.resource_mut::<OutboundReplication>().full_snapshot = None;
             world.resource_mut::<OutboundReplication>().per_peer.clear();
-            world.resource_mut::<ClientSnapshot>().frame = None;
             world.resource_mut::<OutboundTransfers>().messages.clear();
             world.resource_mut::<OutboundForwards>().messages.clear();
 
@@ -138,7 +140,6 @@ mod tests {
         let eid = entity_state.id;
         world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
             tick: 10,
-            server_id: ServerId(2),
             entities: vec![entity_state],
         });
 
@@ -182,6 +183,11 @@ mod tests {
         let shadow = EntityState::new_npc(Vec3::X, ServerId(2));
         spawn_from_entity_state_direct(&mut world, &shadow, false, Some(1));
 
+        // Register a test client to verify client snapshot content
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -192,9 +198,8 @@ mod tests {
         assert!(repl.full_snapshot.is_some());
         assert_eq!(repl.full_snapshot.as_ref().unwrap().len(), 1);
 
-        // Client snapshot: both auth + shadow
-        let snap = world.resource::<ClientSnapshot>();
-        let frame = snap.frame.as_ref().unwrap();
+        // Client snapshot: both auth + shadow via test client channel
+        let frame = rx.try_recv().unwrap();
         let count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(count, 2);
     }
@@ -282,6 +287,11 @@ mod tests {
         let shadow_eid = shadow.id;
         spawn_from_entity_state_direct(&mut world, &shadow, false, Some(0));
 
+        // Register a test client to verify frame content
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+
         // Set tick well past stale threshold (SHADOW_STALE_TICKS = 300)
         world.resource_mut::<TickCounter>().0 = 400;
 
@@ -289,7 +299,7 @@ mod tests {
         schedule.run(&mut world);
 
         // Shadow should have been included in client snapshot BEFORE cleanup
-        let frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
+        let frame = rx.try_recv().unwrap();
         let entity_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         // The snapshot was prepared before shadow_cleanup ran, so the shadow was included
         assert_eq!(entity_count, 1);
@@ -364,7 +374,6 @@ mod tests {
         let shadow_eid = shadow_state.id;
         world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
             tick: 12,
-            server_id: ServerId(3),
             entities: vec![shadow_state],
         });
 
@@ -447,7 +456,6 @@ mod tests {
         // Push peer update with current tick
         world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
             tick: 100,
-            server_id: ServerId(2),
             entities: vec![entity_state],
         });
 
@@ -538,6 +546,12 @@ mod tests {
     #[test]
     fn empty_world_tick_no_panic() {
         let mut world = setup_world(1);
+
+        // Register a test client to verify empty frame
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -545,8 +559,8 @@ mod tests {
 
         // Replication should be None (no entities)
         assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
-        // Client snapshot should still produce a valid frame (0 entities)
-        let frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
+        // Client snapshot should still produce a valid frame (0 entities) via test channel
+        let frame = rx.try_recv().unwrap();
         assert_eq!(frame[0], 0x01);
         let count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(count, 0);

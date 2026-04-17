@@ -180,8 +180,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             frame = frame_rx.recv() => {
                 match frame {
                     Some(client_frame) => {
-                        let data = client_frame.into_vec();
-                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                        if ws_sink.send(Message::Binary(client_frame.into())).await.is_err() {
                             break;
                         }
                     }
@@ -271,29 +270,10 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     );
 }
 
-// Encoding is now in encoding.rs; test-only delegates below.
-
-#[cfg(test)]
-use shared::entity::EntityState;
-
-#[cfg(test)]
-fn encode_entity(buf: &mut Vec<u8>, e: &EntityState) {
-    crate::encoding::encode_entity(buf, e);
-}
-
-#[cfg(test)]
-fn encode_binary_snapshot(tick: u64, entities: &[EntityState]) -> Vec<u8> {
-    crate::encoding::encode_binary_snapshot(tick, entities)
-}
-
-#[cfg(test)]
-fn encode_binary_delta(tick: u64, updates: &[EntityState], removals: &[shared::entity::EntityId]) -> Vec<u8> {
-    crate::encoding::encode_binary_delta(tick, updates, removals)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::{encode_entity, encode_binary_snapshot, encode_binary_delta};
     use shared::entity::{EntityId, EntityState, ServerId};
     use glam::Vec3;
 

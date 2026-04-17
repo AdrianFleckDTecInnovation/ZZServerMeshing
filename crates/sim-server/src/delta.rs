@@ -5,7 +5,7 @@
 //! and HashMap only, making it thoroughly unit-testable.
 
 use glam::Vec3;
-use shared::entity::{EntityId, EntityState, EntityType, ServerId};
+use shared::entity::{EntityId, EntityState};
 use std::collections::{HashMap, HashSet};
 
 /// Threshold for considering a float "changed" (avoids floating-point noise).
@@ -20,29 +20,6 @@ const CHANGE_THRESHOLD_SQ: f32 = CHANGE_THRESHOLD * CHANGE_THRESHOLD;
 /// How often to force a full snapshot regardless of delta state.
 /// 100 ticks = 5 seconds at 20Hz. Well within SHADOW_STALE_TICKS (300 = 15s).
 pub const FULL_SNAPSHOT_INTERVAL: u32 = 100;
-
-/// Compact entity state for baseline comparison.
-/// No EntityId field -- the baseline map is keyed by EntityId.
-#[derive(Clone, Debug)]
-pub struct CompactEntityState {
-    pub position: Vec3,
-    pub velocity: Vec3,
-    pub entity_type: EntityType,
-    pub authority_server: ServerId,
-    pub last_input_seq: u32,
-}
-
-impl From<&EntityState> for CompactEntityState {
-    fn from(e: &EntityState) -> Self {
-        Self {
-            position: e.position,
-            velocity: e.velocity,
-            entity_type: e.entity_type,
-            authority_server: e.authority_server,
-            last_input_seq: e.last_input_seq,
-        }
-    }
-}
 
 /// Result of a delta computation.
 pub struct DeltaResult {
@@ -61,9 +38,10 @@ pub struct DeltaResult {
 /// Entities removed from the baseline are NOT counted as changes here because
 /// the purpose is to estimate delta frame size (removed entities are 16-byte UUIDs,
 /// not 47-byte entity records).
+#[cfg(test)]
 pub fn change_ratio(
     current: &[EntityState],
-    baseline: &HashMap<EntityId, CompactEntityState>,
+    baseline: &HashMap<EntityId, EntityState>,
 ) -> f32 {
     if current.is_empty() {
         return 0.0;
@@ -85,7 +63,7 @@ pub fn change_ratio(
 /// Compare current entity set against a baseline. Returns the delta.
 pub fn compute_delta(
     current: &[EntityState],
-    baseline: &HashMap<EntityId, CompactEntityState>,
+    baseline: &HashMap<EntityId, EntityState>,
 ) -> DeltaResult {
     let mut updates = Vec::new();
     let mut current_ids = HashSet::with_capacity(current.len());
@@ -115,28 +93,28 @@ pub fn compute_delta(
 }
 
 /// Build a baseline map from a full entity snapshot.
-pub fn build_baseline(entities: &[EntityState]) -> HashMap<EntityId, CompactEntityState> {
+pub fn build_baseline(entities: &[EntityState]) -> HashMap<EntityId, EntityState> {
     entities
         .iter()
-        .map(|e| (e.id, CompactEntityState::from(e)))
+        .map(|e| (e.id, e.clone()))
         .collect()
 }
 
 /// Update a baseline incrementally after sending a delta.
 /// More efficient than rebuilding from scratch -- O(changed) instead of O(all).
 pub fn update_baseline(
-    baseline: &mut HashMap<EntityId, CompactEntityState>,
+    baseline: &mut HashMap<EntityId, EntityState>,
     delta: &DeltaResult,
 ) {
     for entity in &delta.updates {
-        baseline.insert(entity.id, CompactEntityState::from(entity));
+        baseline.insert(entity.id, entity.clone());
     }
     for id in &delta.removals {
         baseline.remove(id);
     }
 }
 
-fn entity_changed(current: &EntityState, baseline: &CompactEntityState) -> bool {
+fn entity_changed(current: &EntityState, baseline: &EntityState) -> bool {
     vec3_changed(current.position, baseline.position)
         || vec3_changed(current.velocity, baseline.velocity)
         || current.entity_type != baseline.entity_type
@@ -151,6 +129,7 @@ fn vec3_changed(a: Vec3, b: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::entity::{EntityType, ServerId};
 
     fn make_npc(pos: Vec3, server: u16) -> EntityState {
         EntityState::new_npc(pos, ServerId(server))
@@ -430,7 +409,7 @@ mod tests {
 
     #[test]
     fn empty_current_empty_baseline() {
-        let baseline: HashMap<EntityId, CompactEntityState> = HashMap::new();
+        let baseline: HashMap<EntityId, EntityState> = HashMap::new();
         let delta = compute_delta(&[], &baseline);
         assert_eq!(delta.updates.len(), 0);
         assert_eq!(delta.removals.len(), 0);
@@ -567,20 +546,6 @@ mod tests {
     #[test]
     fn full_snapshot_interval_constant_value() {
         assert_eq!(FULL_SNAPSHOT_INTERVAL, 100, "periodic full snapshot should be every 100 ticks (5s at 20Hz)");
-    }
-
-    #[test]
-    fn compact_entity_state_from_entity_state() {
-        let mut e = make_player(Vec3::new(1.0, 2.0, 3.0), 5);
-        e.velocity = Vec3::new(4.0, 5.0, 6.0);
-        e.last_input_seq = 42;
-
-        let compact = CompactEntityState::from(&e);
-        assert_eq!(compact.position, e.position);
-        assert_eq!(compact.velocity, e.velocity);
-        assert_eq!(compact.entity_type, e.entity_type);
-        assert_eq!(compact.authority_server, e.authority_server);
-        assert_eq!(compact.last_input_seq, e.last_input_seq);
     }
 
     #[test]

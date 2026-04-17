@@ -33,13 +33,35 @@ export const spatialHotspot: Scenario = {
 
     // Measure impact
     const metrics = await ctx.getAllMetrics();
+    if (metrics.length === 0) {
+      return {
+        name: 'spatial-hotspot',
+        status: 'fail',
+        summary: 'No server metrics available — all servers may be down',
+        details: ['No metrics endpoints responded'],
+        durationMs: 0,
+      };
+    }
+    // Filter to metrics entries that have valid phase data
+    const validMetrics = metrics.filter(m => m.phases?.total_ms != null);
     const totalEntities = metrics.reduce((sum, m) => sum + m.entity_count, 0);
     details.push(`Total entities: ${totalEntities} (${ENTITY_COUNT} in hotspot)`);
+    details.push(`Metrics responses: ${metrics.length} total, ${validMetrics.length} with phase data`);
+
+    if (validMetrics.length === 0) {
+      return {
+        name: 'spatial-hotspot',
+        status: 'fail',
+        summary: `Got ${metrics.length} metrics responses but none had phase data`,
+        details,
+        durationMs: 0,
+      };
+    }
 
     // Check replication phase — this is where packet size issues surface
     let worstReplication = 0;
-    let worstServer = 0;
-    for (const m of metrics) {
+    let worstServer = validMetrics[0].server_id;
+    for (const m of validMetrics) {
       if (m.phases.replication_ms.p95 > worstReplication) {
         worstReplication = m.phases.replication_ms.p95;
         worstServer = m.server_id;
@@ -49,7 +71,7 @@ export const spatialHotspot: Scenario = {
     details.push(`Replication bottleneck: S${worstServer} at ${worstReplication.toFixed(1)}ms p95`);
 
     // Full phase breakdown for worst server
-    const worst = metrics.find(m => m.server_id === worstServer)!;
+    const worst = validMetrics.find(m => m.server_id === worstServer)!;
     const totalP95 = worst.phases.total_ms.p95;
     details.push(`S${worstServer} phase breakdown (p95):`);
     details.push(`  simulation:    ${worst.phases.simulation_ms.p95.toFixed(1)}ms`);
@@ -60,7 +82,7 @@ export const spatialHotspot: Scenario = {
     details.push(`  total:         ${totalP95.toFixed(1)}ms (${worst.tick_budget_pct.toFixed(0)}% budget)`);
 
     // Check if any server is struggling (>60% budget)
-    const maxBudget = Math.max(...metrics.map(m => m.tick_budget_pct));
+    const maxBudget = Math.max(...validMetrics.map(m => m.tick_budget_pct));
 
     // Distribution — with a hotspot, one server may end up with most via round-robin,
     // or rebalancing may have spread them

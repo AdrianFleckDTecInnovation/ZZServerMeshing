@@ -6,7 +6,6 @@ mod metrics_server;
 mod components;
 mod resources;
 mod conversion;
-#[allow(dead_code)]
 mod encoding;
 mod delta;
 mod systems;
@@ -60,16 +59,6 @@ struct Args {
     #[arg(long)]
     tls_key: Option<PathBuf>,
 
-    /// Full replication interval in ticks. Every N ticks, send ALL entities to
-    /// all peers (unfiltered broadcast). Only used when --full-snapshot is enabled.
-    /// Default: 600 (every 30 seconds at 20Hz). Set to 1 to disable filtering entirely.
-    #[arg(long, default_value_t = 600)]
-    full_repl_interval: u64,
-
-    /// Enable periodic full snapshots to all peers. Disabled by default because
-    /// the cold tier at 5Hz provides sufficient crash recovery coverage.
-    #[arg(long, default_value_t = false)]
-    full_snapshot: bool,
 }
 
 #[tokio::main]
@@ -197,8 +186,6 @@ async fn main() {
         Arc::clone(&metrics_collector),
         Arc::clone(&entity_count_atomic),
         Arc::clone(&weighted_load_atomic),
-        args.full_repl_interval,
-        args.full_snapshot,
         Arc::clone(&coord_outbound),
         Arc::clone(&peer_health),
     ));

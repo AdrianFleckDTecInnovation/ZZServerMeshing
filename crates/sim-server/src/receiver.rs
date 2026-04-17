@@ -148,12 +148,11 @@ pub async fn run_udp_receiver(
                 let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.peer_updates.push(PeerUpdate {
                     tick,
-                    server_id,
                     entities,
                 });
             }
             PeerMessage::AuthorityTransfer {
-                tick,
+                tick: _,
                 entity_id,
                 from_server,
                 to_server,
@@ -161,7 +160,6 @@ pub async fn run_udp_receiver(
             } => {
                 let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                 q.authority_transfers.push(InboundTransfer {
-                    tick,
                     entity_id,
                     from_server,
                     to_server,
@@ -256,7 +254,6 @@ pub async fn run_udp_receiver(
                     let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
                     q.peer_updates.push(PeerUpdate {
                         tick,
-                        server_id,
                         entities: complete.entities,
                     });
                 }

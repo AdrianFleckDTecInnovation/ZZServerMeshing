@@ -4,6 +4,13 @@ Last updated: 2026-04-15
 
 ## Active
 
+### 012: Codebase Simplification
+**Status:** Designed, ready for implementation
+**Priority:** High
+**Design:** `designs/012-codebase-simplification.md`
+**Work Items:** `work-items/012-codebase-simplification.md`
+**Summary:** Comprehensive cleanup to make the prototype clean enough for a drop-in package. 9 phases, 34 work items: (1) Remove 12 dead code items (ClientFrame::Shared, TimingAccumulator, CompactEntityState, GatewayMetrics, ReplicationConfig, etc.). (2) Split systems.rs (8,041 lines) into 10 focused modules under systems/. (3) Type-safe protocol IDs (EntityId/ServerId instead of String/u16 in ClientMessage and coordinator messages). (4) Deduplication (TLS, TICK_DURATION, speed constants, queue swap, helpers). (5) Extract inline HTML dashboards to files. (6) Clean abstractions (PeerBounds to sim-server, DrainState collapse, Shared* wrappers to type aliases). (7) Coordinator HTTP helper. (8) Dependency cleanup (shared dev-deps, rand 0.9). (9) Doc archival. Zero behavior change throughout -- pure refactoring backed by 225+ existing tests. Based on complexity-audit.md findings.
+
 ### 011: Network Saturation Telemetry
 **Status:** Designed, ready for implementation
 **Priority:** High

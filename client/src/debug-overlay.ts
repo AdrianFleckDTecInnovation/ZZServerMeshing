@@ -112,13 +112,6 @@ export class DebugOverlay {
       }
     }
 
-    // Network metrics
-    let metricsLine = '';
-    if (wv.metrics) {
-      const m = wv.metrics;
-      metricsLine = `Net: ${m.snapshotsPerSec} snap/s | ${m.bandwidthKBps} KB | ${m.rebalanceEvents} rebalances`;
-    }
-
     // Network snapshot rate (measured from actual arrivals)
     const netHz = wv.measuredHz > 0 ? `${wv.measuredHz.toFixed(0)}` : '?';
 
@@ -132,7 +125,6 @@ export class DebugOverlay {
 Entities: ${totalEntities} | Camera: ${this.followMode ? 'follow' : 'free'} [F]
 ${playerInfo}
 ${aoiLine}
-${metricsLine}
 ${serverLines}`;
   }
 }

@@ -6,15 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
-    WorldSnapshot {
-        tick: u64,
-        entities: Vec<EntityState>,
-    },
-    EntityDelta {
-        tick: u64,
-        updates: Vec<EntityState>,
-        removals: Vec<EntityId>,
-    },
     /// Sent to a client on connect to assign their player entity.
     PlayerAssigned {
         player_id: String,
@@ -194,45 +185,6 @@ mod tests {
     use super::*;
     use crate::entity::{EntityState, ServerId};
     use glam::Vec3;
-
-    #[test]
-    fn server_message_world_snapshot_json_roundtrip() {
-        let e = EntityState::new_npc(Vec3::new(1.0, 0.0, 2.0), ServerId(1));
-        let msg = ServerMessage::WorldSnapshot {
-            tick: 42,
-            entities: vec![e],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"WorldSnapshot\""));
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::WorldSnapshot { tick, entities } => {
-                assert_eq!(tick, 42);
-                assert_eq!(entities.len(), 1);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn server_message_entity_delta_roundtrip() {
-        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
-        let msg = ServerMessage::EntityDelta {
-            tick: 100,
-            updates: vec![e.clone()],
-            removals: vec![e.id],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::EntityDelta { tick, updates, removals } => {
-                assert_eq!(tick, 100);
-                assert_eq!(updates.len(), 1);
-                assert_eq!(removals.len(), 1);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
 
     #[test]
     fn client_message_spawn_entity_roundtrip() {
@@ -445,23 +397,6 @@ mod tests {
             CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
                 assert_eq!(dead_server_id, 3);
                 assert!(survivors.is_empty());
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn empty_world_snapshot() {
-        let msg = ServerMessage::WorldSnapshot {
-            tick: 0,
-            entities: vec![],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::WorldSnapshot { tick, entities } => {
-                assert_eq!(tick, 0);
-                assert!(entities.is_empty());
             }
             _ => panic!("wrong variant"),
         }
