@@ -137,24 +137,18 @@ pub fn prepare_replication(
                 // 1-2 tick staleness in shadow positions — at 5 units/tick, the
                 // 250-unit margin gives 50 ticks of headroom (audit #065).
                 //
-                // Cold entities are phase-spread: each entity's UUID determines
-                // its phase (0-3), and it's sent when tick % 4 matches. This
-                // distributes cold bandwidth evenly instead of bursting on every
-                // 4th tick (audit #066).
+                // Cold = NOT hot, but within PeerBounds of this peer's shadow
+                // positions, sent at 5Hz via phase-spreading (UUID % 4). This
+                // keeps crash-recovery shadows alive for spatially-relevant
+                // entities without replicating the entire world (design 010).
                 //
-                // Entities in their cold phase skip the distance check entirely
-                // since they'll be included regardless (audit #060).
+                // Phase-spreading distributes cold bandwidth evenly across
+                // ticks instead of bursting on every 4th tick (audit #066).
+                let bounds_for_cold = peer_bounds.get(&peer_id);
                 entities
                     .iter()
                     .filter(|e| {
-                        // Check cold phase first — if this entity is in its send
-                        // phase, include it without the distance check.
-                        let entity_phase = (e.id.0.as_u128() % 4) as u64;
-                        if entity_phase == current_phase {
-                            cold_this_peer += 1;
-                            return true;
-                        }
-                        // Not in cold phase — check if hot (near a player).
+                        // Hot check first — near a player, always include.
                         let is_hot = players.iter().any(|pp| {
                             let dx = e.position.x - pp.x;
                             let dz = e.position.z - pp.z;
@@ -162,8 +156,19 @@ pub fn prepare_replication(
                         });
                         if is_hot {
                             hot_this_peer += 1;
+                            return true;
                         }
-                        is_hot
+                        // Cold: phase-matched AND within PeerBounds.
+                        let entity_phase = (e.id.0.as_u128() % 4) as u64;
+                        if entity_phase == current_phase {
+                            if let Some(bounds) = bounds_for_cold {
+                                if bounds.contains(e.position) {
+                                    cold_this_peer += 1;
+                                    return true;
+                                }
+                            }
+                        }
+                        false
                     })
                     .cloned()
                     .collect()
@@ -973,21 +978,24 @@ mod tests {
 
     #[test]
     fn tiered_cold_tick_sends_all() {
-        // With phase spreading, entities in their cold phase are always sent
-        // (counted as cold), and nearby entities not in their phase are sent as hot.
-        // To get both entities sent: put the nearby one in a non-matching phase (hot)
-        // and the far one in the matching phase (cold).
+        // Cold entities must be within PeerBounds to be sent.
+        // Nearby entity: hot (within 750 of player). Cold entity: within
+        // PeerBounds but outside hot range, in matching phase.
         let mut world = setup_world(1);
-        // Nearby entity in phase 2 (NOT matching tick=4, phase 0) -> classified by distance -> hot
+        // Nearby entity in phase 2 (NOT matching tick=4, phase 0) -> hot
         spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 150);
-        // Far entity in phase 0 (matches tick=4, phase 0) -> cold-phase send
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 151);
+        // Entity within PeerBounds but outside hot range (dist=800 from player at 100), phase 0 -> cold
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(900.0, 0.0, 0.0), 1, 0, 151);
+        // Entity FAR outside PeerBounds, in phase 0 -> excluded even though phase matches
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 152);
 
         world
             .resource_mut::<PeerAddresses>()
             .0
             .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+        // NPC shadow to extend PeerBounds beyond hot range
+        spawn_shadow_npc(&mut world, Vec3::new(1200.0, 0.0, 0.0), 2);
 
         // Tick 4: current_phase = 4 % 4 = 0
         world.resource_mut::<TickCounter>().0 = 4;
@@ -1002,13 +1010,13 @@ mod tests {
         assert_eq!(
             peer_entities.len(),
             2,
-            "both entities should be sent (1 hot + 1 cold-phase)"
+            "hot entity + cold-within-bounds entity (far one excluded)"
         );
         assert_eq!(
             outbound.hot_count, 1,
             "nearby entity is hot (not in its cold phase)"
         );
-        assert_eq!(outbound.cold_count, 1, "far entity is in its cold phase");
+        assert_eq!(outbound.cold_count, 1, "within-bounds entity is cold");
     }
 
     #[test]
@@ -1084,27 +1092,36 @@ mod tests {
 
     #[test]
     fn tiered_cold_tick_modulo() {
-        // With per-entity phase spreading, verify that a far entity is sent
-        // when its phase matches the tick, and only the nearby entity is sent otherwise.
+        // Cold entities must be within PeerBounds. Far entity outside PeerBounds
+        // is never sent even when phase matches. Entity within bounds but outside
+        // hot range is sent on its cold phase.
         let mut world = setup_world(1);
-        // Nearby entity in phase 2: never matches phase 0 or 1 or 3 ticks we test.
-        // On tick=2 (phase 2) it matches cold phase and is counted as cold.
-        // On other ticks it's sent as hot (within 750 of player at 100,0,0).
+        // Nearby entity in phase 2: hot (within 750 of player), or cold when phase matches.
         spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 180);
-        // Far entity in phase 0: matches tick 4, 8, 12 (phase 0). Not hot (4000 > 750).
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 181);
+        // Within-bounds entity in phase 0: outside hot range (600 > 0 but < 750 from player at 100),
+        // wait — 600 from origin, player at 100 -> dist = 500. Within 750? Yes.
+        // Actually let's put it at 700,0,0 so dist from player at 100 = 600, within 750 -> hot.
+        // Use 500,0,0 instead: dist from player = 400, hot. Need outside hot but inside bounds.
+        // PeerBounds from player at (100,0,0) with NPC shadows: bounds = player ± 750.
+        // So bounds are -650..850 on X. Entity at 800,0,0 is inside bounds, dist=700 from player -> hot.
+        // Entity at 600,0,0: dist from player at 100 = 500 < 750 -> hot.
+        // To be cold, need dist > 750 from player but within PeerBounds.
+        // PeerBounds is built from ALL shadow positions. Add an NPC shadow at 1500,0,0.
+        // Then bounds X = min(100,1500)-750..max(100,1500)+750 = -650..2250.
+        // Entity at 1200,0,0: dist from player = 1100 > 750 (not hot), within bounds (1200 < 2250) -> cold!
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(1200.0, 0.0, 0.0), 1, 0, 181);
 
         world
             .resource_mut::<PeerAddresses>()
             .0
             .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_shadow_player(&mut world, Vec3::new(100.0, 0.0, 0.0), 2);
+        // NPC shadow to extend PeerBounds to cover entity at 1200
+        spawn_shadow_npc(&mut world, Vec3::new(1500.0, 0.0, 0.0), 2);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_replication);
 
-        // Per-entity phase spreading: far entity (phase 0) sent on ticks where phase=0.
-        // Nearby entity (phase 2) is always included (hot or cold-phase).
         for tick in [1u64, 2, 3, 4, 5, 6, 7, 8, 12] {
             let current_phase = tick % 4;
             world.resource_mut::<TickCounter>().0 = tick;
@@ -1112,19 +1129,20 @@ mod tests {
             let outbound = world.resource::<OutboundReplication>();
             let count = outbound.per_peer.get(&2).map_or(0, |v| v.len());
             if current_phase == 0 {
-                // Far entity matches phase 0 -> sent as cold. Nearby entity is hot (phase 2 != 0).
+                // Entity at 1200 matches phase 0, within PeerBounds -> cold. Nearby is hot.
                 assert_eq!(
                     count, 2,
-                    "tick {tick} (phase 0): far entity in cold phase, both sent"
+                    "tick {tick} (phase 0): cold entity within bounds sent"
                 );
             } else if current_phase == 2 {
-                // Nearby entity matches phase 2 -> sent as cold. Far entity not hot, not phase 2 -> excluded.
+                // Nearby entity matches phase 2, within bounds -> cold.
+                // Entity at 1200 not in phase, not hot -> excluded.
                 assert_eq!(
                     count, 1,
-                    "tick {tick} (phase 2): only nearby entity (cold-phase match)"
+                    "tick {tick} (phase 2): only nearby entity (cold-phase)"
                 );
             } else {
-                // Nearby entity is hot (distance check). Far entity: not hot, not in phase -> excluded.
+                // Nearby entity is hot. Entity at 1200: not hot, not in phase -> excluded.
                 assert_eq!(count, 1, "tick {tick}: only nearby entity (hot)");
             }
         }
@@ -1173,17 +1191,20 @@ mod tests {
 
     #[test]
     fn tiered_replication_full_cycle() {
-        // Comprehensive test: 5 auth entities with controlled phases, 2 peers with
-        // player shadows. Verify per-entity phase spreading across ticks 1-4.
+        // Comprehensive test: 4 auth entities with controlled phases, 2 peers
+        // with player shadows. Cold entities must be within PeerBounds.
         //
         // Entity layout:
         //   A at (0,0,0)       phase 3 -- hot for peer 2 (dist=50 from player)
         //   B at (100,0,0)     phase 3 -- hot for peer 2 (dist=50 from player)
         //   C at (3000,0,3000) phase 2 -- hot for peer 3 (dist=141 from player)
-        //   D at (4500,0,0)    phase 0 -- far from all players (cold only)
-        //   E at (-4500,0,-4500) phase 1 -- far from all players (cold only)
+        //   D at (4500,0,0)    phase 0 -- FAR from all players AND outside all PeerBounds
         //
         // Peer 2 player at (50,0,0). Peer 3 player at (3100,0,3100).
+        // PeerBounds for peer 2: all shadows from server 2 ± 750.
+        // PeerBounds for peer 3: all shadows from server 3 ± 750.
+        //
+        // D is outside both PeerBounds -> never cold-replicated (correctly excluded).
         let mut world = setup_world(1);
 
         let (_, eid_a) = spawn_auth_npc_in_phase(&mut world, Vec3::new(0.0, 0.0, 0.0), 1, 3, 300);
@@ -1192,8 +1213,6 @@ mod tests {
             spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 2, 302);
         let (_, _eid_d) =
             spawn_auth_npc_in_phase(&mut world, Vec3::new(4500.0, 0.0, 0.0), 1, 0, 303);
-        let (_, eid_e) =
-            spawn_auth_npc_in_phase(&mut world, Vec3::new(-4500.0, 0.0, -4500.0), 1, 1, 304);
 
         world
             .resource_mut::<PeerAddresses>()
@@ -1210,13 +1229,12 @@ mod tests {
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_replication);
 
-        // Track which entities each peer has received across all 4 ticks
         let mut p2_seen = std::collections::HashSet::new();
         let mut p3_seen = std::collections::HashSet::new();
 
-        // -- Tick 1 (phase 1): E matches cold phase --
-        // Peer 2: A,B hot (dist<750). E cold-phase. => 3 entities. hot=2, cold=1
-        // Peer 3: C hot (dist<750). E cold-phase. => 2 entities. hot=1, cold=1
+        // -- Tick 1 (phase 1): no entities match phase 1 --
+        // Peer 2: A,B hot. => 2 entities.
+        // Peer 3: C hot. => 1 entity.
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
 
@@ -1224,93 +1242,52 @@ mod tests {
             let outbound = world.resource::<OutboundReplication>();
             assert!(outbound.full_snapshot.is_none());
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(
-                p2.len(),
-                3,
-                "tick 1: peer 2 gets A,B (hot) + E (cold-phase 1)"
-            );
-            let p2_ids: std::collections::HashSet<EntityId> = p2.iter().map(|e| e.id).collect();
-            assert!(p2_ids.contains(&eid_a));
-            assert!(p2_ids.contains(&eid_b));
-            assert!(p2_ids.contains(&eid_e));
+            assert_eq!(p2.len(), 2, "tick 1: peer 2 gets A,B (hot)");
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(
-                p3.len(),
-                2,
-                "tick 1: peer 3 gets C (hot) + E (cold-phase 1)"
-            );
-            assert_eq!(
-                outbound.hot_count, 3,
-                "tick 1: 2 hot (peer 2) + 1 hot (peer 3)"
-            );
-            assert_eq!(
-                outbound.cold_count, 2,
-                "tick 1: 1 cold (peer 2) + 1 cold (peer 3)"
-            );
-            for e in p2 {
-                p2_seen.insert(e.id);
-            }
-            for e in p3 {
-                p3_seen.insert(e.id);
-            }
+            assert_eq!(p3.len(), 1, "tick 1: peer 3 gets C (hot)");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
         }
 
         // -- Tick 2 (phase 2): C matches cold phase --
-        // Peer 2: A,B hot. C cold-phase. => 3 entities. hot=2, cold=1
-        // Peer 3: C cold-phase (counted as cold, not hot). => 1 entity. hot=0, cold=1
+        // Peer 2: A,B hot. C in phase, within PeerBounds of peer 2? Peer 2 bounds
+        // around (50,0,0) ± 750 = (-700..800, -750..750). C at (3000,3000) outside. => 2.
+        // Peer 3: C cold-phase, within PeerBounds of peer 3? Peer 3 bounds around
+        // (3100,3100) ± 750 = (2350..3850). C at (3000,3000) inside. => 1 cold.
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
 
         {
             let outbound = world.resource::<OutboundReplication>();
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(
-                p2.len(),
-                3,
-                "tick 2: peer 2 gets A,B (hot) + C (cold-phase 2)"
-            );
+            assert_eq!(p2.len(), 2, "tick 2: peer 2 gets A,B (hot only, C outside peer 2 bounds)");
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(
-                p3.len(),
-                1,
-                "tick 2: peer 3 gets C (cold-phase 2, counted as cold not hot)"
-            );
+            assert_eq!(p3.len(), 1, "tick 2: peer 3 gets C (cold-phase, within bounds)");
             assert_eq!(p3[0].id, eid_c);
-            for e in p2 {
-                p2_seen.insert(e.id);
-            }
-            for e in p3 {
-                p3_seen.insert(e.id);
-            }
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
         }
 
         // -- Tick 3 (phase 3): A,B match cold phase --
-        // Peer 2: A,B cold-phase (counted as cold). => 2 entities. hot=0, cold=2
-        // Peer 3: A,B cold-phase. C hot. => 3 entities. hot=1, cold=2
+        // Peer 2: A,B in cold phase, within PeerBounds of peer 2? Yes (both near origin, bounds cover them). => 2 cold.
+        // Peer 3: C hot. A,B in phase 3, within PeerBounds of peer 3? Peer 3 bounds (2350..3850). A,B at 0,100 -> outside. => 1 hot.
         world.resource_mut::<TickCounter>().0 = 3;
         schedule.run(&mut world);
 
         {
             let outbound = world.resource::<OutboundReplication>();
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(p2.len(), 2, "tick 3: peer 2 gets A,B (cold-phase 3)");
+            assert_eq!(p2.len(), 2, "tick 3: peer 2 gets A,B (cold-phase 3, within bounds)");
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(
-                p3.len(),
-                3,
-                "tick 3: peer 3 gets C (hot) + A,B (cold-phase 3)"
-            );
-            for e in p2 {
-                p2_seen.insert(e.id);
-            }
-            for e in p3 {
-                p3_seen.insert(e.id);
-            }
+            assert_eq!(p3.len(), 1, "tick 3: peer 3 gets C (hot), A,B outside peer 3 bounds");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
         }
 
         // -- Tick 4 (phase 0): D matches cold phase --
-        // Peer 2: A,B hot. D cold-phase. => 3 entities.
-        // Peer 3: C hot. D cold-phase. => 2 entities.
+        // D at (4500,0,0) outside all PeerBounds -> not sent.
+        // Peer 2: A,B hot. => 2.
+        // Peer 3: C hot. => 1.
         world.resource_mut::<TickCounter>().0 = 4;
         schedule.run(&mut world);
 
@@ -1318,36 +1295,18 @@ mod tests {
             let outbound = world.resource::<OutboundReplication>();
             assert!(outbound.full_snapshot.is_none());
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(
-                p2.len(),
-                3,
-                "tick 4: peer 2 gets A,B (hot) + D (cold-phase 0)"
-            );
+            assert_eq!(p2.len(), 2, "tick 4: peer 2 gets A,B (hot), D outside bounds");
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(
-                p3.len(),
-                2,
-                "tick 4: peer 3 gets C (hot) + D (cold-phase 0)"
-            );
-            for e in p2 {
-                p2_seen.insert(e.id);
-            }
-            for e in p3 {
-                p3_seen.insert(e.id);
-            }
+            assert_eq!(p3.len(), 1, "tick 4: peer 3 gets C (hot), D outside bounds");
+            for e in p2 { p2_seen.insert(e.id); }
+            for e in p3 { p3_seen.insert(e.id); }
         }
 
-        // Key invariant: over 4 ticks, every entity was sent to every peer at least once
-        assert_eq!(
-            p2_seen.len(),
-            5,
-            "peer 2 should have seen all 5 entities over 4 ticks"
-        );
-        assert_eq!(
-            p3_seen.len(),
-            5,
-            "peer 3 should have seen all 5 entities over 4 ticks"
-        );
+        // With AoI-filtered cold, each peer only sees entities within its bounds:
+        // Peer 2 sees: A, B (hot and cold-phase) — C and D are outside peer 2 bounds
+        // Peer 3 sees: C (hot and cold-phase) — A, B, D are outside peer 3 bounds
+        assert_eq!(p2_seen.len(), 2, "peer 2 sees A,B (within its bounds)");
+        assert_eq!(p3_seen.len(), 1, "peer 3 sees C (within its bounds)");
     }
 
     #[test]
@@ -1427,20 +1386,29 @@ mod tests {
 
     #[test]
     fn tiered_all_entities_cold_cold_tick() {
-        // All entities far from the player, all in phase 0.
-        // On tick=8 (phase 0), all match their cold phase and are sent.
+        // All entities outside hot range but within PeerBounds, all in phase 0.
+        // On tick=8 (phase 0), all match cold phase AND are within bounds -> sent.
+        // An entity outside PeerBounds is excluded even with phase match.
         let mut world = setup_world(1);
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 420);
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(-3000.0, 0.0, 3000.0), 1, 0, 421);
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(2000.0, 0.0, -4000.0), 1, 0, 422);
+        // These are outside 750 of player at origin but within PeerBounds
+        // (PeerBounds built from player + NPC shadows)
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(1200.0, 0.0, 0.0), 1, 0, 420);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(-1000.0, 0.0, 800.0), 1, 0, 421);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(900.0, 0.0, -1100.0), 1, 0, 422);
+        // This one is FAR outside PeerBounds -> excluded
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 4000.0), 1, 0, 423);
 
         world
             .resource_mut::<PeerAddresses>()
             .0
             .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        // NPC shadows to extend PeerBounds
+        spawn_shadow_npc(&mut world, Vec3::new(1500.0, 0.0, 0.0), 2);
+        spawn_shadow_npc(&mut world, Vec3::new(-1500.0, 0.0, 1500.0), 2);
+        spawn_shadow_npc(&mut world, Vec3::new(0.0, 0.0, -1500.0), 2);
 
-        // Tick 8: current_phase = 8 % 4 = 0, all entities are phase 0 -> cold-phase match
+        // Tick 8: current_phase = 8 % 4 = 0, all entities phase 0
         world.resource_mut::<TickCounter>().0 = 8;
 
         let mut schedule = Schedule::default();
@@ -1452,13 +1420,10 @@ mod tests {
         assert_eq!(
             peer_entities.len(),
             3,
-            "all entities sent on their cold-phase tick"
+            "3 within-bounds entities sent, 1 outside excluded"
         );
-        assert_eq!(
-            outbound.hot_count, 0,
-            "none are hot (all matched cold phase first)"
-        );
-        assert_eq!(outbound.cold_count, 3, "all 3 are cold-phase matched");
+        assert_eq!(outbound.hot_count, 0, "none are hot");
+        assert_eq!(outbound.cold_count, 3, "all 3 are cold within bounds");
     }
 
     #[test]
@@ -1563,17 +1528,19 @@ mod tests {
 
     #[test]
     fn tiered_cold_tick_zero() {
-        // Tick 0 (phase 0). A phase-0 entity far from the player should be sent
-        // via cold-phase match. This is an edge case: tick 0 is a valid tick value.
+        // Tick 0 (phase 0). A phase-0 entity outside hot range but within
+        // PeerBounds should be sent via cold-phase match.
         let mut world = setup_world(1);
-        // Phase 0 entity, matches tick=0 (phase 0)
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(4000.0, 0.0, 0.0), 1, 0, 460);
+        // Phase 0 entity at 1000,0,0 — outside hot (>750 from player at 0),
+        // but within PeerBounds (NPC shadow at 1200 extends bounds).
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(1000.0, 0.0, 0.0), 1, 0, 460);
 
         world
             .resource_mut::<PeerAddresses>()
             .0
             .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        spawn_shadow_npc(&mut world, Vec3::new(1200.0, 0.0, 0.0), 2);
 
         // Tick 0: current_phase=0, entity is phase 0 -> cold-phase match
         world.resource_mut::<TickCounter>().0 = 0;
@@ -1587,7 +1554,7 @@ mod tests {
         assert_eq!(
             peer_entities.len(),
             1,
-            "phase-0 entity sent on tick 0 (phase 0 match)"
+            "phase-0 entity within bounds sent on tick 0"
         );
     }
 
@@ -1656,15 +1623,16 @@ mod tests {
     #[test]
     fn tiered_hot_cold_counts_accurate_multiple_peers() {
         // Two peers with different player positions. Verify hot_count and cold_count
-        // are summed correctly across both peers with per-entity phase spreading.
+        // are summed correctly. Cold entities must be within PeerBounds.
         //
-        // Entity A at origin, phase 2 (hot for peer 2, distance-excluded for peer 3)
-        // Entity B at (3000,0,3000), phase 2 (hot for peer 3, distance-excluded for peer 2)
-        // Entity C at (4500,0,0), phase 1 (cold for both, phase matches tick=1)
+        // Entity A at origin, phase 2 (hot for peer 2)
+        // Entity B at (3000,0,3000), phase 2 (hot for peer 3)
+        // Entity C at (900,0,0), phase 1 (cold for peer 2: outside hot, within bounds)
+        // C is outside peer 3's PeerBounds (peer 3 player at 3100,3100).
         let mut world = setup_world(1);
         spawn_auth_npc_in_phase(&mut world, Vec3::ZERO, 1, 2, 490);
         spawn_auth_npc_in_phase(&mut world, Vec3::new(3000.0, 0.0, 3000.0), 1, 2, 491);
-        spawn_auth_npc_in_phase(&mut world, Vec3::new(4500.0, 0.0, 0.0), 1, 1, 492);
+        spawn_auth_npc_in_phase(&mut world, Vec3::new(900.0, 0.0, 0.0), 1, 1, 492);
 
         world
             .resource_mut::<PeerAddresses>()
@@ -1675,13 +1643,17 @@ mod tests {
             .0
             .insert(3, "127.0.0.1:9103".parse().unwrap());
 
-        spawn_shadow_player(&mut world, Vec3::ZERO, 2); // peer 2 player
-        spawn_shadow_player(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3); // peer 3 player
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        // NPC shadow to extend peer 2 PeerBounds to cover entity C at 900
+        spawn_shadow_npc(&mut world, Vec3::new(1200.0, 0.0, 0.0), 2);
+        spawn_shadow_player(&mut world, Vec3::new(3100.0, 0.0, 3100.0), 3);
 
         // Tick 1: current_phase=1
-        // Entity C (phase 1) matches cold phase -> sent to both peers as cold
-        // Entity A (phase 2): peer 2 hot (dist 0), peer 3 not hot (dist 4384) -> peer 2 only
-        // Entity B (phase 2): peer 2 not hot (dist 4243), peer 3 hot (dist 141) -> peer 3 only
+        // C (phase 1) matches cold phase.
+        //   Peer 2 bounds: shadows at (0,0) and (1200,0) ± 750 = (-750..1950). C at 900 -> inside -> cold.
+        //   Peer 3 bounds: player at (3100,3100) ± 750 = (2350..3850). C at 900 -> outside -> excluded.
+        // A (phase 2): peer 2 hot (dist 0). peer 3 not hot (dist 4384).
+        // B (phase 2): peer 2 not hot (dist 4243). peer 3 hot (dist 141).
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = Schedule::default();
@@ -1689,26 +1661,26 @@ mod tests {
         schedule.run(&mut world);
 
         let outbound = world.resource::<OutboundReplication>();
-        // Peer 2: A hot + C cold-phase => hot=1, cold=1, count=2
-        // Peer 3: B hot + C cold-phase => hot=1, cold=1, count=2
-        // Total: hot=2, cold=2
+        // Peer 2: A hot + C cold => hot=1, cold=1, count=2
+        // Peer 3: B hot => hot=1, cold=0, count=1
+        // Total: hot=2, cold=1
         assert_eq!(
             outbound.hot_count, 2,
             "2 hot entities total (A for peer 2, B for peer 3)"
         );
         assert_eq!(
-            outbound.cold_count, 2,
-            "2 cold entities total (C for each peer)"
+            outbound.cold_count, 1,
+            "1 cold entity (C for peer 2 only, outside peer 3 bounds)"
         );
         assert_eq!(
             outbound.per_peer[&2].len(),
             2,
-            "peer 2 gets A (hot) + C (cold-phase)"
+            "peer 2 gets A (hot) + C (cold within bounds)"
         );
         assert_eq!(
             outbound.per_peer[&3].len(),
-            2,
-            "peer 3 gets B (hot) + C (cold-phase)"
+            1,
+            "peer 3 gets B (hot) only, C outside its bounds"
         );
     }
 
