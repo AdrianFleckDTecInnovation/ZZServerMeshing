@@ -29,7 +29,13 @@ pub struct Authoritative;
 /// Marker + data: this is a shadow copy from a peer server.
 #[derive(Component, Debug)]
 pub struct Shadow {
-    pub last_seen_tick: u64,
+    /// Peer's tick from the most-recent accepted EntityStateUpdate. Used by
+    /// the inbound stale-packet guard. Zeroed on peer session reset (WI-135).
+    pub last_peer_tick: u64,
+    /// This server's TickCounter when the shadow was last refreshed. Used by
+    /// shadow_cleanup for wall-clock TTL. Never zeroed on peer session reset
+    /// (design 015: local clock domain is continuous across peer restarts).
+    pub last_local_tick: u64,
 }
 
 /// Last acknowledged input sequence number. Only present on player entities.
@@ -105,7 +111,10 @@ mod tests {
             Velocity(Vec3::ZERO),
             EntityTypeComp(EntityType::Npc),
             AuthorityServer(ServerId(2)),
-            Shadow { last_seen_tick: 10 },
+            Shadow {
+                last_peer_tick: 10,
+                last_local_tick: 10,
+            },
         ));
 
         // With<Authoritative> filter
@@ -199,11 +208,15 @@ mod tests {
                 Velocity(Vec3::ZERO),
                 EntityTypeComp(EntityType::Npc),
                 AuthorityServer(ServerId(2)),
-                Shadow { last_seen_tick: 99 },
+                Shadow {
+                    last_peer_tick: 99,
+                    last_local_tick: 99,
+                },
             ))
             .id();
 
         let shadow = world.get::<Shadow>(entity).unwrap();
-        assert_eq!(shadow.last_seen_tick, 99);
+        assert_eq!(shadow.last_peer_tick, 99);
+        assert_eq!(shadow.last_local_tick, 99);
     }
 }

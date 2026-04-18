@@ -17,7 +17,10 @@ pub fn shadow_cleanup(world: &mut World) {
     let mut stale: Vec<(Entity, EntityId)> = Vec::new();
     let mut query = world.query_filtered::<(Entity, &NetworkId, &Shadow), With<Shadow>>();
     for (entity, nid, shadow) in query.iter(&world) {
-        if tick.saturating_sub(shadow.last_seen_tick) > SHADOW_STALE_TICKS {
+        // Design 015: compare local-tick stamps in the same (local) clock domain.
+        // Using shadow.last_peer_tick here would be a cross-clock compare —
+        // spurious cleanup firing every tick when peer clocks differ.
+        if tick.saturating_sub(shadow.last_local_tick) > SHADOW_STALE_TICKS {
             stale.push((entity, nid.0));
         }
     }
@@ -40,6 +43,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -64,7 +68,7 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
 
         world.resource_mut::<TickCounter>().0 = 400; // well past stale threshold (300)
 
@@ -78,7 +82,7 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(50));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((50, 50)));
 
         world.resource_mut::<TickCounter>().0 = 60; // only 10 ticks old
 
@@ -94,12 +98,15 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(0));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((0, 0)));
 
         world.resource_mut::<TickCounter>().0 = SHADOW_STALE_TICKS; // exactly at threshold
 
         shadow_cleanup(&mut world);
-        assert!(world.resource::<EntityLookup>().0.contains_key(&eid), "entity at exact threshold should NOT be removed (strict >)");
+        assert!(
+            world.resource::<EntityLookup>().0.contains_key(&eid),
+            "entity at exact threshold should NOT be removed (strict >)"
+        );
     }
 
     #[test]
@@ -107,16 +114,76 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(0));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((0, 0)));
 
         world.resource_mut::<TickCounter>().0 = SHADOW_STALE_TICKS + 1;
 
         shadow_cleanup(&mut world);
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid), "entity one past threshold should be removed");
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&eid),
+            "entity one past threshold should be removed"
+        );
     }
 
     #[test]
     fn shadow_stale_ticks_is_300() {
-        assert_eq!(SHADOW_STALE_TICKS, 300, "SHADOW_STALE_TICKS should be 300 (15 seconds at 20Hz)");
+        assert_eq!(
+            SHADOW_STALE_TICKS, 300,
+            "SHADOW_STALE_TICKS should be 300 (15 seconds at 20Hz)"
+        );
+    }
+
+    // =========================================================================
+    // Design 015 regression: shadow_cleanup must use the local-tick domain.
+    // =========================================================================
+
+    /// Design 015 regression: shadow_cleanup must not treat a peer's tick as
+    /// our tick. Pre-015, a peer with a lower TickCounter (e.g., restarted
+    /// mid-session) caused `local_tick - peer_tick > SHADOW_STALE_TICKS` and
+    /// every replication packet triggered a despawn-then-respawn cycle that
+    /// showed to clients as rapid flicker of S2-authoritative shadows.
+    #[test]
+    fn shadow_cleanup_survives_peer_tick_far_behind_local_tick() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = state.id;
+        // Peer is thousands of ticks behind us (simulates a peer that
+        // restarted 7 minutes after us — the production pathology).
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((1_000, 59_000)));
+
+        // Our tick is now 59_100 — only 100 ticks after the refresh.
+        world.resource_mut::<TickCounter>().0 = 59_100;
+
+        shadow_cleanup(&mut world);
+
+        assert!(
+            world.resource::<EntityLookup>().0.contains_key(&eid),
+            "shadow must survive: peer tick is far behind ours but we stamped \
+             last_local_tick=59_000, so 59_100-59_000=100 <= SHADOW_STALE_TICKS(300)"
+        );
+    }
+
+    /// Design 015 complement: cleanup must still fire when the LOCAL tick has
+    /// moved past SHADOW_STALE_TICKS since the last refresh — regardless of
+    /// what last_peer_tick holds. Guards against the opposite failure mode
+    /// where a naive "use peer tick" fix would keep truly stale shadows alive.
+    #[test]
+    fn shadow_cleanup_fires_when_local_tick_stale_even_if_peer_tick_recent() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = state.id;
+        // Peer-tick is high (say peer is ahead of us — bogus in practice, but
+        // the test is about what cleanup uses). Local-tick stamp is old.
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((50_000, 1_000)));
+
+        // Our tick has advanced well past the TTL from last_local_tick=1000.
+        world.resource_mut::<TickCounter>().0 = 1_000 + SHADOW_STALE_TICKS + 1;
+
+        shadow_cleanup(&mut world);
+
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&eid),
+            "shadow must be removed when last_local_tick is stale regardless of peer_tick"
+        );
     }
 }

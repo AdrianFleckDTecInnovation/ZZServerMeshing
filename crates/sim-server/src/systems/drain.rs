@@ -19,6 +19,7 @@ pub fn process_drain(world: &mut World) {
 
     let server_id = world.resource::<ServerConfig>().server_id;
     let tick = world.resource::<TickCounter>().0;
+    let session_id = world.resource::<SessionId>().0;
 
     // Record drain start tick if not yet set (started_tick == 0 means just activated)
     if started_tick == 0 {
@@ -58,6 +59,7 @@ pub fn process_drain(world: &mut World) {
 
         let msg = PeerMessage::AuthorityTransfer {
             tick,
+            session_id,
             entity_id: *eid,
             from_server: server_id,
             to_server: target_server,
@@ -131,6 +133,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -160,17 +163,26 @@ mod tests {
     #[test]
     fn drain_all_entities() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         spawn_auth_npc(&mut world, Vec3::X, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
 
         // Entities should have TransferOutbound (not despawned yet)
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 2);
     }
 
@@ -183,7 +195,10 @@ mod tests {
         process_drain(&mut world);
 
         // No changes
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 0);
     }
 
@@ -192,20 +207,32 @@ mod tests {
     #[test]
     fn drain_round_robin_to_multiple_targets() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<PeerAddresses>().0.insert(3, "127.0.0.1:9103".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(3, "127.0.0.1:9103".parse().unwrap());
 
         for _ in 0..6 {
             spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         }
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2), ServerId(3)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2), ServerId(3)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
 
         // All 6 should have TransferOutbound
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 6);
 
         // Check round-robin: 3 to server 2, 3 to server 3
@@ -213,8 +240,12 @@ mod tests {
         let mut to_2 = 0;
         let mut to_3 = 0;
         for outbound in query.iter(&world) {
-            if outbound.target_server == 2 { to_2 += 1; }
-            if outbound.target_server == 3 { to_3 += 1; }
+            if outbound.target_server == 2 {
+                to_2 += 1;
+            }
+            if outbound.target_server == 3 {
+                to_3 += 1;
+            }
         }
         assert_eq!(to_2, 3, "should round-robin 3 to server 2");
         assert_eq!(to_3, 3, "should round-robin 3 to server 3");
@@ -227,11 +258,17 @@ mod tests {
         let mut world = setup_world(1);
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![],
+            started_tick: 0,
+        });
 
         process_drain(&mut world);
 
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 0);
     }
 
@@ -244,7 +281,10 @@ mod tests {
 
         process_drain(&mut world);
 
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 0);
     }
 
@@ -253,7 +293,10 @@ mod tests {
     #[test]
     fn drain_and_transfer_same_tick() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let (entity, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         spawn_auth_npc(&mut world, Vec3::X, 1);
@@ -266,13 +309,19 @@ mod tests {
             retry_count: 0,
         });
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
 
         // Both should have TransferOutbound: 1 existing + 1 new
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 2);
     }
 
@@ -281,13 +330,19 @@ mod tests {
     #[test]
     fn drain_does_not_shutdown_with_pending_transfers() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         for _ in 0..3 {
             spawn_auth_npc(&mut world, Vec3::ZERO, 1);
         }
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -298,7 +353,10 @@ mod tests {
     #[test]
     fn drain_completes_after_all_acks_received() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let mut eids = Vec::new();
         for _ in 0..3 {
@@ -307,7 +365,10 @@ mod tests {
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -315,9 +376,13 @@ mod tests {
 
         // Simulate ACKs
         for eid in &eids {
-            world.resource_mut::<InboundQueue>().transfer_acks.push(
-                InboundTransferAck { entity_id: *eid, tick: 11 }
-            );
+            world
+                .resource_mut::<InboundQueue>()
+                .transfer_acks
+                .push(InboundTransferAck {
+                    entity_id: *eid,
+                    tick: 11,
+                });
         }
 
         crate::systems::process_transfer_acks(&mut world);
@@ -331,7 +396,10 @@ mod tests {
     #[test]
     fn drain_skips_entities_already_in_transfer() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let mut entities = Vec::new();
         for _ in 0..4 {
@@ -350,12 +418,18 @@ mod tests {
             });
         }
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
 
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 4);
 
         for (entity, _) in entities.iter().take(2) {
@@ -363,7 +437,10 @@ mod tests {
         }
 
         for (entity, _) in entities.iter().skip(2) {
-            assert_eq!(world.get::<TransferOutbound>(*entity).unwrap().sent_tick, 10);
+            assert_eq!(
+                world.get::<TransferOutbound>(*entity).unwrap().sent_tick,
+                10
+            );
         }
     }
 
@@ -372,11 +449,17 @@ mod tests {
     #[test]
     fn entity_lookup_populated_after_drain_before_acks() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -394,13 +477,19 @@ mod tests {
 
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
 
         // Entity should NOT have TransferOutbound (no peer address)
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 0);
     }
 
@@ -409,10 +498,16 @@ mod tests {
     #[test]
     fn drain_with_no_entities_immediate_shutdown() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // No entities
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -426,11 +521,17 @@ mod tests {
     #[test]
     fn drain_timeout_forces_shutdown_with_pending() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 10;
 
         process_drain(&mut world);
@@ -446,14 +547,28 @@ mod tests {
     #[test]
     fn drain_records_start_tick() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<DrainState>().0 = Some(DrainInfo { targets: vec![ServerId(2)], started_tick: 0 });
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: 0,
+        });
         world.resource_mut::<TickCounter>().0 = 42;
 
         process_drain(&mut world);
 
-        assert_eq!(world.resource::<DrainState>().0.as_ref().unwrap().started_tick, 42);
+        assert_eq!(
+            world
+                .resource::<DrainState>()
+                .0
+                .as_ref()
+                .unwrap()
+                .started_tick,
+            42
+        );
     }
 }

@@ -58,6 +58,7 @@ pub fn process_transfer_acks(world: &mut World) {
 pub fn process_transfer_timeouts(world: &mut World) {
     let current_tick = world.resource::<TickCounter>().0;
     let server_id = world.resource::<ServerConfig>().server_id;
+    let session_id = world.resource::<SessionId>().0;
 
     // Collect entities with TransferOutbound that need action
     let mut to_retry: Vec<(Entity, EntityId, std::net::SocketAddr, u16)> = Vec::new();
@@ -67,12 +68,7 @@ pub fn process_transfer_timeouts(world: &mut World) {
     for (entity, nid, outbound) in query.iter(&world) {
         if current_tick.saturating_sub(outbound.sent_tick) > TRANSFER_TIMEOUT_TICKS {
             if outbound.retry_count < TRANSFER_MAX_RETRIES {
-                to_retry.push((
-                    entity,
-                    nid.0,
-                    outbound.target_addr,
-                    outbound.target_server,
-                ));
+                to_retry.push((entity, nid.0, outbound.target_addr, outbound.target_server));
             } else {
                 to_abort.push((entity, nid.0));
             }
@@ -89,13 +85,17 @@ pub fn process_transfer_timeouts(world: &mut World) {
         let seq = world.get::<LastInputSeq>(entity);
 
         let entity_state = to_entity_state(
-            nid, pos, vel, kind,
+            nid,
+            pos,
+            vel,
+            kind,
             &AuthorityServer(ServerId(target_server)),
             seq,
         );
 
         let msg = PeerMessage::AuthorityTransfer {
             tick: current_tick,
+            session_id,
             entity_id: eid,
             from_server: server_id,
             to_server: ServerId(target_server),
@@ -161,6 +161,7 @@ pub fn process_transfers(world: &mut World) {
 
     let server_id = world.resource::<ServerConfig>().server_id;
     let tick = world.resource::<TickCounter>().0;
+    let session_id = world.resource::<SessionId>().0;
 
     // Look up target server's UDP address
     let target_addr = match world.resource::<PeerAddresses>().0.get(&target_server.0) {
@@ -176,7 +177,8 @@ pub fn process_transfers(world: &mut World) {
     let mut npc_candidates: Vec<(Entity, EntityId, f32)> = Vec::new();
     let mut total_auth = 0usize;
 
-    let mut query = world.query_filtered::<(Entity, &NetworkId, &Position, &EntityTypeComp), With<Authoritative>>();
+    let mut query = world
+        .query_filtered::<(Entity, &NetworkId, &Position, &EntityTypeComp), With<Authoritative>>();
     for (entity, nid, pos, kind) in query.iter(&world) {
         total_auth += 1;
         if kind.0 == EntityType::Npc && world.get::<TransferOutbound>(entity).is_none() {
@@ -199,10 +201,12 @@ pub fn process_transfers(world: &mut World) {
         let kind = world.get::<EntityTypeComp>(*entity).unwrap();
         let seq = world.get::<LastInputSeq>(*entity);
 
-        let entity_state = to_entity_state(nid, pos, vel, kind, &AuthorityServer(target_server), seq);
+        let entity_state =
+            to_entity_state(nid, pos, vel, kind, &AuthorityServer(target_server), seq);
 
         let msg = PeerMessage::AuthorityTransfer {
             tick,
+            session_id,
             entity_id: *eid,
             from_server: server_id,
             to_server: target_server,
@@ -248,7 +252,11 @@ mod tests {
     fn deserialize_versioned(bytes: &[u8]) -> PeerMessage {
         assert!(bytes.len() >= 2, "versioned message too short");
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        assert_eq!(version, shared::PROTOCOL_VERSION, "unexpected protocol version in test");
+        assert_eq!(
+            version,
+            shared::PROTOCOL_VERSION,
+            "unexpected protocol version in test"
+        );
         bincode::deserialize(&bytes[2..]).unwrap()
     }
 
@@ -257,6 +265,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -286,7 +295,10 @@ mod tests {
     #[test]
     fn transfer_only_npcs_not_players() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // 3 NPCs and 1 Player
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
@@ -307,7 +319,10 @@ mod tests {
     #[test]
     fn transfer_produces_outbound_messages() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
         spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
@@ -334,7 +349,10 @@ mod tests {
         // No transfers should have happened
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
         // No TransferOutbound components
-        let outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert_eq!(outbound, 0);
     }
 
@@ -343,7 +361,10 @@ mod tests {
     #[test]
     fn transfer_peripheral_entities_first() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         // 10 entities: inner at (1,0,1) to (10,0,10), one outer at (4000,0,4000)
         for i in 1..=9 {
@@ -357,8 +378,10 @@ mod tests {
         process_transfers(&mut world);
 
         // The outer entity should be transferred first
-        assert!(world.get::<TransferOutbound>(outer_entity).is_some(),
-            "peripheral entity should be transferred first");
+        assert!(
+            world.get::<TransferOutbound>(outer_entity).is_some(),
+            "peripheral entity should be transferred first"
+        );
     }
 
     // -- EntityLookup consistency after transfer out --
@@ -366,7 +389,10 @@ mod tests {
     #[test]
     fn entity_lookup_consistent_after_transfer() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
@@ -379,9 +405,13 @@ mod tests {
         assert!(world.resource::<EntityLookup>().0.contains_key(&eid));
 
         // Now process the ACK
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 6 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 6,
+            });
         process_transfer_acks(&mut world);
 
         // Now it should be gone
@@ -404,9 +434,13 @@ mod tests {
             retry_count: 0,
         });
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 5,
+            });
 
         process_transfer_acks(&mut world);
 
@@ -417,9 +451,13 @@ mod tests {
     fn process_transfer_acks_ignores_unknown_entity() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: EntityId::new(), tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: EntityId::new(),
+                tick: 5,
+            });
 
         process_transfer_acks(&mut world);
     }
@@ -431,9 +469,13 @@ mod tests {
         let eid = state.id;
         spawn_from_entity_state_direct(&mut world, &state, true, None);
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 5,
+            });
 
         process_transfer_acks(&mut world);
 
@@ -507,7 +549,10 @@ mod tests {
         process_transfer_timeouts(&mut world);
 
         assert!(world.get::<TransferOutbound>(entity).is_some());
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 0);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            0
+        );
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
     }
 
@@ -525,12 +570,20 @@ mod tests {
             retry_count: 0,
         });
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 5 }
-        );
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 6 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 5,
+            });
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 6,
+            });
 
         process_transfer_acks(&mut world);
 
@@ -540,7 +593,10 @@ mod tests {
     #[test]
     fn process_transfers_skips_entities_with_transfer_outbound() {
         let mut world = setup_world(1);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
         let mut entities = Vec::new();
         for _ in 0..5 {
@@ -564,7 +620,8 @@ mod tests {
 
         process_transfers(&mut world);
 
-        let new_outbound_count = entities.iter()
+        let new_outbound_count = entities
+            .iter()
             .filter(|(e, _)| world.get::<TransferOutbound>(*e).is_some())
             .count();
         assert!(new_outbound_count >= 2 && new_outbound_count <= 3);
@@ -594,9 +651,13 @@ mod tests {
         }
 
         for eid in &eids {
-            world.resource_mut::<InboundQueue>().transfer_acks.push(
-                InboundTransferAck { entity_id: *eid, tick: 5 }
-            );
+            world
+                .resource_mut::<InboundQueue>()
+                .transfer_acks
+                .push(InboundTransferAck {
+                    entity_id: *eid,
+                    tick: 5,
+                });
         }
 
         process_transfer_acks(&mut world);
@@ -625,7 +686,10 @@ mod tests {
         process_transfer_timeouts(&mut world);
 
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 0);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            0
+        );
     }
 
     #[test]
@@ -646,7 +710,10 @@ mod tests {
         process_transfer_timeouts(&mut world);
 
         assert_eq!(world.resource::<OutboundTransfers>().messages.len(), 1);
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 1);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            1
+        );
         assert_eq!(world.get::<TransferOutbound>(entity).unwrap().sent_tick, 16);
     }
 
@@ -664,9 +731,13 @@ mod tests {
 
         despawn_and_remove(&mut world, entity, eid);
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 5,
+            });
 
         process_transfer_acks(&mut world);
         assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
@@ -692,12 +763,20 @@ mod tests {
             entities.push(entity);
         }
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eids[0], tick: 5 }
-        );
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eids[1], tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eids[0],
+                tick: 5,
+            });
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eids[1],
+                tick: 5,
+            });
 
         process_transfer_acks(&mut world);
 
@@ -731,7 +810,12 @@ mod tests {
 
         let msg: PeerMessage = deserialize_versioned(&messages[0].1);
         match msg {
-            PeerMessage::AuthorityTransfer { full_state, entity_id, tick, .. } => {
+            PeerMessage::AuthorityTransfer {
+                full_state,
+                entity_id,
+                tick,
+                ..
+            } => {
                 assert_eq!(entity_id, eid);
                 assert_eq!(tick, 12);
                 assert!((full_state.position.x - 99.0).abs() < 0.001);
@@ -757,19 +841,28 @@ mod tests {
         // Retry 1
         world.resource_mut::<TickCounter>().0 = 11;
         process_transfer_timeouts(&mut world);
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 1);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            1
+        );
         world.resource_mut::<OutboundTransfers>().messages.clear();
 
         // Retry 2
         world.resource_mut::<TickCounter>().0 = 22;
         process_transfer_timeouts(&mut world);
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 2);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            2
+        );
         world.resource_mut::<OutboundTransfers>().messages.clear();
 
         // Retry 3
         world.resource_mut::<TickCounter>().0 = 33;
         process_transfer_timeouts(&mut world);
-        assert_eq!(world.get::<TransferOutbound>(entity).unwrap().retry_count, 3);
+        assert_eq!(
+            world.get::<TransferOutbound>(entity).unwrap().retry_count,
+            3
+        );
         world.resource_mut::<OutboundTransfers>().messages.clear();
 
         // Abort
@@ -790,13 +883,19 @@ mod tests {
             spawn_auth_npc(&mut world, Vec3::new(200.0, 0.0, 200.0), 1);
         }
 
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
         world.resource_mut::<TickCounter>().0 = 10;
 
         world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         process_transfers(&mut world);
 
-        let first_outbound = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
+        let first_outbound = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
         assert!(first_outbound > 0);
 
         world.resource_mut::<OutboundTransfers>().messages.clear();
@@ -804,12 +903,73 @@ mod tests {
         world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
         process_transfers(&mut world);
 
-        let total = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        let total = world
+            .query_filtered::<(), With<Authoritative>>()
+            .iter(&world)
+            .count();
         assert_eq!(total, 5);
 
         let mut query = world.query::<&TransferOutbound>();
         for outbound in query.iter(&world) {
             assert!(outbound.sent_tick >= 10);
+        }
+    }
+
+    // -- WI-132: Real SessionId flows into PeerMessage producers --
+
+    #[test]
+    fn process_transfers_stamps_session_id_from_resource() {
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        // Override the SessionId the setup_world helper inserted as 0.
+        world.insert_resource(SessionId(0xF00D_CAFE_1234_5678));
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 5;
+
+        process_transfers(&mut world);
+
+        let messages = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(messages.len(), 1);
+        let msg: PeerMessage = deserialize_versioned(&messages[0].1);
+        match msg {
+            PeerMessage::AuthorityTransfer { session_id, .. } => {
+                assert_eq!(session_id, 0xF00D_CAFE_1234_5678);
+            }
+            _ => panic!("expected AuthorityTransfer, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn process_transfer_timeouts_stamps_session_id_on_retry() {
+        let mut world = setup_world(1);
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
+
+        world.entity_mut(entity).insert(TransferOutbound {
+            target_server: 2,
+            target_addr: "127.0.0.1:9102".parse().unwrap(),
+            sent_tick: 0,
+            retry_count: 0,
+        });
+
+        world.insert_resource(SessionId(0xAA_BB_CC_DD));
+        world.resource_mut::<TickCounter>().0 = 11; // past TRANSFER_TIMEOUT_TICKS
+
+        process_transfer_timeouts(&mut world);
+
+        let messages = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(messages.len(), 1);
+        let msg: PeerMessage = deserialize_versioned(&messages[0].1);
+        match msg {
+            PeerMessage::AuthorityTransfer { session_id, .. } => {
+                assert_eq!(session_id, 0xAA_BB_CC_DD);
+            }
+            _ => panic!("expected AuthorityTransfer, got {:?}", msg),
         }
     }
 }

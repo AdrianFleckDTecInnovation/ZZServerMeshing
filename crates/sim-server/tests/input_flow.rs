@@ -1,9 +1,9 @@
 //! Integration tests for the input → entity → snapshot pipeline.
 //! Tests cross-module flows without spawning real network listeners.
 
+use glam::Vec3;
 use shared::entity::{EntityId, EntityState, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
-use glam::Vec3;
 
 // We can't import sim_server internals directly (it's a binary crate),
 // so these tests exercise the shared types and world logic that both
@@ -20,7 +20,11 @@ fn move_input_json_roundtrip_with_seq() {
     let json = serde_json::to_string(&msg).unwrap();
     let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
     match decoded {
-        ClientMessage::MoveInput { entity_id, direction, seq } => {
+        ClientMessage::MoveInput {
+            entity_id,
+            direction,
+            seq,
+        } => {
             assert_eq!(entity_id, eid);
             assert_eq!(direction, [1.0, 0.0, -0.5]);
             assert_eq!(seq, 17);
@@ -44,6 +48,7 @@ fn move_input_without_seq_defaults_to_zero() {
 fn forwarded_input_bincode_preserves_seq() {
     let eid = EntityId::new();
     let msg = PeerMessage::ForwardedInput {
+        session_id: 0,
         entity_id: eid,
         direction: [1.0, 0.0, 0.0],
         seq: 42,
@@ -51,7 +56,12 @@ fn forwarded_input_bincode_preserves_seq() {
     let bytes = bincode::serialize(&msg).unwrap();
     let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
     match decoded {
-        PeerMessage::ForwardedInput { entity_id, direction, seq } => {
+        PeerMessage::ForwardedInput {
+            entity_id,
+            direction,
+            seq,
+            ..
+        } => {
             assert_eq!(entity_id, eid);
             assert_eq!(direction, [1.0, 0.0, 0.0]);
             assert_eq!(seq, 42);
@@ -69,6 +79,7 @@ fn entity_state_last_input_seq_survives_bincode_replication() {
     let msg = PeerMessage::EntityStateUpdate {
         tick: 500,
         server_id: ServerId(1),
+        session_id: 0,
         entities: vec![player.clone()],
     };
 
@@ -92,6 +103,7 @@ fn authority_transfer_preserves_last_input_seq() {
 
     let msg = PeerMessage::AuthorityTransfer {
         tick: 300,
+        session_id: 0,
         entity_id: eid,
         from_server: ServerId(1),
         to_server: ServerId(2),

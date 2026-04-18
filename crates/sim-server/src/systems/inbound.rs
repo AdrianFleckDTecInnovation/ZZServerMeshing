@@ -9,8 +9,46 @@ use shared::protocol::PeerMessage;
 
 /// Process inbound events from async tasks: peer updates, authority transfers, forwarded inputs.
 pub fn drain_inbound_events(world: &mut World) {
-    let _tick = world.resource::<TickCounter>().0;
+    let local_tick = world.resource::<TickCounter>().0;
     let server_id = world.resource::<ServerConfig>().server_id;
+    let session_id = world.resource::<SessionId>().0;
+
+    // WI-135 / design 015: Drain peer session resets FIRST so any shadow
+    // `last_peer_tick` values for a restarted peer are zeroed before we
+    // process this tick's peer_updates. Without this ordering, post-restart
+    // updates with low ticks would be rejected by the
+    // `update.tick < shadow.last_peer_tick` guard below at the cost of one
+    // additional tick of staleness. Note: `last_local_tick` is intentionally
+    // left alone here — it lives in our clock domain, which is continuous
+    // across peer restarts.
+    let session_resets =
+        std::mem::take(&mut world.resource_mut::<InboundQueue>().peer_session_resets);
+    for reset in session_resets {
+        // Collect the Bevy entities (not the EntityIds) whose AuthorityServer
+        // matches the reset target AND which are shadows (not authoritative on
+        // this server — we don't touch entities we own).
+        let mut affected: Vec<bevy_ecs::entity::Entity> = Vec::new();
+        let mut query = world.query::<(bevy_ecs::entity::Entity, &AuthorityServer, &Shadow)>();
+        for (entity, auth, _shadow) in query.iter(world) {
+            if auth.0 == reset.server_id {
+                affected.push(entity);
+            }
+        }
+        let count = affected.len();
+        for entity in affected {
+            if let Some(mut shadow) = world.get_mut::<Shadow>(entity) {
+                shadow.last_peer_tick = 0;
+                // last_local_tick intentionally untouched — local clock domain
+                // is continuous across peer session changes (design 015).
+            }
+        }
+        tracing::info!(
+            server_id = reset.server_id.0,
+            new_session_id = format_args!("0x{:016x}", reset.new_session_id),
+            shadows_reset = count,
+            "Reset shadow last_peer_tick for restarted peer"
+        );
+    }
 
     // Take all queued events
     let peer_updates = std::mem::take(&mut world.resource_mut::<InboundQueue>().peer_updates);
@@ -34,10 +72,11 @@ pub fn drain_inbound_events(world: &mut World) {
                 }
                 if let Some(mut shadow) = world.get_mut::<Shadow>(bevy_entity) {
                     // Update existing shadow if tick is newer
-                    if update.tick < shadow.last_seen_tick {
+                    if update.tick < shadow.last_peer_tick {
                         continue; // stale packet
                     }
-                    shadow.last_seen_tick = update.tick;
+                    shadow.last_peer_tick = update.tick;
+                    shadow.last_local_tick = local_tick;
                     if let Some(mut pos) = world.get_mut::<Position>(bevy_entity) {
                         pos.0 = entity_state.position;
                     }
@@ -57,7 +96,12 @@ pub fn drain_inbound_events(world: &mut World) {
             }
 
             // Entity not in lookup -- spawn as shadow
-            spawn_from_entity_state_direct(world, entity_state, false, Some(update.tick));
+            spawn_from_entity_state_direct(
+                world,
+                entity_state,
+                false,
+                Some((update.tick, local_tick)),
+            );
         }
     }
 
@@ -144,6 +188,7 @@ pub fn drain_inbound_events(world: &mut World) {
                     let target_addr = outbound.target_addr;
                     let target_server = outbound.target_server;
                     let fwd_msg = PeerMessage::ForwardedInput {
+                        session_id,
                         entity_id: fwd.entity_id,
                         direction: fwd.direction,
                         seq: fwd.seq,
@@ -225,10 +270,9 @@ pub fn drain_client_events(
         registry.register_from_event(event.client_id, event.tx, event.acked_tick);
         // Also push client_player_assignment so the player_id can be set
         // once SpawnPlayer is processed (matched by player_uuid).
-        inbound.client_player_assignments.push((
-            event.client_id,
-            event.player_uuid,
-        ));
+        inbound
+            .client_player_assignments
+            .push((event.client_id, event.player_uuid));
         tracing::debug!(client_id = event.client_id, "Registered client in ECS");
     }
 
@@ -271,7 +315,11 @@ mod tests {
     fn deserialize_versioned(bytes: &[u8]) -> PeerMessage {
         assert!(bytes.len() >= 2, "versioned message too short");
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        assert_eq!(version, shared::PROTOCOL_VERSION, "unexpected protocol version in test");
+        assert_eq!(
+            version,
+            shared::PROTOCOL_VERSION,
+            "unexpected protocol version in test"
+        );
         bincode::deserialize(&bytes[2..]).unwrap()
     }
 
@@ -280,6 +328,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -314,15 +363,19 @@ mod tests {
     fn spawn_shadow_npc(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
         let state = EntityState::new_npc(pos, ServerId(owner_server));
         let eid = state.id;
-        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
+        let entity = spawn_from_entity_state_direct(world, &state, false, Some((0, 0)));
         (entity, eid)
     }
 
-    fn register_test_client(world: &mut World, client_id: u64) -> tokio::sync::mpsc::Receiver<ClientFrame> {
+    fn register_test_client(
+        world: &mut World,
+        client_id: u64,
+    ) -> tokio::sync::mpsc::Receiver<ClientFrame> {
         use std::sync::atomic::AtomicU64;
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
         let acked = std::sync::Arc::new(AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
+        world
+            .resource_mut::<ClientRegistry>()
             .register_from_event(client_id, tx, acked);
         rx
     }
@@ -335,10 +388,13 @@ mod tests {
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
 
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![state],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![state],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -352,10 +408,13 @@ mod tests {
 
         let mut shadow_state = EntityState::new_npc(Vec3::new(999.0, 0.0, 999.0), ServerId(2));
         shadow_state.id = eid;
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![shadow_state],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![shadow_state],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -369,14 +428,17 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(10));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((10, 10)));
 
         let mut stale = state.clone();
         stale.position = Vec3::new(100.0, 0.0, 0.0);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 5, // older than 10
-            entities: vec![stale],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 5, // older than 10
+                entities: vec![stale],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -390,14 +452,17 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(5));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((5, 5)));
 
         let mut newer = state.clone();
         newer.position = Vec3::new(100.0, 0.0, 0.0);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10, // newer than 5
-            entities: vec![newer],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10, // newer than 5
+                entities: vec![newer],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -419,12 +484,15 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
@@ -437,7 +505,7 @@ mod tests {
         let mut world = setup_world(2);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
 
         let transfer_state = EntityState {
             id: eid,
@@ -448,12 +516,15 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: transfer_state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: transfer_state,
+            });
 
         drain_inbound_events(&mut world);
 
@@ -477,12 +548,15 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(3), // not us (2)
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(3), // not us (2)
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
@@ -503,12 +577,15 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
@@ -527,7 +604,7 @@ mod tests {
                 entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
                 seq: 5,
-            }
+            },
         );
 
         drain_inbound_events(&mut world);
@@ -542,14 +619,14 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
 
         world.resource_mut::<InboundQueue>().forwarded_inputs.push(
             crate::resources::ForwardedInput {
                 entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
                 seq: 5,
-            }
+            },
         );
 
         drain_inbound_events(&mut world);
@@ -565,20 +642,27 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(10));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((10, 10)));
 
         let mut updated = state.clone();
         updated.position = Vec3::new(100.0, 0.0, 0.0);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10, // equal to last_seen_tick
-            entities: vec![updated],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10, // equal to last_peer_tick
+                entities: vec![updated],
+            });
 
         drain_inbound_events(&mut world);
 
         let bevy_entity = world.resource::<EntityLookup>().0[&eid];
         let pos = world.get::<Position>(bevy_entity).unwrap();
-        assert_eq!(pos.0, Vec3::new(100.0, 0.0, 0.0), "equal tick should be accepted (not rejected)");
+        assert_eq!(
+            pos.0,
+            Vec3::new(100.0, 0.0, 0.0),
+            "equal tick should be accepted (not rejected)"
+        );
     }
 
     #[test]
@@ -586,14 +670,17 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(10));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((10, 10)));
 
         let mut stale = state.clone();
         stale.position = Vec3::new(100.0, 0.0, 0.0);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 9, // strictly less than 10
-            entities: vec![stale],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 9, // strictly less than 10
+                entities: vec![stale],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -609,7 +696,7 @@ mod tests {
         let mut world = setup_world(2);
         let state = EntityState::new_player(Vec3::ZERO, ServerId(1));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
 
         let transfer_state = EntityState {
             id: eid,
@@ -620,18 +707,24 @@ mod tests {
             last_input_seq: 42,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: transfer_state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: transfer_state,
+            });
 
         drain_inbound_events(&mut world);
 
         let bevy_entity = world.resource::<EntityLookup>().0[&eid];
-        assert_eq!(world.get::<LastInputSeq>(bevy_entity).unwrap().0, 42,
-            "player shadow promoted via transfer should have last_input_seq set");
+        assert_eq!(
+            world.get::<LastInputSeq>(bevy_entity).unwrap().0,
+            42,
+            "player shadow promoted via transfer should have last_input_seq set"
+        );
     }
 
     // -- Forwarded input speed: player vs npc --
@@ -642,7 +735,11 @@ mod tests {
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().forwarded_inputs.push(
-            crate::resources::ForwardedInput { entity_id: eid, direction: [1.0, 0.0, 0.0], seq: 1 }
+            crate::resources::ForwardedInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
         );
         drain_inbound_events(&mut world);
 
@@ -656,7 +753,11 @@ mod tests {
         let (entity, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         world.resource_mut::<InboundQueue>().forwarded_inputs.push(
-            crate::resources::ForwardedInput { entity_id: eid, direction: [1.0, 0.0, 0.0], seq: 1 }
+            crate::resources::ForwardedInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
         );
         drain_inbound_events(&mut world);
 
@@ -672,7 +773,11 @@ mod tests {
         let unknown_eid = EntityId(uuid::Uuid::new_v4());
 
         world.resource_mut::<InboundQueue>().forwarded_inputs.push(
-            crate::resources::ForwardedInput { entity_id: unknown_eid, direction: [1.0, 0.0, 0.0], seq: 1 }
+            crate::resources::ForwardedInput {
+                entity_id: unknown_eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
         );
 
         // Should not panic
@@ -689,10 +794,13 @@ mod tests {
         let eid1 = s1.id;
         let eid2 = s2.id;
 
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![s1, s2],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![s1, s2],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -710,10 +818,10 @@ mod tests {
             .collect();
         let eids: Vec<EntityId> = entities.iter().map(|e| e.id).collect();
 
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate { tick: 10, entities });
 
         drain_inbound_events(&mut world);
 
@@ -729,14 +837,17 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(5));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((5, 5)));
 
         let mut updated = state.clone();
         updated.velocity = Vec3::new(5.0, 0.0, 3.0);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![updated],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![updated],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -752,14 +863,17 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_player(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(5));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((5, 5)));
 
         let mut updated = state.clone();
         updated.last_input_seq = 42;
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![updated],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![updated],
+            });
 
         drain_inbound_events(&mut world);
 
@@ -772,19 +886,25 @@ mod tests {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
         let eid = state.id;
-        spawn_from_entity_state_direct(&mut world, &state, false, Some(5));
+        spawn_from_entity_state_direct(&mut world, &state, false, Some((5, 5)));
 
         let mut updated = state.clone();
         updated.authority_server = ServerId(3);
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![updated],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![updated],
+            });
 
         drain_inbound_events(&mut world);
 
         let bevy_entity = world.resource::<EntityLookup>().0[&eid];
-        assert_eq!(world.get::<AuthorityServer>(bevy_entity).unwrap().0, ServerId(3));
+        assert_eq!(
+            world.get::<AuthorityServer>(bevy_entity).unwrap().0,
+            ServerId(3)
+        );
     }
 
     // -- TransferAck tests (related to drain_inbound_events authority transfer handling) --
@@ -793,7 +913,10 @@ mod tests {
     fn transfer_ack_sent_on_accept() {
         let mut world = setup_world(2);
         // Set up peer addresses so ACK can be sent
-        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(1, "127.0.0.1:9101".parse().unwrap());
 
         let eid = EntityId(uuid::Uuid::new_v4());
         let state = EntityState {
@@ -805,12 +928,15 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
@@ -818,7 +944,10 @@ mod tests {
         let transfers = &world.resource::<OutboundTransfers>().messages;
         assert_eq!(transfers.len(), 1, "should have one outbound TransferAck");
         let (addr, bytes) = &transfers[0];
-        assert_eq!(*addr, "127.0.0.1:9101".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            *addr,
+            "127.0.0.1:9101".parse::<std::net::SocketAddr>().unwrap()
+        );
         let msg = deserialize_versioned(bytes);
         match msg {
             PeerMessage::TransferAck { entity_id, .. } => assert_eq!(entity_id, eid),
@@ -841,24 +970,32 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
         // No outbound messages (source not in peer list)
-        assert!(world.resource::<OutboundTransfers>().messages.is_empty(),
-            "should skip TransferAck when source not in peer list");
+        assert!(
+            world.resource::<OutboundTransfers>().messages.is_empty(),
+            "should skip TransferAck when source not in peer list"
+        );
     }
 
     #[test]
     fn transfer_ack_sent_on_duplicate_transfer() {
         let mut world = setup_world(2);
-        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(1, "127.0.0.1:9101".parse().unwrap());
 
         // Spawn auth entity first (simulating already-accepted transfer)
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 2);
@@ -872,18 +1009,24 @@ mod tests {
             last_input_seq: 0,
         };
 
-        world.resource_mut::<InboundQueue>().authority_transfers.push(InboundTransfer {
-            entity_id: eid,
-            from_server: ServerId(1),
-            to_server: ServerId(2),
-            full_state: state,
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(InboundTransfer {
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: state,
+            });
 
         drain_inbound_events(&mut world);
 
         // ACK should still be sent for duplicate
-        assert_eq!(world.resource::<OutboundTransfers>().messages.len(), 1,
-            "should send TransferAck even for duplicate transfer");
+        assert_eq!(
+            world.resource::<OutboundTransfers>().messages.len(),
+            1,
+            "should send TransferAck even for duplicate transfer"
+        );
     }
 
     // -- Forwarded input for transfer outbound --
@@ -906,7 +1049,7 @@ mod tests {
                 entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
                 seq: 5,
-            }
+            },
         );
 
         drain_inbound_events(&mut world);
@@ -927,14 +1070,17 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().forwarded_removes.push(
-            crate::resources::ForwardedRemove { entity_id: eid }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .forwarded_removes
+            .push(crate::resources::ForwardedRemove { entity_id: eid });
 
         drain_inbound_events(&mut world);
 
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid),
-            "authoritative entity should be despawned by forwarded remove");
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&eid),
+            "authoritative entity should be despawned by forwarded remove"
+        );
     }
 
     #[test]
@@ -943,7 +1089,9 @@ mod tests {
         let unknown_eid = EntityId(uuid::Uuid::new_v4());
 
         world.resource_mut::<InboundQueue>().forwarded_removes.push(
-            crate::resources::ForwardedRemove { entity_id: unknown_eid }
+            crate::resources::ForwardedRemove {
+                entity_id: unknown_eid,
+            },
         );
 
         // Should not panic
@@ -955,15 +1103,18 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
 
-        world.resource_mut::<InboundQueue>().forwarded_removes.push(
-            crate::resources::ForwardedRemove { entity_id: eid }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .forwarded_removes
+            .push(crate::resources::ForwardedRemove { entity_id: eid });
 
         drain_inbound_events(&mut world);
 
         // Shadow should NOT be removed by forwarded remove (only authority processes removes)
-        assert!(world.resource::<EntityLookup>().0.contains_key(&eid),
-            "forwarded remove should not despawn shadow entities");
+        assert!(
+            world.resource::<EntityLookup>().0.contains_key(&eid),
+            "forwarded remove should not despawn shadow entities"
+        );
     }
 
     // -- drain_client_events tests --
@@ -974,14 +1125,15 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        world.resource_mut::<InboundQueue>().register_clients.push(
-            ClientRegistrationEvent {
+        world
+            .resource_mut::<InboundQueue>()
+            .register_clients
+            .push(ClientRegistrationEvent {
                 client_id: 42,
                 tx,
                 acked_tick: acked,
                 player_uuid: shared::entity::EntityId::new(),
-            }
-        );
+            });
 
         let mut schedule = Schedule::default();
         schedule.add_systems(drain_client_events);
@@ -995,7 +1147,10 @@ mod tests {
         let mut world = setup_world(1);
         let _rx = register_test_client(&mut world, 42);
 
-        world.resource_mut::<InboundQueue>().unregister_clients.push(42);
+        world
+            .resource_mut::<InboundQueue>()
+            .unregister_clients
+            .push(42);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(drain_client_events);
@@ -1018,16 +1173,345 @@ mod tests {
         rx.try_recv().unwrap(); // consume
 
         // Verify baseline exists
-        assert!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().baseline.is_some());
+        assert!(world
+            .resource::<ClientRegistry>()
+            .clients
+            .get(&42)
+            .unwrap()
+            .baseline
+            .is_some());
 
         // Force full snapshot
-        world.resource_mut::<InboundQueue>().force_full_snapshot_clients.push(42);
+        world
+            .resource_mut::<InboundQueue>()
+            .force_full_snapshot_clients
+            .push(42);
         let mut drain_schedule = Schedule::default();
         drain_schedule.add_systems(drain_client_events);
         drain_schedule.run(&mut world);
 
         // Baseline should be cleared
-        assert!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().baseline.is_none());
-        assert_eq!(world.resource::<ClientRegistry>().clients.get(&42).unwrap().ticks_since_full, 0);
+        assert!(world
+            .resource::<ClientRegistry>()
+            .clients
+            .get(&42)
+            .unwrap()
+            .baseline
+            .is_none());
+        assert_eq!(
+            world
+                .resource::<ClientRegistry>()
+                .clients
+                .get(&42)
+                .unwrap()
+                .ticks_since_full,
+            0
+        );
+    }
+
+    // =========================================================================
+    // WI-135 / design 015: peer session reset zeroes Shadow.last_peer_tick
+    // =========================================================================
+
+    /// Spawn a shadow NPC owned by `owner_server` with a specific
+    /// `last_peer_tick`. `last_local_tick` is seeded to 0 — callers that care
+    /// about the local-tick value should use `spawn_from_entity_state_direct`
+    /// directly. Returns the Bevy Entity handle and the EntityId.
+    fn spawn_shadow_with_tick(
+        world: &mut World,
+        owner_server: u16,
+        last_peer_tick: u64,
+    ) -> (Entity, EntityId) {
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(owner_server));
+        let eid = state.id;
+        let entity =
+            spawn_from_entity_state_direct(world, &state, false, Some((last_peer_tick, 0)));
+        (entity, eid)
+    }
+
+    #[test]
+    fn peer_session_reset_zeroes_matching_shadow_last_peer_tick() {
+        // Spawn two shadows owned by server 2 with non-zero last_peer_tick,
+        // push a PeerSessionReset, and verify both are zeroed. Also verify
+        // that last_local_tick is left untouched (design 015).
+        let mut world = setup_world(1);
+        // Seed some local_tick context so we can assert it is NOT zeroed.
+        world.resource_mut::<TickCounter>().0 = 12345;
+        let (e1, _) = spawn_shadow_with_tick(&mut world, 2, 500);
+        let (e2, _) = spawn_shadow_with_tick(&mut world, 2, 14730);
+        // Force a non-zero last_local_tick on both so the post-reset
+        // assertion is meaningful (spawn_shadow_with_tick seeds local=0).
+        world.get_mut::<Shadow>(e1).unwrap().last_local_tick = 12000;
+        world.get_mut::<Shadow>(e2).unwrap().last_local_tick = 12300;
+
+        // Sanity: both shadows start with the expected last_peer_tick.
+        assert_eq!(world.get::<Shadow>(e1).unwrap().last_peer_tick, 500);
+        assert_eq!(world.get::<Shadow>(e2).unwrap().last_peer_tick, 14730);
+
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 0xABCD_EF01_2345_6789,
+            });
+
+        drain_inbound_events(&mut world);
+
+        assert_eq!(
+            world.get::<Shadow>(e1).unwrap().last_peer_tick,
+            0,
+            "shadow for reset server should have last_peer_tick zeroed"
+        );
+        assert_eq!(
+            world.get::<Shadow>(e2).unwrap().last_peer_tick,
+            0,
+            "all shadows for reset server should have last_peer_tick zeroed"
+        );
+        // Design 015 regression guard: session reset must not touch the
+        // local-clock stamp, only the peer-tick stamp.
+        assert_eq!(
+            world.get::<Shadow>(e1).unwrap().last_local_tick,
+            12000,
+            "session reset must not zero last_local_tick"
+        );
+        assert_eq!(
+            world.get::<Shadow>(e2).unwrap().last_local_tick,
+            12300,
+            "session reset must not zero last_local_tick"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_only_affects_target_servers_shadows() {
+        // Shadows for server 2 are zeroed; shadows for server 3 are untouched.
+        let mut world = setup_world(1);
+        let (e2a, _) = spawn_shadow_with_tick(&mut world, 2, 500);
+        let (e3a, _) = spawn_shadow_with_tick(&mut world, 3, 700);
+        let (e3b, _) = spawn_shadow_with_tick(&mut world, 3, 800);
+
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 0x1234_5678_9ABC_DEF0,
+            });
+
+        drain_inbound_events(&mut world);
+
+        assert_eq!(
+            world.get::<Shadow>(e2a).unwrap().last_peer_tick,
+            0,
+            "server 2 shadow should be reset"
+        );
+        assert_eq!(
+            world.get::<Shadow>(e3a).unwrap().last_peer_tick,
+            700,
+            "server 3 shadow must not be touched by a server 2 reset"
+        );
+        assert_eq!(
+            world.get::<Shadow>(e3b).unwrap().last_peer_tick,
+            800,
+            "server 3 shadow must not be touched by a server 2 reset"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_does_not_touch_authoritative_entities() {
+        // Authoritative entities owned by this server (on any server_id) must
+        // never be modified by a peer session reset — even if the target
+        // server_id happens to match the Authoritative entity's AuthorityServer
+        // (which would be a bug state, but let's be defensive).
+        let mut world = setup_world(2);
+        // An authoritative entity on server 2 (ourselves).
+        let (auth_ent, _) = spawn_auth_npc(&mut world, Vec3::ZERO, 2);
+        // The auth entity has no Shadow component, so the query cannot match it.
+
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 0xAA,
+            });
+
+        drain_inbound_events(&mut world);
+
+        // Entity still exists, still Authoritative.
+        assert!(
+            world.get::<Authoritative>(auth_ent).is_some(),
+            "authoritative entity must remain authoritative"
+        );
+        assert!(
+            world.get::<Shadow>(auth_ent).is_none(),
+            "authoritative entity must not gain a Shadow component"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_drain_is_idempotent_single_pass() {
+        // The reset event vec must be fully consumed by a single drain call so
+        // a subsequent drain does not double-process. Without take semantics we
+        // would re-apply the reset each tick.
+        let mut world = setup_world(1);
+        let (e, _) = spawn_shadow_with_tick(&mut world, 2, 500);
+
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 1,
+            });
+
+        drain_inbound_events(&mut world);
+        assert_eq!(world.get::<Shadow>(e).unwrap().last_peer_tick, 0);
+        // The queue must be drained.
+        assert!(
+            world
+                .resource::<InboundQueue>()
+                .peer_session_resets
+                .is_empty(),
+            "peer_session_resets must be drained after drain_inbound_events"
+        );
+
+        // Simulate the authoritative peer advancing the shadow via a legitimate
+        // peer_update. If the reset event were re-processed, the update would
+        // be overwritten back to 0 on the next drain.
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        // Note: we can't easily reuse the same EntityId; simpler path is to
+        // bump the existing shadow's tick via another peer_update.
+        let eid = world
+            .get::<crate::components::NetworkId>(e)
+            .map(|n| n.0)
+            .expect("shadow should have NetworkId");
+        let mut updated = state.clone();
+        updated.id = eid;
+        updated.position = Vec3::new(5.0, 0.0, 0.0);
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 50,
+                entities: vec![updated],
+            });
+
+        drain_inbound_events(&mut world);
+        assert_eq!(
+            world.get::<Shadow>(e).unwrap().last_peer_tick,
+            50,
+            "second drain (no new reset event) must not re-zero last_peer_tick"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_with_no_matching_shadows_is_noop() {
+        // Reset for a server we have no shadows for. Must not panic and must
+        // still drain the event.
+        let mut world = setup_world(1);
+        // No shadows owned by server 2.
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 42,
+            });
+
+        drain_inbound_events(&mut world);
+
+        assert!(
+            world
+                .resource::<InboundQueue>()
+                .peer_session_resets
+                .is_empty(),
+            "reset event must be drained even when there are no matching shadows"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_applies_before_peer_update_in_same_tick() {
+        // Integration-shape test (per batch spec): in a single drain call,
+        // the reset must be applied BEFORE this tick's peer_updates so a
+        // post-restart update with a low tick is accepted by the
+        // `update.tick < shadow.last_peer_tick` guard. Without the ordering,
+        // the old last_peer_tick would reject the low-tick update.
+        let mut world = setup_world(1);
+
+        // Seed a shadow with a HIGH last_peer_tick (the pre-restart value).
+        let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
+        let eid = state.id;
+        let bevy_entity =
+            spawn_from_entity_state_direct(&mut world, &state, false, Some((14730, 14730)));
+        assert_eq!(
+            world.get::<Shadow>(bevy_entity).unwrap().last_peer_tick,
+            14730
+        );
+
+        // Enqueue BOTH: a session reset AND a low-tick peer_update for the
+        // same shadow. Ordering matters — the reset must be drained first.
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 0xCAFE,
+            });
+        let mut post_restart = state.clone();
+        post_restart.id = eid;
+        post_restart.position = Vec3::new(100.0, 0.0, 0.0);
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 5, // far below 14730
+                entities: vec![post_restart],
+            });
+
+        drain_inbound_events(&mut world);
+
+        // The low-tick update would have been rejected without the reset.
+        assert_eq!(
+            world.get::<Shadow>(bevy_entity).unwrap().last_peer_tick,
+            5,
+            "post-reset low-tick update must be accepted (reset drained first)"
+        );
+        let pos = world.get::<Position>(bevy_entity).unwrap();
+        assert_eq!(
+            pos.0,
+            Vec3::new(100.0, 0.0, 0.0),
+            "post-reset low-tick update must actually mutate position"
+        );
+    }
+
+    #[test]
+    fn peer_session_reset_isolated_per_authority_server() {
+        // Integration-shape test (per batch spec): enqueue a reset for server 2,
+        // tick once, assert shadows for auth=2 are zeroed and shadows for
+        // auth=3 are untouched. Uses the full drain_inbound_events pipeline.
+        let mut world = setup_world(1);
+
+        let (e2_a, _) = spawn_shadow_with_tick(&mut world, 2, 100);
+        let (e2_b, _) = spawn_shadow_with_tick(&mut world, 2, 200);
+        let (e3_a, _) = spawn_shadow_with_tick(&mut world, 3, 300);
+
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_session_resets
+            .push(PeerSessionReset {
+                server_id: ServerId(2),
+                new_session_id: 0xDEAD,
+            });
+
+        drain_inbound_events(&mut world);
+
+        assert_eq!(world.get::<Shadow>(e2_a).unwrap().last_peer_tick, 0);
+        assert_eq!(world.get::<Shadow>(e2_b).unwrap().last_peer_tick, 0);
+        assert_eq!(
+            world.get::<Shadow>(e3_a).unwrap().last_peer_tick,
+            300,
+            "server 3 shadow must not be affected by a server 2 reset"
+        );
     }
 }

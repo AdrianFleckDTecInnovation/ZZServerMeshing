@@ -18,6 +18,10 @@ pub struct TickTimings {
 /// Collects per-tick timings in a ring buffer and computes percentiles.
 pub struct MetricsCollector {
     server_id: u16,
+    /// Local session id (WI-136). Set once at startup from `SessionId` resource
+    /// via `set_session_id`; exposed on `/metrics` so operators can see when
+    /// this server has restarted.
+    session_id: u64,
     ring: VecDeque<TickTimings>,
     pub current_tick: u64,
     pub entity_count: usize,
@@ -55,6 +59,10 @@ pub struct PeerHealthSnapshot {
     pub packets_received: u32,
     /// Incomplete chunk reassemblies evicted for this peer in the current reporting window.
     pub chunk_evictions: u32,
+    /// Most recently observed session id for this peer (WI-136). Emitted as
+    /// a decimal u64 in JSON (consumers can render as hex; the sim-server
+    /// startup log line is already hex-formatted for human eyes).
+    pub session_id: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +75,9 @@ pub struct Percentiles {
 #[derive(Debug, Serialize)]
 pub struct MetricsSnapshot {
     pub server_id: u16,
+    /// Local sim-server session id (WI-136). Unique per sim-server process;
+    /// changes across restarts so peers and operators can detect a restart.
+    pub session_id: u64,
     pub tick: u64,
     pub entity_count: usize,
     pub shadow_count: usize,
@@ -108,6 +119,7 @@ impl MetricsCollector {
     pub fn new(server_id: u16) -> Self {
         Self {
             server_id,
+            session_id: 0,
             ring: VecDeque::with_capacity(RING_SIZE),
             current_tick: 0,
             entity_count: 0,
@@ -126,6 +138,18 @@ impl MetricsCollector {
         }
     }
 
+    /// Record the local sim-server session id (WI-136). Called once at
+    /// startup after the `SessionId` resource is generated.
+    pub fn set_session_id(&mut self, session_id: u64) {
+        self.session_id = session_id;
+    }
+
+    /// Read the local session id. Primarily for tests and dashboard rendering.
+    #[allow(dead_code)] // used by tests; kept public for dashboard/debug consumers
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
     pub fn record(&mut self, timings: TickTimings) {
         if self.ring.len() >= RING_SIZE {
             self.ring.pop_front();
@@ -141,6 +165,7 @@ impl MetricsCollector {
 
         MetricsSnapshot {
             server_id: self.server_id,
+            session_id: self.session_id,
             tick: self.current_tick,
             entity_count: self.entity_count,
             shadow_count: self.shadow_count,
@@ -332,12 +357,18 @@ mod tests {
         assert_eq!(snap.replication_mode, "tiered");
 
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"replication_hot_count\":42"),
-            "hot_count missing from JSON: {json}");
-        assert!(json.contains("\"replication_cold_count\":17"),
-            "cold_count missing from JSON: {json}");
-        assert!(json.contains("\"replication_mode\":\"tiered\""),
-            "replication_mode missing from JSON: {json}");
+        assert!(
+            json.contains("\"replication_hot_count\":42"),
+            "hot_count missing from JSON: {json}"
+        );
+        assert!(
+            json.contains("\"replication_cold_count\":17"),
+            "cold_count missing from JSON: {json}"
+        );
+        assert!(
+            json.contains("\"replication_mode\":\"tiered\""),
+            "replication_mode missing from JSON: {json}"
+        );
     }
 
     #[test]
@@ -376,9 +407,18 @@ mod tests {
         assert_eq!(snap.udp_bytes_out, 12345);
 
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"udp_repl_drops\":5"), "udp_repl_drops missing: {json}");
-        assert!(json.contains("\"udp_ctrl_drops\":2"), "udp_ctrl_drops missing: {json}");
-        assert!(json.contains("\"udp_bytes_out\":12345"), "udp_bytes_out missing: {json}");
+        assert!(
+            json.contains("\"udp_repl_drops\":5"),
+            "udp_repl_drops missing: {json}"
+        );
+        assert!(
+            json.contains("\"udp_ctrl_drops\":2"),
+            "udp_ctrl_drops missing: {json}"
+        );
+        assert!(
+            json.contains("\"udp_bytes_out\":12345"),
+            "udp_bytes_out missing: {json}"
+        );
     }
 
     #[test]
@@ -408,12 +448,16 @@ mod tests {
     #[test]
     fn snapshot_peer_health_in_json() {
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 49998,
-            staleness_ticks: 2,
-            packets_received: 19,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 49998,
+                staleness_ticks: 2,
+                packets_received: 19,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
         let snap = c.snapshot();
         assert_eq!(snap.peer_health.len(), 1);
@@ -424,26 +468,43 @@ mod tests {
         assert_eq!(p2.chunk_evictions, 0);
 
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"peer_health\""), "peer_health missing: {json}");
-        assert!(json.contains("\"latest_tick\":49998"), "latest_tick missing: {json}");
-        assert!(json.contains("\"staleness_ticks\":2"), "staleness_ticks missing: {json}");
+        assert!(
+            json.contains("\"peer_health\""),
+            "peer_health missing: {json}"
+        );
+        assert!(
+            json.contains("\"latest_tick\":49998"),
+            "latest_tick missing: {json}"
+        );
+        assert!(
+            json.contains("\"staleness_ticks\":2"),
+            "staleness_ticks missing: {json}"
+        );
     }
 
     #[test]
     fn snapshot_peer_health_multiple_peers() {
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 100,
-            staleness_ticks: 5,
-            packets_received: 20,
-            chunk_evictions: 0,
-        });
-        c.peer_health.insert(3, PeerHealthSnapshot {
-            latest_tick: 95,
-            staleness_ticks: 10,
-            packets_received: 14,
-            chunk_evictions: 2,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 100,
+                staleness_ticks: 5,
+                packets_received: 20,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
+        c.peer_health.insert(
+            3,
+            PeerHealthSnapshot {
+                latest_tick: 95,
+                staleness_ticks: 10,
+                packets_received: 14,
+                chunk_evictions: 2,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
         let snap = c.snapshot();
         assert_eq!(snap.peer_health.len(), 2);
@@ -480,12 +541,16 @@ mod tests {
         // When a peer has never sent data (latest_tick=0), the game loop sets
         // staleness to u64::MAX. Verify that serializes without overflow.
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 0,
-            staleness_ticks: u64::MAX,
-            packets_received: 0,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 0,
+                staleness_ticks: u64::MAX,
+                packets_received: 0,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let snap = c.snapshot();
@@ -493,8 +558,10 @@ mod tests {
 
         // Must serialize without panic
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"staleness_ticks\":18446744073709551615"),
-            "u64::MAX staleness should serialize: {json}");
+        assert!(
+            json.contains("\"staleness_ticks\":18446744073709551615"),
+            "u64::MAX staleness should serialize: {json}"
+        );
     }
 
     #[test]
@@ -502,12 +569,16 @@ mod tests {
         // Peer is exactly caught up (latest_tick == current_tick).
         let mut c = MetricsCollector::new(1);
         c.current_tick = 500;
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 500,
-            staleness_ticks: 0,
-            packets_received: 100,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 500,
+                staleness_ticks: 0,
+                packets_received: 100,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let snap = c.snapshot();
@@ -520,37 +591,51 @@ mod tests {
         // HashMap<u16, _> serializes with string keys in JSON.
         // Verify the peer_health map uses "2" not 2 as keys.
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 10,
-            staleness_ticks: 5,
-            packets_received: 3,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 10,
+                staleness_ticks: 5,
+                packets_received: 3,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let json = serde_json::to_string(&c.snapshot()).unwrap();
         // serde_json serializes HashMap<u16, _> with string keys
-        assert!(json.contains("\"2\":{") || json.contains("\"2\": {"),
-            "peer_health key should be a string: {json}");
+        assert!(
+            json.contains("\"2\":{") || json.contains("\"2\": {"),
+            "peer_health key should be a string: {json}"
+        );
     }
 
     #[test]
     fn peer_health_overwrite_replaces_previous() {
         // Setting peer_health on the collector replaces the previous value.
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 10,
-            staleness_ticks: 90,
-            packets_received: 5,
-            chunk_evictions: 1,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 10,
+                staleness_ticks: 90,
+                packets_received: 5,
+                chunk_evictions: 1,
+                session_id: 0,
+            },
+        );
         // Simulate next reporting window
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 110,
-            staleness_ticks: 0,
-            packets_received: 20,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 110,
+                staleness_ticks: 0,
+                packets_received: 20,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let snap = c.snapshot();
@@ -565,18 +650,26 @@ mod tests {
         // If a peer is removed from peer_health (e.g., disconnected),
         // it should no longer appear in the snapshot.
         let mut c = MetricsCollector::new(1);
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 50,
-            staleness_ticks: 10,
-            packets_received: 8,
-            chunk_evictions: 0,
-        });
-        c.peer_health.insert(3, PeerHealthSnapshot {
-            latest_tick: 48,
-            staleness_ticks: 12,
-            packets_received: 6,
-            chunk_evictions: 1,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 50,
+                staleness_ticks: 10,
+                packets_received: 8,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
+        c.peer_health.insert(
+            3,
+            PeerHealthSnapshot {
+                latest_tick: 48,
+                staleness_ticks: 12,
+                packets_received: 6,
+                chunk_evictions: 1,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         // Remove peer 2 (simulates peer disconnect)
@@ -598,8 +691,10 @@ mod tests {
         assert_eq!(snap.udp_bytes_out, 1_000_000_000);
 
         let json = serde_json::to_string(&snap).unwrap();
-        assert!(json.contains("\"udp_bytes_out\":1000000000"),
-            "large bytes_out should serialize: {json}");
+        assert!(
+            json.contains("\"udp_bytes_out\":1000000000"),
+            "large bytes_out should serialize: {json}"
+        );
     }
 
     #[test]
@@ -609,12 +704,16 @@ mod tests {
         c.udp_repl_drops = 7;
         c.udp_ctrl_drops = 3;
         c.udp_bytes_out = 9999;
-        c.peer_health.insert(5, PeerHealthSnapshot {
-            latest_tick: 200,
-            staleness_ticks: 10,
-            packets_received: 50,
-            chunk_evictions: 2,
-        });
+        c.peer_health.insert(
+            5,
+            PeerHealthSnapshot {
+                latest_tick: 200,
+                staleness_ticks: 10,
+                packets_received: 50,
+                chunk_evictions: 2,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let json = serde_json::to_string(&c.snapshot()).unwrap();
@@ -627,10 +726,14 @@ mod tests {
             "staleness_ticks",
             "packets_received",
             "chunk_evictions",
+            "session_id",
         ];
         for field in &required_fields {
-            assert!(json.contains(field),
-                "field '{}' missing from JSON: {json}", field);
+            assert!(
+                json.contains(field),
+                "field '{}' missing from JSON: {json}",
+                field
+            );
         }
     }
 
@@ -643,12 +746,16 @@ mod tests {
         c.udp_bytes_out = 4096;
         c.current_tick = 500;
         c.entity_count = 10;
-        c.peer_health.insert(2, PeerHealthSnapshot {
-            latest_tick: 498,
-            staleness_ticks: 2,
-            packets_received: 40,
-            chunk_evictions: 0,
-        });
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 498,
+                staleness_ticks: 2,
+                packets_received: 40,
+                chunk_evictions: 0,
+                session_id: 0,
+            },
+        );
         c.record(timing(5));
 
         let snap = c.snapshot();
@@ -672,5 +779,117 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed["peer_health"].is_object());
         assert_eq!(parsed["peer_health"].as_object().unwrap().len(), 0);
+    }
+
+    // =========================================================================
+    // WI-136: Session id exposure on /metrics
+    // =========================================================================
+
+    #[test]
+    fn session_id_defaults_to_zero() {
+        // A freshly-constructed collector has session_id == 0 (placeholder
+        // until the sim-server boot path calls set_session_id).
+        let c = MetricsCollector::new(1);
+        assert_eq!(c.session_id(), 0);
+        let snap = c.snapshot();
+        assert_eq!(snap.session_id, 0);
+    }
+
+    #[test]
+    fn set_session_id_updates_snapshot_value() {
+        let mut c = MetricsCollector::new(1);
+        c.set_session_id(0xDEAD_BEEF_CAFE_BABE);
+        assert_eq!(c.session_id(), 0xDEAD_BEEF_CAFE_BABE);
+        let snap = c.snapshot();
+        assert_eq!(snap.session_id, 0xDEAD_BEEF_CAFE_BABE);
+    }
+
+    #[test]
+    fn snapshot_includes_local_and_per_peer_session_id_in_json() {
+        // Exercises the full WI-136 shape: top-level session_id plus a
+        // session_id under every peer_health entry. A fresh snapshot
+        // (no set_session_id, no peer_sessions populated) still emits
+        // session_id: 0 on both paths, which is the acceptable placeholder
+        // state for a server that has not yet generated its session id.
+        let mut c = MetricsCollector::new(7);
+        c.set_session_id(0x0123_4567_89AB_CDEF);
+        c.peer_health.insert(
+            2,
+            PeerHealthSnapshot {
+                latest_tick: 100,
+                staleness_ticks: 0,
+                packets_received: 10,
+                chunk_evictions: 0,
+                session_id: 0xAAAA_AAAA_AAAA_AAAA,
+            },
+        );
+        c.peer_health.insert(
+            3,
+            PeerHealthSnapshot {
+                latest_tick: 95,
+                staleness_ticks: 5,
+                packets_received: 8,
+                chunk_evictions: 0,
+                session_id: 0xBBBB_BBBB_BBBB_BBBB,
+            },
+        );
+        c.record(timing(5));
+
+        let snap = c.snapshot();
+        assert_eq!(snap.session_id, 0x0123_4567_89AB_CDEF);
+        assert_eq!(snap.peer_health[&2].session_id, 0xAAAA_AAAA_AAAA_AAAA);
+        assert_eq!(snap.peer_health[&3].session_id, 0xBBBB_BBBB_BBBB_BBBB);
+
+        // JSON shape: top-level session_id is a number (u64 decimal).
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["session_id"], 0x0123_4567_89AB_CDEFu64);
+        assert_eq!(
+            parsed["peer_health"]["2"]["session_id"],
+            0xAAAA_AAAA_AAAA_AAAAu64
+        );
+        assert_eq!(
+            parsed["peer_health"]["3"]["session_id"],
+            0xBBBB_BBBB_BBBB_BBBBu64
+        );
+    }
+
+    #[test]
+    fn fresh_metrics_snapshot_emits_session_id_fields() {
+        // Per batch spec: a fresh metrics snapshot must emit both the local
+        // session id and per-peer session ids (even when the per-peer map is
+        // empty, the top-level field must still be present).
+        let c = MetricsCollector::new(1);
+        let json = serde_json::to_string(&c.snapshot()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Top-level session_id must be present (serde doesn't skip the field).
+        assert!(
+            parsed.get("session_id").is_some(),
+            "top-level session_id field missing from /metrics JSON: {json}"
+        );
+        assert_eq!(parsed["session_id"], 0);
+        // peer_health is an object (possibly empty); when populated, per-entry
+        // session_id must be present. Add a peer and re-check.
+        let mut c = MetricsCollector::new(1);
+        c.peer_health.insert(
+            4,
+            PeerHealthSnapshot {
+                latest_tick: 42,
+                staleness_ticks: 0,
+                packets_received: 1,
+                chunk_evictions: 0,
+                session_id: 0xFFFF_0000_FFFF_0000,
+            },
+        );
+        let json = serde_json::to_string(&c.snapshot()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed["peer_health"]["4"].get("session_id").is_some(),
+            "per-peer session_id field missing from /metrics JSON: {json}"
+        );
+        assert_eq!(
+            parsed["peer_health"]["4"]["session_id"],
+            0xFFFF_0000_FFFF_0000u64
+        );
     }
 }

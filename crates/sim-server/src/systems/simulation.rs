@@ -70,6 +70,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -121,7 +122,7 @@ mod tests {
     fn physics_shadow_not_moved() {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
-        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
         world.get_mut::<Velocity>(entity).unwrap().0 = Vec3::new(10.0, 0.0, 0.0);
 
         let mut schedule = Schedule::default();
@@ -194,7 +195,10 @@ mod tests {
                 found_nonzero = true;
             }
         }
-        assert!(found_nonzero, "NPC should have gained velocity after direction change");
+        assert!(
+            found_nonzero,
+            "NPC should have gained velocity after direction change"
+        );
     }
 
     #[test]
@@ -218,7 +222,7 @@ mod tests {
     fn npc_behavior_does_not_modify_shadow() {
         let mut world = setup_world(1);
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
-        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some(1));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some((1, 1)));
 
         let mut schedule = Schedule::default();
         schedule.add_systems(npc_behavior);
@@ -246,7 +250,10 @@ mod tests {
         schedule.run(&mut world);
 
         let pos = world.get::<Position>(entity).unwrap();
-        assert!((pos.0.x - 0.05).abs() < 1e-6, "dt should be TICK_DURATION (50ms)");
+        assert!(
+            (pos.0.x - 0.05).abs() < 1e-6,
+            "dt should be TICK_DURATION (50ms)"
+        );
     }
 
     // -- TransferOutbound exclusion tests --
@@ -270,7 +277,11 @@ mod tests {
         schedule.run(&mut world);
 
         let pos = world.get::<Position>(entity).unwrap();
-        assert_eq!(pos.0, Vec3::ZERO, "TransferOutbound entity should not be moved by physics");
+        assert_eq!(
+            pos.0,
+            Vec3::ZERO,
+            "TransferOutbound entity should not be moved by physics"
+        );
     }
 
     #[test]
@@ -295,7 +306,11 @@ mod tests {
         }
 
         let vel = world.get::<Velocity>(entity).unwrap();
-        assert_eq!(vel.0, Vec3::ZERO, "TransferOutbound NPC should not have velocity changed");
+        assert_eq!(
+            vel.0,
+            Vec3::ZERO,
+            "TransferOutbound NPC should not have velocity changed"
+        );
     }
 
     #[test]
@@ -316,6 +331,9 @@ mod tests {
         schedule.run(&mut world);
 
         let pos = world.get::<Position>(entity).unwrap();
-        assert_eq!(pos.0.x, 9999.0, "TransferOutbound entity should not be clamped");
+        assert_eq!(
+            pos.0.x, 9999.0,
+            "TransferOutbound entity should not be clamped"
+        );
     }
 }

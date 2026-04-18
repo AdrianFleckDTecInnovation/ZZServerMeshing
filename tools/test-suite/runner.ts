@@ -25,6 +25,9 @@ import { multiClient } from './scenarios/multi-client.js';
 import { entityLifecycle } from './scenarios/entity-lifecycle.js';
 import { authorityTransfer } from './scenarios/authority-transfer.js';
 import { aoiFiltering } from './scenarios/aoi-filtering.js';
+import { peerRestartReconvergence } from './scenarios/peer-restart-reconvergence.js';
+import { peerRestartTwice } from './scenarios/peer-restart-twice.js';
+import { rebalanceStuckRecovery } from './scenarios/rebalance-stuck-recovery.js';
 
 const ALL_SCENARIOS: Scenario[] = [
   spawnBurst,
@@ -42,6 +45,9 @@ const ALL_SCENARIOS: Scenario[] = [
   entityLifecycle,
   authorityTransfer,
   aoiFiltering,
+  peerRestartReconvergence,
+  peerRestartTwice,
+  rebalanceStuckRecovery,
 ];
 
 // ── CLI ──
@@ -131,7 +137,48 @@ async function fetchMetrics(serverId: number, basePort: number): Promise<ServerM
   const url = `http://${host}:${port}/metrics`;
   const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
   if (!res.ok) throw new Error(`Metrics fetch failed: ${res.status}`);
-  return res.json() as Promise<ServerMetrics>;
+  const body = await res.text();
+
+  // Precision-safe extraction of session_id fields. The server emits u64
+  // decimals in JSON but JS Number loses precision above 2^53. Parse them as
+  // strings before the default JSON.parse drops the low bits. See
+  // `PeerHealthSnapshot.session_id` docs in types.ts.
+  //
+  // Snapshot the top-level session_id (the first occurrence at the root
+  // object level) and each per-peer session_id (nested inside peer_health).
+  const topLevelMatch = body.match(/"session_id"\s*:\s*(\d+)/);
+  const topLevelSession = topLevelMatch ? topLevelMatch[1] : undefined;
+
+  // Collect per-peer sessions by scanning from the `peer_health` key onward.
+  // We intentionally do NOT try to bound the match to the peer_health object
+  // with a regex — JSON's nested braces make that unreliable. Instead we
+  // locate the key, then scan the tail for `"<id>": { ... "session_id": N }`
+  // patterns. This is safe because: (1) no other top-level field contains
+  // "session_id" nested under a numeric-string key, and (2) `[\s\S]*?` is
+  // lazy so each match stops at the nearest session_id.
+  const perPeerSessions: Record<string, string> = {};
+  const phStart = body.search(/"peer_health"\s*:/);
+  if (phStart !== -1) {
+    const tail = body.slice(phStart);
+    const entryRe = /"(\d+)"\s*:\s*\{[\s\S]*?"session_id"\s*:\s*(\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = entryRe.exec(tail)) !== null) {
+      perPeerSessions[m[1]] = m[2];
+    }
+  }
+
+  const parsed = JSON.parse(body) as any;
+  if (topLevelSession !== undefined) {
+    parsed.session_id = topLevelSession; // replace lossy number with exact decimal string
+  }
+  if (parsed.peer_health && typeof parsed.peer_health === 'object') {
+    for (const [id, entry] of Object.entries(parsed.peer_health as Record<string, any>)) {
+      if (perPeerSessions[id] !== undefined) {
+        entry.session_id = perPeerSessions[id];
+      }
+    }
+  }
+  return parsed as ServerMetrics;
 }
 
 // ── Context factory ──

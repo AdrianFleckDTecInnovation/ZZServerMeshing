@@ -172,7 +172,10 @@ pub async fn run_coordinator_client(
         }
 
         hb_task.abort();
-        tracing::warn!(server_id, "Lost coordinator connection, will re-register as S{server_id} in 2s...");
+        tracing::warn!(
+            server_id,
+            "Lost coordinator connection, will re-register as S{server_id} in 2s..."
+        );
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }

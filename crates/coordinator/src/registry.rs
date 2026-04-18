@@ -1,6 +1,6 @@
 use shared::entity::ServerId;
 use shared::protocol::{CoordServerMsg, PeerInfo};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 
 pub struct ServerEntry {
@@ -17,19 +17,33 @@ pub struct ServerEntry {
     pub last_heartbeat: std::time::Instant,
     /// When this server registered. Used for join grace period.
     pub registered_at: std::time::Instant,
-    /// Number of in-flight transfers originating from this server.
-    /// Incremented when a RebalanceDirective is sent, decremented on TransferResult.
-    pub in_flight_transfers: u32,
+    /// Timestamps + target of RebalanceDirectives this server has received for
+    /// which no TransferResult has yet been recorded. Pushed on directive send,
+    /// removed on matching TransferResult, and pruned by TTL in
+    /// `Registry::prune_stale_transfers()`. VecDeque is push-back ordered so
+    /// stale entries cluster at the front — pruning is a cheap front-pop loop.
+    pub in_flight_transfers: VecDeque<(std::time::Instant, ServerId)>,
 }
 
 pub struct Registry {
     servers: HashMap<u16, ServerEntry>,
+    /// Lifetime count of in-flight transfer slots reaped by TTL (design 014).
+    /// Exposed via `/servers` JSON for operational monitoring. Resets to 0 on
+    /// coordinator restart (same as the rest of the registry).
+    ttl_prunes_total: u64,
 }
 
 impl Registry {
+    /// How long an in-flight transfer slot may sit before being reaped.
+    /// Matches the heartbeat death timeout — the same duration we consider a
+    /// server "probably crashed" is the same duration we consider an unacked
+    /// transfer "probably lost". See design 014.
+    const IN_FLIGHT_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            ttl_prunes_total: 0,
         }
     }
 
@@ -52,7 +66,9 @@ impl Registry {
                     "S{server_id} re-registering (old connection dead) — replacing entry"
                 );
             } else {
-                tracing::warn!("S{server_id} already registered with live connection — ignoring duplicate");
+                tracing::warn!(
+                    "S{server_id} already registered with live connection — ignoring duplicate"
+                );
                 return;
             }
         }
@@ -70,12 +86,16 @@ impl Registry {
                 reply_tx,
                 last_heartbeat: now,
                 registered_at: now,
-                in_flight_transfers: 0,
+                in_flight_transfers: VecDeque::new(),
             },
         );
     }
 
     pub fn unregister(&mut self, server_id: u16) {
+        // Drop any in-flight transfer slots targeting the departed server,
+        // across every other source's deque. Do this before the remove() so
+        // the departed server's own entry is already filtered out of the sweep.
+        self.clear_in_flight_targeting(server_id);
         // Removing the entry drops reply_tx, closing the mpsc channel.
         // The sink task detects the closed channel, exits, and closes the
         // WebSocket. The sim-server detects the disconnect and reconnects.
@@ -92,6 +112,9 @@ impl Registry {
     ) -> bool {
         if let Some(existing) = self.servers.get(&server_id) {
             if existing.reply_tx.same_channel(reply_tx) {
+                // Sweep any other server's in-flight entries targeting the
+                // departed server — their TransferResults can never arrive.
+                self.clear_in_flight_targeting(server_id);
                 // The connection is already closing (this is the Disconnected event),
                 // Connection is already closing — just remove the entry.
                 self.servers.remove(&server_id);
@@ -105,11 +128,27 @@ impl Registry {
         false
     }
 
+    /// Drop in-flight entries that targeted the departed server, across every
+    /// other source's deque. Called from the unregister paths so a crashed /
+    /// drained target cannot leave stuck slots on its peers. Source-side
+    /// entries live on the departed server's own ServerEntry and are dropped
+    /// naturally when the HashMap removes it.
+    fn clear_in_flight_targeting(&mut self, departed: u16) {
+        let target = ServerId(departed);
+        for entry in self.servers.values_mut() {
+            entry.in_flight_transfers.retain(|(_, t)| *t != target);
+        }
+    }
+
     pub fn heartbeat(&mut self, server_id: u16, entity_count: u32, weighted_load: u32) {
         if let Some(entry) = self.servers.get_mut(&server_id) {
             entry.entity_count = entity_count;
             // Use weighted_load if provided (>0), otherwise fall back to entity_count
-            entry.weighted_load = if weighted_load > 0 { weighted_load } else { entity_count };
+            entry.weighted_load = if weighted_load > 0 {
+                weighted_load
+            } else {
+                entity_count
+            };
             entry.last_heartbeat = std::time::Instant::now();
         } else {
             tracing::warn!(
@@ -136,7 +175,9 @@ impl Registry {
 
     /// Tell a draining server which targets to distribute entities to.
     pub fn drain_server(&self, server_id: u16) {
-        let targets: Vec<ServerId> = self.servers.keys()
+        let targets: Vec<ServerId> = self
+            .servers
+            .keys()
             .filter(|&&id| id != server_id && id > 0)
             .map(|&id| ServerId(id))
             .collect();
@@ -146,7 +187,9 @@ impl Registry {
             return;
         }
 
-        let msg = CoordServerMsg::DrainDirective { target_servers: targets };
+        let msg = CoordServerMsg::DrainDirective {
+            target_servers: targets,
+        };
         if let Some(entry) = self.servers.get(&server_id) {
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = entry.reply_tx.send(json);
@@ -156,13 +199,18 @@ impl Registry {
 
     /// Broadcast recovery directive for a dead server to all surviving servers.
     pub fn broadcast_recovery(&self, dead_server_id: u16) {
-        let mut survivors: Vec<ServerId> = self.servers.keys()
+        let mut survivors: Vec<ServerId> = self
+            .servers
+            .keys()
             .filter(|&&id| id > 0)
             .map(|&id| ServerId(id))
             .collect();
         survivors.sort_by_key(|s| s.0);
 
-        let msg = CoordServerMsg::RecoverEntities { dead_server_id: ServerId(dead_server_id), survivors };
+        let msg = CoordServerMsg::RecoverEntities {
+            dead_server_id: ServerId(dead_server_id),
+            survivors,
+        };
         if let Ok(json) = serde_json::to_string(&msg) {
             for entry in self.servers.values() {
                 if entry.server_id > 0 {
@@ -173,10 +221,30 @@ impl Registry {
     }
 
     /// Record the result of an authority transfer.
-    /// Decrements in-flight counter on the source server.
-    pub fn record_transfer_result(&mut self, source_server: u16, target_server: u16, success: bool) {
+    /// Pops the oldest in-flight slot on the source whose target matches.
+    /// A missing slot is not an error — the TTL sweep may already have
+    /// reaped it (logged at debug for visibility).
+    pub fn record_transfer_result(
+        &mut self,
+        source_server: u16,
+        target_server: u16,
+        success: bool,
+    ) {
         if let Some(entry) = self.servers.get_mut(&source_server) {
-            entry.in_flight_transfers = entry.in_flight_transfers.saturating_sub(1);
+            let target = ServerId(target_server);
+            if let Some(pos) = entry
+                .in_flight_transfers
+                .iter()
+                .position(|(_, t)| *t == target)
+            {
+                entry.in_flight_transfers.remove(pos);
+            } else {
+                tracing::debug!(
+                    source = source_server,
+                    target = target_server,
+                    "TransferResult for unknown in-flight slot (likely TTL-reaped already)"
+                );
+            }
         }
         if success {
             tracing::debug!(
@@ -193,12 +261,51 @@ impl Registry {
         }
     }
 
+    /// Drop in-flight transfer slots older than `IN_FLIGHT_TTL`.
+    /// Returns the number of slots pruned this call. Called opportunistically
+    /// from `try_rebalance()` — no separate timer needed since rebalance ticks
+    /// every 5 s and the TTL is 15 s (3× safety margin).
+    pub fn prune_stale_transfers(&mut self) -> u32 {
+        let cutoff = std::time::Instant::now() - Self::IN_FLIGHT_TTL;
+        let mut pruned = 0u32;
+        for entry in self.servers.values_mut() {
+            // VecDeque is push-back ordered, so stale entries cluster at the
+            // front. Pop while the head is older than the cutoff.
+            while let Some((t, target)) = entry.in_flight_transfers.front().copied() {
+                if t < cutoff {
+                    entry.in_flight_transfers.pop_front();
+                    tracing::warn!(
+                        source = entry.server_id,
+                        target = target.0,
+                        age_secs = t.elapsed().as_secs(),
+                        "In-flight transfer TTL: TransferResult never arrived, freeing slot"
+                    );
+                    pruned += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.ttl_prunes_total = self.ttl_prunes_total.saturating_add(pruned as u64);
+        pruned
+    }
+
+    /// Process-lifetime count of in-flight slots reaped by TTL.
+    /// Surfaced on `/servers` for operational visibility (design 014, WI-142).
+    pub fn ttl_prunes_total(&self) -> u64 {
+        self.ttl_prunes_total
+    }
+
     /// Grace period after registration before a server is eligible as a rebalance target.
     const JOIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Check load balance and issue rebalance directives if needed.
     /// Returns true if a rebalance was triggered.
     pub fn try_rebalance(&mut self) -> bool {
+        // Reap any in-flight slots that have aged past IN_FLIGHT_TTL before
+        // making candidacy decisions based on them (design 014).
+        self.prune_stale_transfers();
+
         let now = std::time::Instant::now();
 
         // Collect server snapshots to avoid holding borrows on self.servers
@@ -206,16 +313,18 @@ impl Registry {
             id: u16,
             entity_count: u32,
             weighted_load: u32,
-            in_flight: u32,
+            in_flight: usize,
             registered_at: std::time::Instant,
         }
-        let snaps: Vec<ServerSnap> = self.servers.values()
+        let snaps: Vec<ServerSnap> = self
+            .servers
+            .values()
             .filter(|s| s.server_id > 0)
             .map(|s| ServerSnap {
                 id: s.server_id,
                 entity_count: s.entity_count,
                 weighted_load: s.weighted_load,
-                in_flight: s.in_flight_transfers,
+                in_flight: s.in_flight_transfers.len(),
                 registered_at: s.registered_at,
             })
             .collect();
@@ -229,24 +338,61 @@ impl Registry {
             return false;
         }
 
-        let counts: Vec<String> = snaps.iter()
+        let counts: Vec<String> = snaps
+            .iter()
             .map(|s| format!("S{}:{}(w{})", s.id, s.entity_count, s.weighted_load))
             .collect();
-        tracing::debug!("Rebalance check: {} | total_weighted={total_load}", counts.join(" "));
+        tracing::debug!(
+            "Rebalance check: {} | total_weighted={total_load}",
+            counts.join(" ")
+        );
 
         let avg = total_load as f32 / snaps.len() as f32;
 
+        // Locate the unfiltered busiest server so we can emit an info! log when
+        // the in-flight filter eliminated it. This is the signal whose absence
+        // made the worklog diagnosis painful (design 014, WI-142).
+        let busiest_unfiltered = snaps.iter().max_by_key(|s| s.weighted_load);
+
         // Find most overloaded (must not already have in-flight transfers)
-        let overloaded = snaps.iter()
+        let overloaded = snaps
+            .iter()
             .filter(|s| s.in_flight == 0)
             .max_by_key(|s| s.weighted_load);
-        let Some(overloaded) = overloaded else { return false };
 
-        // Find most underloaded (must have passed join grace period)
-        let underloaded = snaps.iter()
+        // Find most underloaded (must have passed join grace period). Computed
+        // up-front so the suppression log can reason against the same pair
+        // that try_rebalance would have acted on.
+        let underloaded = snaps
+            .iter()
             .filter(|s| now.duration_since(s.registered_at) >= Self::JOIN_GRACE_PERIOD)
             .min_by_key(|s| s.weighted_load);
-        let Some(underloaded) = underloaded else { return false };
+
+        // If the unfiltered busiest was busy with in-flight transfers AND a
+        // rebalance against it would have crossed thresholds, log the skip.
+        if let (Some(busy), Some(under)) = (busiest_unfiltered, underloaded) {
+            let filtered_out =
+                busy.in_flight > 0 && overloaded.map(|o| o.id != busy.id).unwrap_or(true);
+            if filtered_out && busy.id != under.id {
+                let diff = busy.weighted_load as i32 - under.weighted_load as i32;
+                let thresholds_met = diff >= 10 && (diff as f32) >= avg * 0.2;
+                if thresholds_met {
+                    tracing::info!(
+                        "Rebalance skipped: S{busy_id} (w{load}) has {n} in-flight transfer(s), deferring",
+                        busy_id = busy.id,
+                        load = busy.weighted_load,
+                        n = busy.in_flight,
+                    );
+                }
+            }
+        }
+
+        let Some(overloaded) = overloaded else {
+            return false;
+        };
+        let Some(underloaded) = underloaded else {
+            return false;
+        };
 
         if overloaded.id == underloaded.id {
             return false;
@@ -286,9 +432,12 @@ impl Registry {
             }
         }
 
-        // Track in-flight transfers on the source server
+        // Track in-flight transfers on the source server with timestamp + target
+        // so we can TTL-reap stale slots and surgically decrement on TransferResult.
         if let Some(entry) = self.servers.get_mut(&overloaded_id) {
-            entry.in_flight_transfers += 1;
+            entry
+                .in_flight_transfers
+                .push_back((std::time::Instant::now(), ServerId(underloaded_id)));
         }
 
         true
@@ -328,6 +477,7 @@ impl Registry {
                     "udp_port": s.udp_port,
                     "metrics_port": 8100 + s.server_id,
                     "entity_count": s.entity_count,
+                    "in_flight_transfers": s.in_flight_transfers.len(),
                 })
             })
             .collect();
@@ -390,7 +540,10 @@ mod tests {
     use super::*;
     use shared::protocol::CoordServerMsg;
 
-    fn make_tx() -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>) {
+    fn make_tx() -> (
+        mpsc::UnboundedSender<String>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
         mpsc::unbounded_channel()
     }
 
@@ -598,7 +751,10 @@ mod tests {
         for rx in [&mut rx1, &mut rx2] {
             let msg: CoordServerMsg = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
             match msg {
-                CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
+                CoordServerMsg::RecoverEntities {
+                    dead_server_id,
+                    survivors,
+                } => {
                     assert_eq!(dead_server_id, ServerId(3));
                     assert_eq!(survivors, vec![ServerId(1), ServerId(2)]); // sorted
                 }
@@ -633,7 +789,7 @@ mod tests {
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
         reg.drain_server(1); // only server — no targets
-        // Should not panic, just logs a warning
+                             // Should not panic, just logs a warning
     }
 
     #[test]
@@ -690,12 +846,16 @@ mod tests {
         let _rx3 = register_server(&mut reg, 3);
 
         reg.heartbeat(1, 100, 0);
-        reg.heartbeat(2, 10, 0);  // least loaded
+        reg.heartbeat(2, 10, 0); // least loaded
         reg.heartbeat(3, 50, 0);
 
         let url = reg.get_least_loaded_ws_addr(None).unwrap();
         // Server 2 has ws_port = 7878 + 2 - 1 = 7879
-        assert!(url.contains("7879"), "expected ws://...7879 for least loaded S2, got {}", url);
+        assert!(
+            url.contains("7879"),
+            "expected ws://...7879 for least loaded S2, got {}",
+            url
+        );
     }
 
     #[test]
@@ -705,7 +865,11 @@ mod tests {
         reg.register(1, 9101, 7878, None, false, tx); // host defaults to 127.0.0.1
 
         let url = reg.get_least_loaded_ws_addr(Some("192.168.1.50")).unwrap();
-        assert!(url.contains("192.168.1.50"), "expected client_host override, got {}", url);
+        assert!(
+            url.contains("192.168.1.50"),
+            "expected client_host override, got {}",
+            url
+        );
         assert!(!url.contains("127.0.0.1"));
     }
 
@@ -716,7 +880,11 @@ mod tests {
         reg.register(1, 9101, 7878, Some("10.0.0.5".to_string()), false, tx);
 
         let url = reg.get_least_loaded_ws_addr(Some("192.168.1.50")).unwrap();
-        assert!(url.contains("10.0.0.5"), "real host should not be overridden, got {}", url);
+        assert!(
+            url.contains("10.0.0.5"),
+            "real host should not be overridden, got {}",
+            url
+        );
         assert!(!url.contains("192.168.1.50"));
     }
 
@@ -783,7 +951,7 @@ mod tests {
 
         reg.heartbeat(1, 200, 0); // most loaded
         reg.heartbeat(2, 100, 0);
-        reg.heartbeat(3, 10, 0);  // least loaded
+        reg.heartbeat(3, 10, 0); // least loaded
 
         assert!(reg.try_rebalance());
 
@@ -841,7 +1009,11 @@ mod tests {
         let msg: CoordServerMsg = serde_json::from_str(&rx3.try_recv().unwrap()).unwrap();
         match msg {
             CoordServerMsg::RecoverEntities { survivors, .. } => {
-                assert_eq!(survivors, vec![ServerId(1), ServerId(2), ServerId(3)], "survivors should be sorted");
+                assert_eq!(
+                    survivors,
+                    vec![ServerId(1), ServerId(2), ServerId(3)],
+                    "survivors should be sorted"
+                );
             }
             _ => panic!("expected RecoverEntities"),
         }
@@ -972,4 +1144,234 @@ mod tests {
         assert_eq!(reg.server_count(), 0);
     }
 
+    // ====================================================================
+    // Design 014 — Rebalance in-flight transfer TTL (WI-141)
+    // ====================================================================
+
+    #[test]
+    fn in_flight_increments_on_rebalance_directive() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);
+        assert!(reg.try_rebalance());
+        let deque = &reg.servers.get(&1).unwrap().in_flight_transfers;
+        assert_eq!(deque.len(), 1);
+        let (_, target) = deque.front().unwrap();
+        assert_eq!(*target, ServerId(2));
+    }
+
+    #[test]
+    fn in_flight_decrements_on_matching_transfer_result() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);
+        assert!(reg.try_rebalance());
+        reg.record_transfer_result(1, 2, true);
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
+    }
+
+    #[test]
+    fn in_flight_ttl_prunes_stale_entries() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        // Manually inject a stale entry
+        reg.servers
+            .get_mut(&1)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((
+                std::time::Instant::now() - std::time::Duration::from_secs(20),
+                ServerId(2),
+            ));
+        let pruned = reg.prune_stale_transfers();
+        assert_eq!(pruned, 1);
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
+        assert_eq!(reg.ttl_prunes_total(), 1);
+    }
+
+    #[test]
+    fn in_flight_ttl_preserves_fresh_entries() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        // One stale (front), one fresh (back)
+        {
+            let deque = &mut reg.servers.get_mut(&1).unwrap().in_flight_transfers;
+            deque.push_back((
+                std::time::Instant::now() - std::time::Duration::from_secs(20),
+                ServerId(2),
+            ));
+            deque.push_back((std::time::Instant::now(), ServerId(2)));
+        }
+        assert_eq!(reg.prune_stale_transfers(), 1);
+        assert_eq!(reg.servers.get(&1).unwrap().in_flight_transfers.len(), 1);
+    }
+
+    #[test]
+    fn unregister_clears_entries_targeting_departed_server() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+        age_all_servers(&mut reg);
+        reg.servers
+            .get_mut(&1)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((std::time::Instant::now(), ServerId(2)));
+        reg.servers
+            .get_mut(&3)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((std::time::Instant::now(), ServerId(2)));
+        reg.unregister(2);
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
+        assert!(reg.servers.get(&3).unwrap().in_flight_transfers.is_empty());
+    }
+
+    #[test]
+    fn record_transfer_result_matches_by_target() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+        {
+            let deque = &mut reg.servers.get_mut(&1).unwrap().in_flight_transfers;
+            deque.push_back((std::time::Instant::now(), ServerId(2)));
+            deque.push_back((std::time::Instant::now(), ServerId(3)));
+        }
+        reg.record_transfer_result(1, 3, true); // ack the S3 one
+        let remaining = &reg.servers.get(&1).unwrap().in_flight_transfers;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.front().unwrap().1, ServerId(2));
+    }
+
+    #[test]
+    fn rebalance_reclaims_eligibility_after_ttl() {
+        // Reproduces the worklog scenario (2026-04-18 010926): a directive
+        // fires, the source never acks, and the next rebalance tick past the
+        // TTL must make the source eligible again.
+        let mut reg = Registry::new();
+        let mut rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);
+        assert!(reg.try_rebalance());
+        let _ = rx1.try_recv(); // drain the directive
+
+        // No TransferResult ever comes back — normally stuck forever.
+        // Backdate the entry past TTL.
+        for (t, _) in reg
+            .servers
+            .get_mut(&1)
+            .unwrap()
+            .in_flight_transfers
+            .iter_mut()
+        {
+            *t = *t - std::time::Duration::from_secs(20);
+        }
+
+        // Keep imbalance the same; rebalance should now fire again because
+        // try_rebalance() calls prune_stale_transfers() first.
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);
+        assert!(
+            reg.try_rebalance(),
+            "rebalance should be reclaimed after TTL"
+        );
+        assert!(reg.ttl_prunes_total() >= 1);
+    }
+
+    #[test]
+    fn record_transfer_result_missing_slot_is_noop() {
+        // A late TransferResult arriving after the TTL sweep already reaped
+        // the slot must not panic or underflow.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        // No in-flight slot present at all.
+        reg.record_transfer_result(1, 2, true);
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
+    }
+
+    #[test]
+    fn unregister_if_sender_matches_clears_target_slots() {
+        let mut reg = Registry::new();
+        let (tx1, _rx1) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx1.clone());
+        let (tx2, _rx2) = make_tx();
+        reg.register(2, 9102, 7879, None, false, tx2.clone());
+        let (tx3, _rx3) = make_tx();
+        reg.register(3, 9103, 7880, None, false, tx3.clone());
+        // S1 and S3 both have an outstanding transfer to S2
+        reg.servers
+            .get_mut(&1)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((std::time::Instant::now(), ServerId(2)));
+        reg.servers
+            .get_mut(&3)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((std::time::Instant::now(), ServerId(2)));
+
+        // S2 disconnects (via the matched-sender path)
+        assert!(reg.unregister_if_sender_matches(2, &tx2));
+
+        // Both sources should now have cleared slots, not just dropped S2's entry
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
+        assert!(reg.servers.get(&3).unwrap().in_flight_transfers.is_empty());
+    }
+
+    // ====================================================================
+    // WI-142 — /servers surface + monotonic ttl counter
+    // ====================================================================
+
+    #[test]
+    fn in_flight_count_surfaces_in_server_list() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        reg.servers
+            .get_mut(&1)
+            .unwrap()
+            .in_flight_transfers
+            .push_back((std::time::Instant::now(), ServerId(2)));
+        let list = reg.get_server_list();
+        let s1 = list.iter().find(|s| s["server_id"] == 1).unwrap();
+        assert_eq!(s1["in_flight_transfers"], 1);
+        let s2 = list.iter().find(|s| s["server_id"] == 2).unwrap();
+        assert_eq!(s2["in_flight_transfers"], 0);
+    }
+
+    #[test]
+    fn ttl_prunes_total_increments_monotonically() {
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        {
+            let deque = &mut reg.servers.get_mut(&1).unwrap().in_flight_transfers;
+            deque.push_back((
+                std::time::Instant::now() - std::time::Duration::from_secs(30),
+                ServerId(2),
+            ));
+            deque.push_back((
+                std::time::Instant::now() - std::time::Duration::from_secs(25),
+                ServerId(2),
+            ));
+        }
+        assert_eq!(reg.prune_stale_transfers(), 2);
+        assert_eq!(reg.ttl_prunes_total(), 2);
+        // Second prune with no stale entries leaves the counter alone.
+        assert_eq!(reg.prune_stale_transfers(), 0);
+        assert_eq!(reg.ttl_prunes_total(), 2);
+    }
 }

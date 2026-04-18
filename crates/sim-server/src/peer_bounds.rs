@@ -54,10 +54,7 @@ impl PeerBounds {
     /// Check if a position falls within this bounding box (inclusive).
     #[inline]
     pub fn contains(&self, pos: Vec3) -> bool {
-        pos.x >= self.min_x
-            && pos.x <= self.max_x
-            && pos.z >= self.min_z
-            && pos.z <= self.max_z
+        pos.x >= self.min_x && pos.x <= self.max_x && pos.z >= self.min_z && pos.z <= self.max_z
     }
 }
 
@@ -88,11 +85,9 @@ mod tests {
 
     #[test]
     fn peer_bounds_single_position() {
-        let bounds = PeerBounds::from_positions(
-            std::iter::once(Vec3::new(100.0, 0.0, 200.0)),
-            750.0,
-        )
-        .unwrap();
+        let bounds =
+            PeerBounds::from_positions(std::iter::once(Vec3::new(100.0, 0.0, 200.0)), 750.0)
+                .unwrap();
         assert_eq!(bounds.min_x, -650.0);
         assert_eq!(bounds.max_x, 850.0);
         assert_eq!(bounds.min_z, -550.0);
@@ -101,10 +96,7 @@ mod tests {
 
     #[test]
     fn peer_bounds_two_corners() {
-        let positions = vec![
-            Vec3::new(-100.0, 0.0, -200.0),
-            Vec3::new(300.0, 0.0, 400.0),
-        ];
+        let positions = vec![Vec3::new(-100.0, 0.0, -200.0), Vec3::new(300.0, 0.0, 400.0)];
         let bounds = PeerBounds::from_positions(positions.into_iter(), 750.0).unwrap();
         assert_eq!(bounds.min_x, -850.0);
         assert_eq!(bounds.max_x, 1050.0);
@@ -120,11 +112,8 @@ mod tests {
 
     #[test]
     fn peer_bounds_contains_inside() {
-        let bounds = PeerBounds::from_positions(
-            std::iter::once(Vec3::new(0.0, 0.0, 0.0)),
-            750.0,
-        )
-        .unwrap();
+        let bounds =
+            PeerBounds::from_positions(std::iter::once(Vec3::new(0.0, 0.0, 0.0)), 750.0).unwrap();
         assert!(bounds.contains(Vec3::new(0.0, 0.0, 0.0)));
         assert!(bounds.contains(Vec3::new(500.0, 0.0, 500.0)));
         assert!(bounds.contains(Vec3::new(-700.0, 0.0, -700.0)));
@@ -132,11 +121,8 @@ mod tests {
 
     #[test]
     fn peer_bounds_contains_on_boundary() {
-        let bounds = PeerBounds::from_positions(
-            std::iter::once(Vec3::new(0.0, 0.0, 0.0)),
-            750.0,
-        )
-        .unwrap();
+        let bounds =
+            PeerBounds::from_positions(std::iter::once(Vec3::new(0.0, 0.0, 0.0)), 750.0).unwrap();
         // Exactly on boundary (inclusive)
         assert!(bounds.contains(Vec3::new(750.0, 0.0, 0.0)));
         assert!(bounds.contains(Vec3::new(-750.0, 0.0, 750.0)));
@@ -144,11 +130,8 @@ mod tests {
 
     #[test]
     fn peer_bounds_contains_outside() {
-        let bounds = PeerBounds::from_positions(
-            std::iter::once(Vec3::new(0.0, 0.0, 0.0)),
-            750.0,
-        )
-        .unwrap();
+        let bounds =
+            PeerBounds::from_positions(std::iter::once(Vec3::new(0.0, 0.0, 0.0)), 750.0).unwrap();
         assert!(!bounds.contains(Vec3::new(751.0, 0.0, 0.0)));
         assert!(!bounds.contains(Vec3::new(0.0, 0.0, -751.0)));
         assert!(!bounds.contains(Vec3::new(3000.0, 0.0, 3000.0)));
@@ -156,11 +139,9 @@ mod tests {
 
     #[test]
     fn peer_bounds_contains_negative_coords() {
-        let bounds = PeerBounds::from_positions(
-            std::iter::once(Vec3::new(-2000.0, 0.0, -3000.0)),
-            750.0,
-        )
-        .unwrap();
+        let bounds =
+            PeerBounds::from_positions(std::iter::once(Vec3::new(-2000.0, 0.0, -3000.0)), 750.0)
+                .unwrap();
         assert!(bounds.contains(Vec3::new(-2000.0, 0.0, -3000.0)));
         assert!(bounds.contains(Vec3::new(-1300.0, 0.0, -2300.0)));
         assert!(!bounds.contains(Vec3::new(-1200.0, 0.0, -3000.0)));
@@ -169,10 +150,7 @@ mod tests {
     #[test]
     fn peer_bounds_ignores_y() {
         // Two positions with different Y but same XZ should produce same bounds
-        let positions = vec![
-            Vec3::new(100.0, 0.0, 200.0),
-            Vec3::new(100.0, 999.0, 200.0),
-        ];
+        let positions = vec![Vec3::new(100.0, 0.0, 200.0), Vec3::new(100.0, 999.0, 200.0)];
         let bounds = PeerBounds::from_positions(positions.into_iter(), 750.0).unwrap();
         assert_eq!(bounds.min_x, -650.0);
         assert_eq!(bounds.max_x, 850.0);
@@ -194,11 +172,17 @@ mod tests {
 
         let dx1 = player.x - at_boundary.x;
         let dz1 = player.z - at_boundary.z;
-        assert!((dx1 * dx1 + dz1 * dz1) <= PEER_AOI_RADIUS_SQ, "750 should be within radius");
+        assert!(
+            (dx1 * dx1 + dz1 * dz1) <= PEER_AOI_RADIUS_SQ,
+            "750 should be within radius"
+        );
 
         let dx2 = player.x - just_outside.x;
         let dz2 = player.z - just_outside.z;
-        assert!((dx2 * dx2 + dz2 * dz2) > PEER_AOI_RADIUS_SQ, "750.01 should be outside radius");
+        assert!(
+            (dx2 * dx2 + dz2 * dz2) > PEER_AOI_RADIUS_SQ,
+            "750.01 should be outside radius"
+        );
     }
 
     #[test]

@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-
 /// Frame sent through per-client channels. Each frame is a binary-encoded
 /// snapshot or delta, sent as `Vec<u8>` through the per-client mpsc channel.
 pub type ClientFrame = Vec<u8>;
@@ -16,6 +15,13 @@ pub type ClientFrame = Vec<u8>;
 pub struct ServerConfig {
     pub server_id: ServerId,
 }
+
+/// Unique per-process session identifier. Generated at sim-server boot from
+/// `rand::random::<u64>()` and carried on every outbound `PeerMessage` so peers
+/// can detect when this server has restarted and reset stale receiver state
+/// (see design 013: peer-restart-recovery).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SessionId(pub u64);
 
 /// Monotonically increasing tick counter.
 #[derive(Resource, Default)]
@@ -50,6 +56,26 @@ pub struct InboundQueue {
     pub force_full_snapshot_clients: Vec<u64>,
     /// Acknowledgements of accepted authority transfers from target servers.
     pub transfer_acks: Vec<InboundTransferAck>,
+    /// Signals from the UDP receiver that a peer's session_id changed (peer
+    /// restart detected). Downstream ECS systems can consume these to reset
+    /// per-peer state (e.g., shadow last_peer_tick — see WI-135 + design 015).
+    pub peer_session_resets: Vec<PeerSessionReset>,
+}
+
+/// Event emitted by the UDP receiver when it observes a peer replicating with
+/// a new `session_id` that differs from the previously-known session for that
+/// `server_id`. Used to signal the ECS that the peer has restarted so stale
+/// per-peer state (shadow last_peer_tick, etc.) can be reset.
+///
+/// See design 013 (peer-restart-recovery) and design 015 (shadow-tick-split).
+/// Consumed by `systems::inbound::drain_inbound_events` (WI-135), which zeroes
+/// `Shadow.last_peer_tick` for every shadow whose `AuthorityServer == server_id`
+/// so the first post-restart update from the peer is accepted. `last_local_tick`
+/// is intentionally NOT zeroed — that field lives in our local clock domain.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerSessionReset {
+    pub server_id: ServerId,
+    pub new_session_id: u64,
 }
 
 /// Event pushed by handle_client when a new WebSocket client connects.
@@ -253,8 +279,18 @@ mod tests {
         assert!(world.resource::<EntityLookup>().0.is_empty());
         assert!(world.resource::<InboundQueue>().peer_updates.is_empty());
         assert!(world.resource::<InboundQueue>().transfer_acks.is_empty());
-        assert!(world.resource::<CoordEventQueue>().peer_list_updates.is_empty());
-        assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
+        assert!(world
+            .resource::<InboundQueue>()
+            .peer_session_resets
+            .is_empty());
+        assert!(world
+            .resource::<CoordEventQueue>()
+            .peer_list_updates
+            .is_empty());
+        assert!(world
+            .resource::<OutboundReplication>()
+            .full_snapshot
+            .is_none());
         assert!(world.resource::<OutboundReplication>().per_peer.is_empty());
         assert_eq!(world.resource::<OutboundReplication>().hot_count, 0);
         assert_eq!(world.resource::<OutboundReplication>().cold_count, 0);
@@ -290,6 +326,38 @@ mod tests {
     }
 
     #[test]
+    fn session_id_resource_can_be_inserted_and_read() {
+        let mut world = World::default();
+        world.insert_resource(SessionId(0xDEADBEEFCAFEBABE));
+        let sid = *world.resource::<SessionId>();
+        assert_eq!(sid.0, 0xDEADBEEFCAFEBABE);
+    }
+
+    #[test]
+    fn session_id_is_copy_and_debug() {
+        // Copy check: binding the resource should not move it.
+        let sid = SessionId(42);
+        let _a = sid; // Copy
+        let _b = sid; // Still usable
+        assert_eq!(sid.0, 42);
+        // Debug must format without panicking.
+        let debug_str = format!("{:?}", sid);
+        assert!(
+            debug_str.contains("42"),
+            "Debug output should contain the value"
+        );
+    }
+
+    #[test]
+    fn session_id_random_generation_differs() {
+        // Two independent invocations of rand::random::<u64>() should
+        // overwhelmingly differ. Collision probability is 1 / 2^64.
+        let a: u64 = rand::random();
+        let b: u64 = rand::random();
+        assert_ne!(a, b, "two random u64 values should differ");
+    }
+
+    #[test]
     fn inbound_queue_push_and_drain() {
         let mut world = World::default();
         world.init_resource::<InboundQueue>();
@@ -303,18 +371,13 @@ mod tests {
             .resource_mut::<InboundQueue>()
             .forwarded_inputs
             .push(fwd);
-        assert_eq!(
-            world.resource::<InboundQueue>().forwarded_inputs.len(),
-            1
-        );
+        assert_eq!(world.resource::<InboundQueue>().forwarded_inputs.len(), 1);
 
         // Drain
-        let inputs: Vec<_> = std::mem::take(
-            &mut world.resource_mut::<InboundQueue>().forwarded_inputs,
-        );
+        let inputs: Vec<_> =
+            std::mem::take(&mut world.resource_mut::<InboundQueue>().forwarded_inputs);
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].seq, 5);
         assert!(world.resource::<InboundQueue>().forwarded_inputs.is_empty());
     }
-
 }

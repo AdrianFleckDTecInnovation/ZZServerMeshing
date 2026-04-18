@@ -10,4 +10,4 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Forward all flags, append scene scenario names
-exec "$DIR/test.sh" "$@" mesh-verify,input-seq-echo,peer-replication,forwarded-input,multi-client,entity-lifecycle,authority-transfer
+exec "$DIR/test.sh" "$@" mesh-verify,input-seq-echo,peer-replication,forwarded-input,multi-client,entity-lifecycle,authority-transfer,peer-restart-reconvergence,peer-restart-twice,rebalance-stuck-recovery

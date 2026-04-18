@@ -5,7 +5,7 @@ use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityId, EntityState, EntityType, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
-use shared::tick::{PLAYER_SPEED, NPC_SPEED};
+use shared::tick::{NPC_SPEED, PLAYER_SPEED};
 
 /// Send a TransferAck back to the source server of an authority transfer.
 /// Looks up the source server's UDP address in PeerAddresses. If the source
@@ -17,7 +17,12 @@ pub(super) fn send_transfer_ack(
     from_server: ServerId,
 ) {
     if let Some(&source_addr) = world.resource::<PeerAddresses>().0.get(&from_server.0) {
-        let ack_msg = PeerMessage::TransferAck { entity_id, tick };
+        let session_id = world.resource::<SessionId>().0;
+        let ack_msg = PeerMessage::TransferAck {
+            session_id,
+            entity_id,
+            tick,
+        };
         super::enqueue_outbound(
             &mut world.resource_mut::<OutboundTransfers>().messages,
             source_addr,
@@ -45,13 +50,17 @@ fn spawn_and_track_ownership(
 ) -> bevy_ecs::entity::Entity {
     let eid = state.id;
     let entity = spawn_from_entity_state_direct(world, state, true, None);
-    world.resource_mut::<EntityOwnership>().owners.insert(eid, client_id);
+    world
+        .resource_mut::<EntityOwnership>()
+        .owners
+        .insert(eid, client_id);
     entity
 }
 
 /// Process client inputs from WebSocket connections.
 pub fn process_client_inputs(world: &mut World) {
     let server_id = world.resource::<ServerConfig>().server_id;
+    let session_id = world.resource::<SessionId>().0;
     let client_inputs = std::mem::take(&mut world.resource_mut::<InboundQueue>().client_inputs);
 
     for (client_id, input) in client_inputs {
@@ -96,15 +105,14 @@ pub fn process_client_inputs(world: &mut World) {
             } => {
                 let dir = Vec3::new(direction[0], direction[1], direction[2]);
 
-                if let Some(&bevy_entity) =
-                    world.resource::<EntityLookup>().0.get(&entity_id)
-                {
+                if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&entity_id) {
                     if world.get::<Authoritative>(bevy_entity).is_some() {
                         // Check if entity is being transferred -- forward to target instead
                         if let Some(outbound) = world.get::<TransferOutbound>(bevy_entity) {
                             let target_addr = outbound.target_addr;
                             let target_server = outbound.target_server;
                             let fwd_msg = PeerMessage::ForwardedInput {
+                                session_id,
                                 entity_id,
                                 direction,
                                 seq,
@@ -132,9 +140,7 @@ pub fn process_client_inputs(world: &mut World) {
                         if let Some(mut vel) = world.get_mut::<Velocity>(bevy_entity) {
                             vel.0 = dir.normalize_or_zero() * speed;
                         }
-                        if let Some(mut input_seq) =
-                            world.get_mut::<LastInputSeq>(bevy_entity)
-                        {
+                        if let Some(mut input_seq) = world.get_mut::<LastInputSeq>(bevy_entity) {
                             input_seq.0 = seq;
                         }
                         tracing::debug!(
@@ -146,17 +152,14 @@ pub fn process_client_inputs(world: &mut World) {
                     }
 
                     // Shadow -- produce forward
-                    if let Some(shadow_auth) =
-                        world.get::<AuthorityServer>(bevy_entity)
-                    {
+                    if let Some(shadow_auth) = world.get::<AuthorityServer>(bevy_entity) {
                         if world.get::<Shadow>(bevy_entity).is_some() {
                             let target_server = shadow_auth.0 .0;
-                            if let Some(&peer_addr) = world
-                                .resource::<PeerAddresses>()
-                                .0
-                                .get(&target_server)
+                            if let Some(&peer_addr) =
+                                world.resource::<PeerAddresses>().0.get(&target_server)
                             {
                                 let msg = PeerMessage::ForwardedInput {
+                                    session_id,
                                     entity_id,
                                     direction,
                                     seq,
@@ -183,7 +186,8 @@ pub fn process_client_inputs(world: &mut World) {
                 // Ownership check: only the client that spawned an entity can remove it.
                 // client_id 0 means server-initiated (always allowed).
                 if client_id != 0 {
-                    if let Some(&owner) = world.resource::<EntityOwnership>().owners.get(&entity_id) {
+                    if let Some(&owner) = world.resource::<EntityOwnership>().owners.get(&entity_id)
+                    {
                         if owner != client_id {
                             tracing::warn!(
                                 entity = %entity_id,
@@ -198,9 +202,7 @@ pub fn process_client_inputs(world: &mut World) {
                     // transferred from another server) can be removed by anyone — they
                     // have no original client owner on this server.
                 }
-                if let Some(&bevy_entity) =
-                    world.resource::<EntityLookup>().0.get(&entity_id)
-                {
+                if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&entity_id) {
                     if world.get::<Authoritative>(bevy_entity).is_some() {
                         // If entity is mid-transfer, forward the remove to the target
                         // server so it doesn't become permanently orphaned there.
@@ -208,6 +210,7 @@ pub fn process_client_inputs(world: &mut World) {
                             let target_addr = outbound.target_addr;
                             let target_server = outbound.target_server;
                             let msg = PeerMessage::ForwardedRemove {
+                                session_id,
                                 entity_id,
                             };
                             super::enqueue_outbound(
@@ -226,16 +229,13 @@ pub fn process_client_inputs(world: &mut World) {
                         tracing::info!(entity = %entity_id, "Removed authoritative entity on disconnect");
                     } else if world.get::<Shadow>(bevy_entity).is_some() {
                         // Case B: Entity was transferred -- forward remove to authority
-                        if let Some(shadow_auth) =
-                            world.get::<AuthorityServer>(bevy_entity)
-                        {
+                        if let Some(shadow_auth) = world.get::<AuthorityServer>(bevy_entity) {
                             let target_server = shadow_auth.0 .0;
-                            if let Some(&peer_addr) = world
-                                .resource::<PeerAddresses>()
-                                .0
-                                .get(&target_server)
+                            if let Some(&peer_addr) =
+                                world.resource::<PeerAddresses>().0.get(&target_server)
                             {
                                 let msg = PeerMessage::ForwardedRemove {
+                                    session_id,
                                     entity_id,
                                 };
                                 super::enqueue_outbound(
@@ -278,7 +278,11 @@ mod tests {
     fn deserialize_versioned(bytes: &[u8]) -> PeerMessage {
         assert!(bytes.len() >= 2, "versioned message too short");
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        assert_eq!(version, shared::PROTOCOL_VERSION, "unexpected protocol version in test");
+        assert_eq!(
+            version,
+            shared::PROTOCOL_VERSION,
+            "unexpected protocol version in test"
+        );
         bincode::deserialize(&bytes[2..]).unwrap()
     }
 
@@ -287,6 +291,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -321,7 +326,7 @@ mod tests {
     fn spawn_shadow_npc(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
         let state = EntityState::new_npc(pos, ServerId(owner_server));
         let eid = state.id;
-        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
+        let entity = spawn_from_entity_state_direct(world, &state, false, Some((0, 0)));
         (entity, eid)
     }
 
@@ -330,10 +335,13 @@ mod tests {
     #[test]
     fn client_spawn_npc() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnEntity {
-            position: [10.0, 0.0, 20.0],
-            entity_type: "npc".into(),
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::SpawnEntity {
+                position: [10.0, 0.0, 20.0],
+                entity_type: "npc".into(),
+            },
+        ));
 
         process_client_inputs(&mut world);
 
@@ -344,10 +352,13 @@ mod tests {
     #[test]
     fn client_spawn_player_type() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnEntity {
-            position: [0.0, 0.0, 0.0],
-            entity_type: "player".into(),
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::SpawnEntity {
+                position: [0.0, 0.0, 0.0],
+                entity_type: "player".into(),
+            },
+        ));
 
         process_client_inputs(&mut world);
 
@@ -360,10 +371,13 @@ mod tests {
     fn client_spawn_player_with_uuid() {
         let mut world = setup_world(1);
         let eid = EntityId::new();
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
-            player_id: eid,
-            position: [5.0, 0.0, 5.0],
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::SpawnPlayer {
+                player_id: eid,
+                position: [5.0, 0.0, 5.0],
+            },
+        ));
 
         process_client_inputs(&mut world);
 
@@ -375,11 +389,14 @@ mod tests {
         let mut world = setup_world(1);
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid,
-            direction: [1.0, 0.0, 0.0],
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
 
         process_client_inputs(&mut world);
 
@@ -391,13 +408,19 @@ mod tests {
     fn client_move_for_shadow_produces_forward() {
         let mut world = setup_world(1);
         let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid,
-            direction: [1.0, 0.0, 0.0],
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
 
         process_client_inputs(&mut world);
 
@@ -409,9 +432,10 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
@@ -421,7 +445,10 @@ mod tests {
     #[test]
     fn client_request_snapshot_noop() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RequestSnapshot));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RequestSnapshot));
         // Should not panic
         process_client_inputs(&mut world);
     }
@@ -434,17 +461,23 @@ mod tests {
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
         // Unnormalized direction (length > 1)
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid,
-            direction: [3.0, 0.0, 4.0], // length = 5
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [3.0, 0.0, 4.0], // length = 5
+                seq: 1,
+            },
+        ));
 
         process_client_inputs(&mut world);
 
         let vel = world.get::<Velocity>(entity).unwrap();
         // Speed should be PLAYER_SPEED, direction should be normalized
-        assert!((vel.0.length() - PLAYER_SPEED).abs() < 0.01, "velocity magnitude should be PLAYER_SPEED");
+        assert!(
+            (vel.0.length() - PLAYER_SPEED).abs() < 0.01,
+            "velocity magnitude should be PLAYER_SPEED"
+        );
     }
 
     // -- Client input: zero direction gives zero velocity --
@@ -454,16 +487,23 @@ mod tests {
         let mut world = setup_world(1);
         let (entity, eid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid,
-            direction: [0.0, 0.0, 0.0],
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [0.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
 
         process_client_inputs(&mut world);
 
         let vel = world.get::<Velocity>(entity).unwrap();
-        assert_eq!(vel.0, Vec3::ZERO, "zero direction should give zero velocity");
+        assert_eq!(
+            vel.0,
+            Vec3::ZERO,
+            "zero direction should give zero velocity"
+        );
     }
 
     // -- Client input: nonexistent entity noop --
@@ -471,11 +511,14 @@ mod tests {
     #[test]
     fn client_move_input_nonexistent_entity_noop() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: EntityId::new(),
-            direction: [1.0, 0.0, 0.0],
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: EntityId::new(),
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
 
         // Should not panic
         process_client_inputs(&mut world);
@@ -484,9 +527,12 @@ mod tests {
     #[test]
     fn client_remove_nonexistent_entity_noop() {
         let mut world = setup_world(1);
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: EntityId::new(),
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::RemoveEntity {
+                entity_id: EntityId::new(),
+            },
+        ));
 
         process_client_inputs(&mut world);
     }
@@ -507,9 +553,10 @@ mod tests {
         });
 
         // Client sends RemoveEntity
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
@@ -518,13 +565,20 @@ mod tests {
 
         // A ForwardedRemove should have been sent to the target
         let forwards = &world.resource::<OutboundForwards>().messages;
-        assert_eq!(forwards.len(), 1, "should forward remove to transfer target");
-        assert_eq!(forwards[0].0, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            forwards.len(),
+            1,
+            "should forward remove to transfer target"
+        );
+        assert_eq!(
+            forwards[0].0,
+            "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap()
+        );
 
         // Verify it deserializes to ForwardedRemove
         let msg: PeerMessage = deserialize_versioned(&forwards[0].1);
         match msg {
-            PeerMessage::ForwardedRemove { entity_id } => {
+            PeerMessage::ForwardedRemove { entity_id, .. } => {
                 assert_eq!(entity_id, eid);
             }
             _ => panic!("expected ForwardedRemove, got {:?}", msg),
@@ -537,9 +591,10 @@ mod tests {
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
         // No TransferOutbound -- normal remove
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
@@ -589,15 +644,22 @@ mod tests {
     fn client_spawn_player_always_spawns() {
         let mut world = setup_world(1);
         let eid = EntityId::new();
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::SpawnPlayer {
-            player_id: eid,
-            position: [0.0, 0.0, 0.0],
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::SpawnPlayer {
+                player_id: eid,
+                position: [0.0, 0.0, 0.0],
+            },
+        ));
 
         process_client_inputs(&mut world);
 
         let mut query = world.query_filtered::<(), With<Authoritative>>();
-        assert_eq!(query.iter(&world).count(), 1, "SpawnPlayer should always spawn with typed EntityId");
+        assert_eq!(
+            query.iter(&world).count(),
+            1,
+            "SpawnPlayer should always spawn with typed EntityId"
+        );
     }
 
     // -- MoveInput for transfer outbound forwarded to target --
@@ -616,26 +678,41 @@ mod tests {
         });
 
         // Client sends MoveInput for this entity
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::MoveInput {
-            entity_id: eid,
-            direction: [1.0, 0.0, 0.0],
-            seq: 5,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 5,
+            },
+        ));
 
         process_client_inputs(&mut world);
 
         // Should not modify velocity locally
         let vel = world.get::<Velocity>(entity).unwrap();
-        assert_eq!(vel.0, Vec3::ZERO, "TransferOutbound entity should not have velocity changed locally");
+        assert_eq!(
+            vel.0,
+            Vec3::ZERO,
+            "TransferOutbound entity should not have velocity changed locally"
+        );
 
         // Should have produced a forward message
         let forwards = &world.resource::<OutboundForwards>().messages;
         assert_eq!(forwards.len(), 1, "should forward input to transfer target");
-        assert_eq!(forwards[0].0, "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            forwards[0].0,
+            "127.0.0.1:9102".parse::<std::net::SocketAddr>().unwrap()
+        );
 
         let msg = deserialize_versioned(&forwards[0].1);
         match msg {
-            PeerMessage::ForwardedInput { entity_id, direction, seq } => {
+            PeerMessage::ForwardedInput {
+                entity_id,
+                direction,
+                seq,
+                ..
+            } => {
                 assert_eq!(entity_id, eid);
                 assert_eq!(direction, [1.0, 0.0, 0.0]);
                 assert_eq!(seq, 5);
@@ -650,11 +727,15 @@ mod tests {
     fn remove_shadow_entity_produces_forwarded_remove() {
         let mut world = setup_world(1);
         let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
@@ -666,7 +747,7 @@ mod tests {
         assert_eq!(forwards.len(), 1);
         let msg = deserialize_versioned(&forwards[0].1);
         match msg {
-            PeerMessage::ForwardedRemove { entity_id } => assert_eq!(entity_id, eid),
+            PeerMessage::ForwardedRemove { entity_id, .. } => assert_eq!(entity_id, eid),
             _ => panic!("expected ForwardedRemove"),
         }
     }
@@ -676,15 +757,18 @@ mod tests {
         let mut world = setup_world(1);
         let (_, eid) = spawn_auth_npc(&mut world, Vec3::ZERO, 1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
         assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
-        assert!(world.resource::<OutboundForwards>().messages.is_empty(),
-            "removing an authoritative entity should not forward");
+        assert!(
+            world.resource::<OutboundForwards>().messages.is_empty(),
+            "removing an authoritative entity should not forward"
+        );
     }
 
     // -- Remove shadow without peer address --
@@ -695,9 +779,10 @@ mod tests {
         let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
         // Do NOT set up peer address for server 2
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0, ClientMessage::RemoveEntity {
-            entity_id: eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
 
         process_client_inputs(&mut world);
 
@@ -716,10 +801,13 @@ mod tests {
 
         // 1. Spawn player entity via client input
         let player_eid = EntityId::new();
-        world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::SpawnPlayer {
-            player_id: player_eid,
-            position: [10.0, 0.0, 20.0],
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            42,
+            ClientMessage::SpawnPlayer {
+                player_id: player_eid,
+                position: [10.0, 0.0, 20.0],
+            },
+        ));
 
         let mut schedule = Schedule::default();
         schedule.add_systems(process_client_inputs);
@@ -728,11 +816,14 @@ mod tests {
         assert!(world.resource::<EntityLookup>().0.contains_key(&player_eid));
 
         // 2. Move the player
-        world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::MoveInput {
-            entity_id: player_eid,
-            direction: [1.0, 0.0, 0.0],
-            seq: 1,
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            42,
+            ClientMessage::MoveInput {
+                entity_id: player_eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
         schedule.run(&mut world);
 
         let bevy_entity = world.resource::<EntityLookup>().0[&player_eid];
@@ -740,14 +831,21 @@ mod tests {
         assert!(vel.0.x > 0.0, "player should have moved");
 
         // 3. Spawn NPC
-        world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::SpawnEntity {
-            position: [0.0, 0.0, 0.0],
-            entity_type: "npc".into(),
-        }));
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            42,
+            ClientMessage::SpawnEntity {
+                position: [0.0, 0.0, 0.0],
+                entity_type: "npc".into(),
+            },
+        ));
         schedule.run(&mut world);
 
         let mut auth_count_query = world.query_filtered::<(), With<Authoritative>>();
-        assert_eq!(auth_count_query.iter(&world).count(), 2, "player + npc = 2 auth entities");
+        assert_eq!(
+            auth_count_query.iter(&world).count(),
+            2,
+            "player + npc = 2 auth entities"
+        );
 
         // 4. Remove NPC by entity_id
         // Find the NPC entity ID
@@ -760,15 +858,113 @@ mod tests {
         }
         let npc_eid = npc_eid.unwrap();
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((42, ClientMessage::RemoveEntity {
-            entity_id: npc_eid,
-        }));
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((42, ClientMessage::RemoveEntity { entity_id: npc_eid }));
         schedule.run(&mut world);
 
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&npc_eid),
-            "NPC should be removed");
-        assert!(world.resource::<EntityLookup>().0.contains_key(&player_eid),
-            "player should still exist");
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&npc_eid),
+            "NPC should be removed"
+        );
+        assert!(
+            world.resource::<EntityLookup>().0.contains_key(&player_eid),
+            "player should still exist"
+        );
     }
 
+    // -- WI-132: Real SessionId flows into ForwardedInput/ForwardedRemove producers --
+
+    #[test]
+    fn forwarded_input_stamped_with_session_id_from_resource() {
+        let mut world = setup_world(1);
+        let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.insert_resource(SessionId(0x1234_5678_9ABC_DEF0));
+
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
+            ClientMessage::MoveInput {
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+        ));
+
+        process_client_inputs(&mut world);
+
+        let forwards = &world.resource::<OutboundForwards>().messages;
+        assert_eq!(forwards.len(), 1);
+        let msg: PeerMessage = deserialize_versioned(&forwards[0].1);
+        match msg {
+            PeerMessage::ForwardedInput { session_id, .. } => {
+                assert_eq!(session_id, 0x1234_5678_9ABC_DEF0);
+            }
+            _ => panic!("expected ForwardedInput, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn forwarded_remove_stamped_with_session_id_from_resource() {
+        let mut world = setup_world(1);
+        let (_, eid) = spawn_shadow_npc(&mut world, Vec3::ZERO, 2);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.insert_resource(SessionId(0xFEED_FACE_BABE_F00D));
+
+        world
+            .resource_mut::<InboundQueue>()
+            .client_inputs
+            .push((0, ClientMessage::RemoveEntity { entity_id: eid }));
+
+        process_client_inputs(&mut world);
+
+        let forwards = &world.resource::<OutboundForwards>().messages;
+        assert_eq!(forwards.len(), 1);
+        let msg: PeerMessage = deserialize_versioned(&forwards[0].1);
+        match msg {
+            PeerMessage::ForwardedRemove { session_id, .. } => {
+                assert_eq!(session_id, 0xFEED_FACE_BABE_F00D);
+            }
+            _ => panic!("expected ForwardedRemove, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn transfer_ack_stamped_with_session_id_from_resource() {
+        // Simulate accepting an authority transfer (inbound) -- this causes
+        // send_transfer_ack to enqueue a TransferAck on OutboundTransfers with
+        // the local SessionId.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.insert_resource(SessionId(0x0BAD_C0DE_FACE_FEED));
+
+        let eid = EntityId::new();
+        super::send_transfer_ack(&mut world, eid, 99, ServerId(2));
+
+        let messages = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(messages.len(), 1);
+        let msg: PeerMessage = deserialize_versioned(&messages[0].1);
+        match msg {
+            PeerMessage::TransferAck {
+                session_id,
+                entity_id,
+                tick,
+            } => {
+                assert_eq!(session_id, 0x0BAD_C0DE_FACE_FEED);
+                assert_eq!(entity_id, eid);
+                assert_eq!(tick, 99);
+            }
+            _ => panic!("expected TransferAck, got {:?}", msg),
+        }
+    }
 }

@@ -4,9 +4,9 @@ use crate::delta::{build_baseline, compute_delta, update_baseline, FULL_SNAPSHOT
 use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
+use glam::Vec3;
 use shared::entity::{EntityId, EntityState, ServerId};
 use shared::spatial::in_aoi;
-use glam::Vec3;
 
 /// When this fraction of entities changed, send a full snapshot instead of a delta.
 /// Full snapshot header is 4 bytes smaller (27 vs 31) and avoids the overhead of
@@ -145,7 +145,10 @@ pub fn prepare_client_snapshot(
         // force a full snapshot to resync (audit #021).
         // Clamp to current server tick to prevent malicious clients from sending
         // future ticks and bypassing stale-ACK detection (audit #025).
-        let acked = handle.acked_tick.load(std::sync::atomic::Ordering::Relaxed).min(tick.0);
+        let acked = handle
+            .acked_tick
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(tick.0);
         let stale_ack = handle.last_sent_tick > 0
             && handle.baseline.is_some()
             && handle.last_sent_tick.saturating_sub(acked) > ACK_STALE_TICKS;
@@ -174,7 +177,10 @@ pub fn prepare_client_snapshot(
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     // Frame dropped: clear baseline so next tick forces a full snapshot
-                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping full snapshot");
+                    tracing::warn!(
+                        client_id = _client_id,
+                        "Client frame channel full, dropping full snapshot"
+                    );
                     handle.baseline = None;
                     // ticks_since_full not incremented -- will try full again next tick
                 }
@@ -205,8 +211,10 @@ pub fn prepare_client_snapshot(
                         handle.last_sent_tick = tick.0;
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(client_id = _client_id,
-                            "Client frame channel full, dropping fallback full snapshot");
+                        tracing::warn!(
+                            client_id = _client_id,
+                            "Client frame channel full, dropping fallback full snapshot"
+                        );
                         handle.baseline = None;
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
@@ -247,8 +255,8 @@ mod tests {
     use bevy_ecs::world::World;
     use shared::entity::EntityType;
     use shared::protocol::PeerMessage;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
 
     // Functions from sibling modules, re-exported via systems/mod.rs
     use crate::systems::{drain_client_events, drain_inbound_events};
@@ -257,7 +265,11 @@ mod tests {
     fn deserialize_versioned(bytes: &[u8]) -> PeerMessage {
         assert!(bytes.len() >= 2, "versioned message too short");
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        assert_eq!(version, shared::PROTOCOL_VERSION, "unexpected protocol version in test");
+        assert_eq!(
+            version,
+            shared::PROTOCOL_VERSION,
+            "unexpected protocol version in test"
+        );
         bincode::deserialize(&bytes[2..]).unwrap()
     }
 
@@ -266,6 +278,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -300,14 +313,18 @@ mod tests {
     fn spawn_shadow_player(world: &mut World, pos: Vec3, owner_server: u16) -> (Entity, EntityId) {
         let state = EntityState::new_player(pos, ServerId(owner_server));
         let eid = state.id;
-        let entity = spawn_from_entity_state_direct(world, &state, false, Some(0));
+        let entity = spawn_from_entity_state_direct(world, &state, false, Some((0, 0)));
         (entity, eid)
     }
 
-    fn register_test_client(world: &mut World, client_id: u64) -> tokio::sync::mpsc::Receiver<ClientFrame> {
+    fn register_test_client(
+        world: &mut World,
+        client_id: u64,
+    ) -> tokio::sync::mpsc::Receiver<ClientFrame> {
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
         let acked = Arc::new(AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
+        world
+            .resource_mut::<ClientRegistry>()
             .register_from_event(client_id, tx, acked);
         rx
     }
@@ -318,8 +335,11 @@ mod tests {
     ) -> (tokio::sync::mpsc::Receiver<ClientFrame>, Arc<AtomicU64>) {
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
         let acked = Arc::new(AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
-            .register_from_event(client_id, tx, Arc::clone(&acked));
+        world.resource_mut::<ClientRegistry>().register_from_event(
+            client_id,
+            tx,
+            Arc::clone(&acked),
+        );
         (rx, acked)
     }
 
@@ -334,9 +354,14 @@ mod tests {
     ) -> tokio::sync::mpsc::Receiver<ClientFrame> {
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
         let acked = Arc::new(AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
+        world
+            .resource_mut::<ClientRegistry>()
             .register_from_event(client_id, tx, acked);
-        if let Some(handle) = world.resource_mut::<ClientRegistry>().clients.get_mut(&client_id) {
+        if let Some(handle) = world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&client_id)
+        {
             handle.player_id = Some(player_eid);
         }
         rx
@@ -356,7 +381,10 @@ mod tests {
         assert!(world.get::<Shadow>(entity).is_some());
         assert!(world.get::<Authoritative>(entity).is_none());
         // Should be Player type
-        assert_eq!(world.get::<EntityTypeComp>(entity).unwrap().0, EntityType::Player);
+        assert_eq!(
+            world.get::<EntityTypeComp>(entity).unwrap().0,
+            EntityType::Player
+        );
         // Should be owned by server 2
         assert_eq!(world.get::<AuthorityServer>(entity).unwrap().0, ServerId(2));
     }
@@ -368,11 +396,13 @@ mod tests {
         spawn_auth_npc(&mut world, Vec3::X, 1);
 
         let shadow = EntityState::new_npc(Vec3::Z, ServerId(2));
-        spawn_from_entity_state_direct(&mut world, &shadow, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &shadow, false, Some((1, 1)));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -392,7 +422,9 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 42;
 
@@ -420,7 +452,10 @@ mod tests {
         schedule.run(&mut world);
 
         let frame = rx.try_recv().unwrap();
-        assert_eq!(frame[0], 0x01, "first frame to a new client must be a full snapshot");
+        assert_eq!(
+            frame[0], 0x01,
+            "first frame to a new client must be a full snapshot"
+        );
     }
 
     #[test]
@@ -506,8 +541,11 @@ mod tests {
         // Use a large enough channel to hold all 101 frames without drops
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
-            .register_from_event(100, tx, std::sync::Arc::clone(&acked));
+        world.resource_mut::<ClientRegistry>().register_from_event(
+            100,
+            tx,
+            std::sync::Arc::clone(&acked),
+        );
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -534,8 +572,14 @@ mod tests {
             last_frame_type = frame[0];
         }
         // First frame (tick 1) is full, tick 101 should also be full (100 ticks since full)
-        assert!(full_count >= 2, "should have at least 2 full snapshots (first + periodic): got {full_count}");
-        assert_eq!(last_frame_type, 0x01, "tick 101 should be a full snapshot (100 ticks after first)");
+        assert!(
+            full_count >= 2,
+            "should have at least 2 full snapshots (first + periodic): got {full_count}"
+        );
+        assert_eq!(
+            last_frame_type, 0x01,
+            "tick 101 should be a full snapshot (100 ticks after first)"
+        );
     }
 
     #[test]
@@ -618,13 +662,19 @@ mod tests {
         assert_eq!(f2[0], 0x02);
 
         // Request forced full snapshot
-        world.resource_mut::<InboundQueue>().force_full_snapshot_clients.push(100);
+        world
+            .resource_mut::<InboundQueue>()
+            .force_full_snapshot_clients
+            .push(100);
 
         // Tick 3: should be full (baseline was cleared by drain_client_events)
         world.resource_mut::<TickCounter>().0 = 3;
         schedule.run(&mut world);
         let f3 = rx.try_recv().unwrap();
-        assert_eq!(f3[0], 0x01, "forced full snapshot should produce 0x01 frame");
+        assert_eq!(
+            f3[0], 0x01,
+            "forced full snapshot should produce 0x01 frame"
+        );
     }
 
     #[test]
@@ -712,8 +762,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x01,
-            "100% entities changed should trigger delta fallback to full snapshot");
+        assert_eq!(
+            f2[0], 0x01,
+            "100% entities changed should trigger delta fallback to full snapshot"
+        );
     }
 
     #[test]
@@ -744,8 +796,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x02,
-            "70% entities changed should send delta, not full snapshot");
+        assert_eq!(
+            f2[0], 0x02,
+            "70% entities changed should send delta, not full snapshot"
+        );
     }
 
     #[test]
@@ -776,8 +830,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x02,
-            "80% entities changed (at boundary, not exceeded) should send delta");
+        assert_eq!(
+            f2[0], 0x02,
+            "80% entities changed (at boundary, not exceeded) should send delta"
+        );
     }
 
     #[test]
@@ -808,8 +864,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x01,
-            "90% entities changed should trigger delta fallback to full snapshot");
+        assert_eq!(
+            f2[0], 0x01,
+            "90% entities changed should trigger delta fallback to full snapshot"
+        );
     }
 
     #[test]
@@ -841,8 +899,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 43;
         schedule.run(&mut world);
         let frame = rx.try_recv().unwrap();
-        assert_eq!(frame[0], 0x01,
-            "stale ACK (gap > 40 ticks) should force full snapshot");
+        assert_eq!(
+            frame[0], 0x01,
+            "stale ACK (gap > 40 ticks) should force full snapshot"
+        );
         // Verify acked_tick is still 0
         assert_eq!(acked.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
@@ -867,8 +927,10 @@ mod tests {
             world.resource_mut::<TickCounter>().0 = tick;
             schedule.run(&mut world);
             let frame = rx.try_recv().unwrap();
-            assert_eq!(frame[0], 0x02,
-                "fresh ACK should produce delta, not full snapshot (tick {tick})");
+            assert_eq!(
+                frame[0], 0x02,
+                "fresh ACK should produce delta, not full snapshot (tick {tick})"
+            );
         }
     }
 
@@ -893,7 +955,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x02, "new client should get delta on second tick (not false-positive stale)");
+        assert_eq!(
+            f2[0], 0x02,
+            "new client should get delta on second tick (not false-positive stale)"
+        );
     }
 
     #[test]
@@ -923,7 +988,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 42;
         schedule.run(&mut world);
         let frame = rx.try_recv().unwrap();
-        assert_eq!(frame[0], 0x01, "gap of 41 > 40 should trigger stale ACK full snapshot");
+        assert_eq!(
+            frame[0], 0x01,
+            "gap of 41 > 40 should trigger stale ACK full snapshot"
+        );
     }
 
     #[test]
@@ -940,21 +1008,38 @@ mod tests {
         schedule.run(&mut world);
         rx.try_recv().unwrap();
 
-        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
-        assert_eq!(handle.last_sent_tick, 50, "last_sent_tick should be 50 after sending at tick 50");
+        let handle = world
+            .resource::<ClientRegistry>()
+            .clients
+            .get(&100)
+            .unwrap();
+        assert_eq!(
+            handle.last_sent_tick, 50,
+            "last_sent_tick should be 50 after sending at tick 50"
+        );
 
         // Tick 51: delta
         world.resource_mut::<TickCounter>().0 = 51;
         schedule.run(&mut world);
         rx.try_recv().unwrap();
 
-        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
-        assert_eq!(handle.last_sent_tick, 51, "last_sent_tick should be 51 after sending at tick 51");
+        let handle = world
+            .resource::<ClientRegistry>()
+            .clients
+            .get(&100)
+            .unwrap();
+        assert_eq!(
+            handle.last_sent_tick, 51,
+            "last_sent_tick should be 51 after sending at tick 51"
+        );
     }
 
     #[test]
     fn ack_stale_ticks_constant_value() {
-        assert_eq!(ACK_STALE_TICKS, 40, "ACK_STALE_TICKS should be 40 (2 seconds at 20Hz)");
+        assert_eq!(
+            ACK_STALE_TICKS, 40,
+            "ACK_STALE_TICKS should be 40 (2 seconds at 20Hz)"
+        );
     }
 
     #[test]
@@ -983,8 +1068,10 @@ mod tests {
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
         // Should get a delta (acked clamped to 2, gap = 1 - 2 = 0, not stale)
-        assert_eq!(f2[0], 0x02,
-            "clamped ACK should allow normal delta flow, not cause issues");
+        assert_eq!(
+            f2[0], 0x02,
+            "clamped ACK should allow normal delta flow, not cause issues"
+        );
 
         // Now set acked to 0 and advance 42 ticks -- should trigger stale even with
         // a prior u64::MAX ACK in the atomic (stale detection uses clamped value)
@@ -997,8 +1084,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 45;
         schedule.run(&mut world);
         let f_stale = rx.try_recv().unwrap();
-        assert_eq!(f_stale[0], 0x01,
-            "after resetting ACK to 0 and advancing 42 ticks, stale detection should fire");
+        assert_eq!(
+            f_stale[0], 0x01,
+            "after resetting ACK to 0 and advancing 42 ticks, stale detection should fire"
+        );
     }
 
     #[test]
@@ -1028,7 +1117,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 44;
         schedule.run(&mut world);
         let stale_frame = rx.try_recv().unwrap();
-        assert_eq!(stale_frame[0], 0x01, "stale ACK should trigger full snapshot");
+        assert_eq!(
+            stale_frame[0], 0x01,
+            "stale ACK should trigger full snapshot"
+        );
 
         // Client resumes ACKing (catches up to tick 44)
         acked.store(44, std::sync::atomic::Ordering::Relaxed);
@@ -1037,8 +1129,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 45;
         schedule.run(&mut world);
         let recovery_frame = rx.try_recv().unwrap();
-        assert_eq!(recovery_frame[0], 0x02,
-            "after client resumes ACKing, should get delta (not stuck in full snapshot loop)");
+        assert_eq!(
+            recovery_frame[0], 0x02,
+            "after client resumes ACKing, should get delta (not stuck in full snapshot loop)"
+        );
     }
 
     #[test]
@@ -1064,8 +1158,10 @@ mod tests {
             world.resource_mut::<TickCounter>().0 = tick;
             schedule.run(&mut world);
             let frame = rx.try_recv().unwrap();
-            assert_eq!(frame[0], 0x02,
-                "gap <= 40 should produce delta at tick {tick}");
+            assert_eq!(
+                frame[0], 0x02,
+                "gap <= 40 should produce delta at tick {tick}"
+            );
         }
     }
 
@@ -1095,8 +1191,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 42;
         schedule.run(&mut world);
         let frame = rx.try_recv().unwrap();
-        assert_eq!(frame[0], 0x01,
-            "gap of 41 (> 40) should trigger stale ACK full snapshot");
+        assert_eq!(
+            frame[0], 0x01,
+            "gap of 41 (> 40) should trigger stale ACK full snapshot"
+        );
     }
 
     #[test]
@@ -1113,13 +1211,19 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
         let f1 = rx.try_recv().unwrap();
-        assert_eq!(f1[0], 0x01, "first frame with no entities should be full snapshot");
+        assert_eq!(
+            f1[0], 0x01,
+            "first frame with no entities should be full snapshot"
+        );
 
         // Tick 2: delta path with 0 entities. change_ratio = 0.0 / 0.0 => guarded to 0.0.
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x02, "empty entity set should produce delta (no fallback to full)");
+        assert_eq!(
+            f2[0], 0x02,
+            "empty entity set should produce delta (no fallback to full)"
+        );
     }
 
     #[test]
@@ -1144,8 +1248,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x01,
-            "single entity changed (100%) should trigger delta fallback to full snapshot");
+        assert_eq!(
+            f2[0], 0x01,
+            "single entity changed (100%) should trigger delta fallback to full snapshot"
+        );
     }
 
     #[test]
@@ -1174,15 +1280,28 @@ mod tests {
         assert_eq!(f2[0], 0x01, "should be fallback full snapshot");
 
         // Verify baseline was rebuilt: ticks_since_full should be 1
-        let handle = world.resource::<ClientRegistry>().clients.get(&100).unwrap();
-        assert!(handle.baseline.is_some(), "baseline should be set after fallback full");
-        assert_eq!(handle.ticks_since_full, 1, "ticks_since_full should be 1 after fallback full");
+        let handle = world
+            .resource::<ClientRegistry>()
+            .clients
+            .get(&100)
+            .unwrap();
+        assert!(
+            handle.baseline.is_some(),
+            "baseline should be set after fallback full"
+        );
+        assert_eq!(
+            handle.ticks_since_full, 1,
+            "ticks_since_full should be 1 after fallback full"
+        );
 
         // Tick 3: no changes -> delta (not another full)
         world.resource_mut::<TickCounter>().0 = 3;
         schedule.run(&mut world);
         let f3 = rx.try_recv().unwrap();
-        assert_eq!(f3[0], 0x02, "after fallback full, next unchanged tick should produce delta");
+        assert_eq!(
+            f3[0], 0x02,
+            "after fallback full, next unchanged tick should produce delta"
+        );
     }
 
     #[test]
@@ -1223,7 +1342,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 3;
         schedule.run(&mut world);
         let f3 = rx.try_recv().unwrap();
-        assert_eq!(f3[0], 0x01, "5/5 = 100% (> 80%) should trigger fallback to full");
+        assert_eq!(
+            f3[0], 0x01,
+            "5/5 = 100% (> 80%) should trigger fallback to full"
+        );
     }
 
     #[test]
@@ -1258,7 +1380,10 @@ mod tests {
             world.resource_mut::<TickCounter>().0 = tick;
             schedule.run(&mut world);
             let f = rx.try_recv().unwrap();
-            assert_eq!(f[0], 0x02, "phase 2: normal ACK should produce delta at tick {tick}");
+            assert_eq!(
+                f[0], 0x02,
+                "phase 2: normal ACK should produce delta at tick {tick}"
+            );
         }
 
         // Phase 3: Client stops ACKing. ACK stays at tick 10.
@@ -1272,14 +1397,20 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 53;
         schedule.run(&mut world);
         let f_stale = rx.try_recv().unwrap();
-        assert_eq!(f_stale[0], 0x01, "phase 3: stale ACK should trigger full snapshot");
+        assert_eq!(
+            f_stale[0], 0x01,
+            "phase 3: stale ACK should trigger full snapshot"
+        );
 
         // Phase 4: Client resumes ACKing -> deltas
         acked.store(53, std::sync::atomic::Ordering::Relaxed);
         world.resource_mut::<TickCounter>().0 = 54;
         schedule.run(&mut world);
         let f_resume = rx.try_recv().unwrap();
-        assert_eq!(f_resume[0], 0x02, "phase 4: resumed ACK should produce delta");
+        assert_eq!(
+            f_resume[0], 0x02,
+            "phase 4: resumed ACK should produce delta"
+        );
 
         // Phase 5: Mass movement -> fallback
         acked.store(54, std::sync::atomic::Ordering::Relaxed);
@@ -1289,15 +1420,20 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 55;
         schedule.run(&mut world);
         let f_fallback = rx.try_recv().unwrap();
-        assert_eq!(f_fallback[0], 0x01,
-            "phase 5: 100% entities changed should trigger fallback full snapshot");
+        assert_eq!(
+            f_fallback[0], 0x01,
+            "phase 5: 100% entities changed should trigger fallback full snapshot"
+        );
 
         // Phase 6: Normal deltas resume
         acked.store(55, std::sync::atomic::Ordering::Relaxed);
         world.resource_mut::<TickCounter>().0 = 56;
         schedule.run(&mut world);
         let f_normal = rx.try_recv().unwrap();
-        assert_eq!(f_normal[0], 0x02, "phase 6: normal operation should produce delta");
+        assert_eq!(
+            f_normal[0], 0x02,
+            "phase 6: normal operation should produce delta"
+        );
     }
 
     #[test]
@@ -1334,7 +1470,10 @@ mod tests {
         let fa = rx_a.try_recv().unwrap();
         let fb = rx_b.try_recv().unwrap();
         assert_eq!(fa[0], 0x02, "client A (ACKing) should get delta");
-        assert_eq!(fb[0], 0x01, "client B (not ACKing) should get full snapshot due to stale");
+        assert_eq!(
+            fb[0], 0x01,
+            "client B (not ACKing) should get full snapshot due to stale"
+        );
     }
 
     #[test]
@@ -1344,8 +1483,11 @@ mod tests {
         // Use a large enough channel to hold all frames without drops
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(128);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
-            .register_from_event(100, tx, std::sync::Arc::clone(&acked));
+        world.resource_mut::<ClientRegistry>().register_from_event(
+            100,
+            tx,
+            std::sync::Arc::clone(&acked),
+        );
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -1374,7 +1516,10 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 102;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
-        assert_eq!(f2[0], 0x02, "tick after periodic full should be delta again");
+        assert_eq!(
+            f2[0], 0x02,
+            "tick after periodic full should be delta again"
+        );
     }
 
     #[test]
@@ -1402,7 +1547,8 @@ mod tests {
         // Create a tiny channel that will fill up
         let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(1);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>()
+        world
+            .resource_mut::<ClientRegistry>()
             .register_from_event(100, tx, acked);
 
         let mut schedule = Schedule::default();
@@ -1445,8 +1591,11 @@ mod tests {
         let frame = rx.try_recv().unwrap();
 
         // Header 27 bytes + 3 entities * 47 bytes = 168
-        assert_eq!(frame.len(), 27 + 3 * 47,
-            "transfer outbound entity should be included in snapshot");
+        assert_eq!(
+            frame.len(),
+            27 + 3 * 47,
+            "transfer outbound entity should be included in snapshot"
+        );
 
         let entity_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(entity_count, 3);
@@ -1464,7 +1613,10 @@ mod tests {
                 found_target_auth = true;
             }
         }
-        assert!(found_target_auth, "transfer outbound entity should report target server as authority");
+        assert!(
+            found_target_auth,
+            "transfer outbound entity should report target server as authority"
+        );
     }
 
     #[test]
@@ -1478,14 +1630,19 @@ mod tests {
         let auth_entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
 
         // Manually spawn a shadow with same NetworkId (bypassing lookup, which overwrites)
-        let shadow_entity = world.spawn((
-            NetworkId(eid),
-            Position(Vec3::new(99.0, 0.0, 99.0)),
-            Velocity(Vec3::ZERO),
-            EntityTypeComp(EntityType::Npc),
-            AuthorityServer(ServerId(2)),
-            Shadow { last_seen_tick: 10 },
-        )).id();
+        let shadow_entity = world
+            .spawn((
+                NetworkId(eid),
+                Position(Vec3::new(99.0, 0.0, 99.0)),
+                Velocity(Vec3::ZERO),
+                EntityTypeComp(EntityType::Npc),
+                AuthorityServer(ServerId(2)),
+                Shadow {
+                    last_peer_tick: 10,
+                    last_local_tick: 10,
+                },
+            ))
+            .id();
 
         let mut rx = register_test_client(&mut world, 1);
 
@@ -1508,7 +1665,10 @@ mod tests {
     #[test]
     fn transfer_ack_message_deserializes_correctly() {
         let mut world = setup_world(2);
-        world.resource_mut::<PeerAddresses>().0.insert(1, "127.0.0.1:9101".parse().unwrap());
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(1, "127.0.0.1:9101".parse().unwrap());
         world.resource_mut::<TickCounter>().0 = 42;
 
         // Spawn entity and push a transfer
@@ -1521,7 +1681,10 @@ mod tests {
             to_server: ServerId(2),
             full_state: state,
         };
-        world.resource_mut::<InboundQueue>().authority_transfers.push(transfer);
+        world
+            .resource_mut::<InboundQueue>()
+            .authority_transfers
+            .push(transfer);
 
         drain_inbound_events(&mut world);
 
@@ -1534,7 +1697,9 @@ mod tests {
 
         let decoded: PeerMessage = deserialize_versioned(bytes);
         match decoded {
-            PeerMessage::TransferAck { entity_id, tick } => {
+            PeerMessage::TransferAck {
+                entity_id, tick, ..
+            } => {
                 assert_eq!(entity_id, eid);
                 assert_eq!(tick, 42);
             }
@@ -1575,12 +1740,21 @@ mod tests {
         // Tick 2: all 3 clients should get full snapshots via force_full
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
-        assert_eq!(rx1.try_recv().unwrap()[0], 0x01,
-            "client 1 should get full snapshot via force_full");
-        assert_eq!(rx2.try_recv().unwrap()[0], 0x01,
-            "client 2 should get full snapshot via force_full");
-        assert_eq!(rx3.try_recv().unwrap()[0], 0x01,
-            "client 3 should get full snapshot via force_full");
+        assert_eq!(
+            rx1.try_recv().unwrap()[0],
+            0x01,
+            "client 1 should get full snapshot via force_full"
+        );
+        assert_eq!(
+            rx2.try_recv().unwrap()[0],
+            0x01,
+            "client 2 should get full snapshot via force_full"
+        );
+        assert_eq!(
+            rx3.try_recv().unwrap()[0],
+            0x01,
+            "client 3 should get full snapshot via force_full"
+        );
     }
 
     #[test]
@@ -1613,10 +1787,16 @@ mod tests {
         // Tick 2: both clients should get deltas
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
-        assert_eq!(rx1.try_recv().unwrap()[0], 0x02,
-            "client 1 should get delta when below threshold");
-        assert_eq!(rx2.try_recv().unwrap()[0], 0x02,
-            "client 2 should get delta when below threshold");
+        assert_eq!(
+            rx1.try_recv().unwrap()[0],
+            0x02,
+            "client 1 should get delta when below threshold"
+        );
+        assert_eq!(
+            rx2.try_recv().unwrap()[0],
+            0x02,
+            "client 2 should get delta when below threshold"
+        );
     }
 
     #[test]
@@ -1636,8 +1816,11 @@ mod tests {
         // Client still gets full snapshot via baseline.is_none()
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
-        assert_eq!(rx.try_recv().unwrap()[0], 0x01,
-            "new client with no baseline should get full snapshot");
+        assert_eq!(
+            rx.try_recv().unwrap()[0],
+            0x01,
+            "new client with no baseline should get full snapshot"
+        );
     }
 
     #[test]
@@ -1678,7 +1861,10 @@ mod tests {
 
         let frame = rx.try_recv().unwrap();
         let count = entity_count_from_full_frame(&frame);
-        assert_eq!(count, 1, "only player should be in frame (NPC is outside AoI)");
+        assert_eq!(
+            count, 1,
+            "only player should be in frame (NPC is outside AoI)"
+        );
     }
 
     #[test]
@@ -1732,8 +1918,12 @@ mod tests {
         let (npc_entity, _npc_id) = spawn_auth_npc(&mut world, Vec3::new(400.0, 0.0, 0.0), 1);
 
         let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .player_id = Some(player_id);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -1755,7 +1945,10 @@ mod tests {
         let f2 = rx.try_recv().unwrap();
         assert_eq!(f2[0], 0x02, "second frame should be delta");
         let (updates, removals) = delta_counts_from_frame(&f2);
-        assert_eq!(removals, 1, "NPC moved outside AoI should produce 1 removal");
+        assert_eq!(
+            removals, 1,
+            "NPC moved outside AoI should produce 1 removal"
+        );
         // The player may have an update (unchanged position still in baseline),
         // but the NPC should be gone.
         let _ = updates; // player update is fine
@@ -1772,8 +1965,12 @@ mod tests {
         let (npc_entity, _npc_id) = spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1);
 
         let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .player_id = Some(player_id);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -1782,7 +1979,11 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
         let f1 = rx.try_recv().unwrap();
-        assert_eq!(entity_count_from_full_frame(&f1), 1, "only player should be in first frame");
+        assert_eq!(
+            entity_count_from_full_frame(&f1),
+            1,
+            "only player should be in first frame"
+        );
         acked.store(1, std::sync::atomic::Ordering::Relaxed);
 
         // Move NPC inside AoI
@@ -1794,7 +1995,10 @@ mod tests {
         let f2 = rx.try_recv().unwrap();
         assert_eq!(f2[0], 0x02, "second frame should be delta");
         let (updates, removals) = delta_counts_from_frame(&f2);
-        assert!(updates >= 1, "NPC entering AoI should produce at least 1 update");
+        assert!(
+            updates >= 1,
+            "NPC entering AoI should produce at least 1 update"
+        );
         assert_eq!(removals, 0, "no entities should be removed");
     }
 
@@ -1808,8 +2012,12 @@ mod tests {
         spawn_auth_npc(&mut world, Vec3::new(500.0, 0.0, 0.0), 1);
 
         let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .player_id = Some(player_id);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -1818,7 +2026,11 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
         let f1 = rx.try_recv().unwrap();
-        assert_eq!(entity_count_from_full_frame(&f1), 2, "boundary entity should be included");
+        assert_eq!(
+            entity_count_from_full_frame(&f1),
+            2,
+            "boundary entity should be included"
+        );
         acked.store(1, std::sync::atomic::Ordering::Relaxed);
 
         // Ticks 2-5: deltas should have 0 removals (entity stays stable)
@@ -1829,7 +2041,10 @@ mod tests {
             let frame = rx.try_recv().unwrap();
             assert_eq!(frame[0], 0x02, "tick {tick} should be delta");
             let (_updates, removals) = delta_counts_from_frame(&frame);
-            assert_eq!(removals, 0, "tick {tick}: boundary entity should not flicker out");
+            assert_eq!(
+                removals, 0,
+                "tick {tick}: boundary entity should not flicker out"
+            );
         }
     }
 
@@ -1843,8 +2058,12 @@ mod tests {
         spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1); // outside AoI
 
         let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .player_id = Some(player_id);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -1854,20 +2073,31 @@ mod tests {
         schedule.run(&mut world);
         let f1 = rx.try_recv().unwrap();
         assert_eq!(f1[0], 0x01);
-        assert_eq!(entity_count_from_full_frame(&f1), 2, "first full should have 2 AoI entities");
+        assert_eq!(
+            entity_count_from_full_frame(&f1),
+            2,
+            "first full should have 2 AoI entities"
+        );
         acked.store(1, std::sync::atomic::Ordering::Relaxed);
 
         // Force a periodic full snapshot by setting ticks_since_full = FULL_SNAPSHOT_INTERVAL
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().ticks_since_full = FULL_SNAPSHOT_INTERVAL;
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .ticks_since_full = FULL_SNAPSHOT_INTERVAL;
 
         // Tick 2: forced full snapshot should still be AoI-filtered
         world.resource_mut::<TickCounter>().0 = 2;
         schedule.run(&mut world);
         let f2 = rx.try_recv().unwrap();
         assert_eq!(f2[0], 0x01, "periodic refresh should be full snapshot");
-        assert_eq!(entity_count_from_full_frame(&f2), 2,
-            "periodic full snapshot should be AoI-filtered (not all 3 entities)");
+        assert_eq!(
+            entity_count_from_full_frame(&f2),
+            2,
+            "periodic full snapshot should be AoI-filtered (not all 3 entities)"
+        );
     }
 
     #[test]
@@ -1880,11 +2110,11 @@ mod tests {
 
         // Shadow entity inside AoI (from server 2)
         let shadow_near = EntityState::new_npc(Vec3::new(200.0, 0.0, 0.0), ServerId(2));
-        spawn_from_entity_state_direct(&mut world, &shadow_near, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &shadow_near, false, Some((1, 1)));
 
         // Shadow entity outside AoI (from server 2)
         let shadow_far = EntityState::new_npc(Vec3::new(3000.0, 0.0, 0.0), ServerId(2));
-        spawn_from_entity_state_direct(&mut world, &shadow_far, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &shadow_far, false, Some((1, 1)));
 
         let mut rx = register_test_client_with_player(&mut world, 100, player_id);
 
@@ -1897,7 +2127,10 @@ mod tests {
         let count = entity_count_from_full_frame(&frame);
         // player (0,0,0) + auth NPC (100,0,0) + shadow near (200,0,0) = 3
         // shadow far (3000,0,0) should be excluded
-        assert_eq!(count, 3, "shadow entity at 3000 units should be filtered out");
+        assert_eq!(
+            count, 3,
+            "shadow entity at 3000 units should be filtered out"
+        );
     }
 
     #[test]
@@ -1942,7 +2175,10 @@ mod tests {
         let count = entity_count_from_full_frame(&frame);
         // player (0,0,0) + auth NPC (100,0,0) + transfer near (200,0,0) = 3
         // transfer far (3000,0,0) should be excluded
-        assert_eq!(count, 3, "transfer-outbound entity at 3000 units should be filtered out");
+        assert_eq!(
+            count, 3,
+            "transfer-outbound entity at 3000 units should be filtered out"
+        );
     }
 
     #[test]
@@ -1965,7 +2201,10 @@ mod tests {
 
         let frame = rx.try_recv().unwrap();
         let count = entity_count_from_full_frame(&frame);
-        assert_eq!(count, 3, "player entity not in ECS means unfiltered: all 3 entities sent");
+        assert_eq!(
+            count, 3,
+            "player entity not in ECS means unfiltered: all 3 entities sent"
+        );
     }
 
     #[test]
@@ -2017,8 +2256,12 @@ mod tests {
         spawn_auth_npc(&mut world, Vec3::new(3000.0, 0.0, 0.0), 1); // outside AoI
 
         let (mut rx, acked) = register_test_client_with_ack(&mut world, 100);
-        world.resource_mut::<ClientRegistry>()
-            .clients.get_mut(&100).unwrap().player_id = Some(player_id);
+        world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&100)
+            .unwrap()
+            .player_id = Some(player_id);
 
         let mut schedule = Schedule::default();
         schedule.add_systems(prepare_client_snapshot);
@@ -2027,7 +2270,11 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 1;
         schedule.run(&mut world);
         let f1 = rx.try_recv().unwrap();
-        assert_eq!(entity_count_from_full_frame(&f1), 2, "initial: player + nearby NPC");
+        assert_eq!(
+            entity_count_from_full_frame(&f1),
+            2,
+            "initial: player + nearby NPC"
+        );
         acked.store(1, std::sync::atomic::Ordering::Relaxed);
 
         // Advance ticks without updating acked_tick to trigger stale ACK.
@@ -2042,9 +2289,15 @@ mod tests {
         world.resource_mut::<TickCounter>().0 = 44;
         schedule.run(&mut world);
         let stale_frame = rx.try_recv().unwrap();
-        assert_eq!(stale_frame[0], 0x01, "stale ACK should trigger full snapshot");
-        assert_eq!(entity_count_from_full_frame(&stale_frame), 2,
-            "stale ACK full snapshot should be AoI-filtered (not 3)");
+        assert_eq!(
+            stale_frame[0], 0x01,
+            "stale ACK should trigger full snapshot"
+        );
+        assert_eq!(
+            entity_count_from_full_frame(&stale_frame),
+            2,
+            "stale ACK full snapshot should be AoI-filtered (not 3)"
+        );
     }
 
     #[test]
@@ -2067,7 +2320,10 @@ mod tests {
         let frame = rx.try_recv().unwrap();
         let count = entity_count_from_full_frame(&frame);
         // player + nearby NPC = 2 (far NPC is ~13577 units away)
-        assert_eq!(count, 2, "player at world edge should see only nearby entities");
+        assert_eq!(
+            count, 2,
+            "player at world edge should see only nearby entities"
+        );
     }
 
     #[test]
@@ -2086,5 +2342,4 @@ mod tests {
         let count = entity_count_from_full_frame(&frame);
         assert_eq!(count, 0, "empty world should produce frame with 0 entities");
     }
-
 }

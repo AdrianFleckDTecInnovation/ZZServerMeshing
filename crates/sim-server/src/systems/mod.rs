@@ -1,24 +1,24 @@
+mod coordinator;
+mod drain;
 mod inbound;
 mod input;
-mod transfers;
-mod drain;
-mod replication;
-mod snapshot;
-mod simulation;
-mod coordinator;
-mod shadow;
 mod metrics;
+mod replication;
+mod shadow;
+mod simulation;
+mod snapshot;
+mod transfers;
 
-pub use inbound::{drain_inbound_events, drain_client_events};
-pub use input::process_client_inputs;
-pub use transfers::{process_transfer_acks, process_transfer_timeouts, process_transfers};
-pub use drain::process_drain;
-pub use replication::prepare_replication;
-pub use snapshot::prepare_client_snapshot;
-pub use simulation::{npc_behavior, physics_integration, clamp_positions};
 pub use coordinator::process_coord_events;
-pub use shadow::shadow_cleanup;
+pub use drain::process_drain;
+pub use inbound::{drain_client_events, drain_inbound_events};
+pub use input::process_client_inputs;
 pub use metrics::record_metrics;
+pub use replication::prepare_replication;
+pub use shadow::shadow_cleanup;
+pub use simulation::{clamp_positions, npc_behavior, physics_integration};
+pub use snapshot::prepare_client_snapshot;
+pub use transfers::{process_transfer_acks, process_transfer_timeouts, process_transfers};
 
 /// Re-export for submodule use (simulation.rs physics_integration).
 pub(crate) use shared::tick::TICK_DURATION;

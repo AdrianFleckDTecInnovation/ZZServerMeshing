@@ -5,11 +5,18 @@ use shared::entity::{EntityState, EntityType};
 
 /// Spawn a new entity in the ECS World directly from an EntityState.
 /// This variant operates on &mut World for unit tests and initialization.
+///
+/// `shadow_ticks` is `Some((peer_tick, local_tick))` for shadow spawns and
+/// `None` for authoritative spawns (or when defaults of 0/0 are acceptable).
+/// `peer_tick` is the authoring peer's `TickCounter.0` from the inbound
+/// `EntityStateUpdate`; `local_tick` is this server's `TickCounter.0` at the
+/// moment the shadow was refreshed. See design 015 for why these must not
+/// be collapsed into a single field.
 pub fn spawn_from_entity_state_direct(
     world: &mut World,
     state: &EntityState,
     is_authoritative: bool,
-    shadow_tick: Option<u64>,
+    shadow_ticks: Option<(u64, u64)>,
 ) -> Entity {
     let mut entity_cmd = world.spawn((
         NetworkId(state.id),
@@ -22,8 +29,10 @@ pub fn spawn_from_entity_state_direct(
     if is_authoritative {
         entity_cmd.insert(Authoritative);
     } else {
+        let (peer_tick, local_tick) = shadow_ticks.unwrap_or((0, 0));
         entity_cmd.insert(Shadow {
-            last_seen_tick: shadow_tick.unwrap_or(0),
+            last_peer_tick: peer_tick,
+            last_local_tick: local_tick,
         });
     }
 
@@ -62,14 +71,13 @@ pub fn to_entity_state(
 }
 
 /// Despawn a Bevy entity and remove it from EntityLookup.
-pub fn despawn_and_remove(
-    world: &mut World,
-    entity: Entity,
-    network_id: shared::entity::EntityId,
-) {
+pub fn despawn_and_remove(world: &mut World, entity: Entity, network_id: shared::entity::EntityId) {
     world.resource_mut::<EntityLookup>().0.remove(&network_id);
     // Clean up ownership tracking
-    world.resource_mut::<EntityOwnership>().owners.remove(&network_id);
+    world
+        .resource_mut::<EntityOwnership>()
+        .owners
+        .remove(&network_id);
     if world.get_entity(entity).is_ok() {
         world.despawn(entity);
     }
@@ -151,11 +159,12 @@ mod tests {
     fn shadow_marker_with_tick() {
         let mut world = setup_world();
         let state = EntityState::new_npc(Vec3::ZERO, ServerId(2));
-        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some(42));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some((42, 100)));
 
         assert!(world.get::<Authoritative>(entity).is_none());
         let shadow = world.get::<Shadow>(entity).unwrap();
-        assert_eq!(shadow.last_seen_tick, 42);
+        assert_eq!(shadow.last_peer_tick, 42);
+        assert_eq!(shadow.last_local_tick, 100);
     }
 
     #[test]
@@ -221,7 +230,8 @@ mod tests {
         let entity = spawn_from_entity_state_direct(&mut world, &state, false, None);
 
         let shadow = world.get::<Shadow>(entity).unwrap();
-        assert_eq!(shadow.last_seen_tick, 0);
+        assert_eq!(shadow.last_peer_tick, 0);
+        assert_eq!(shadow.last_local_tick, 0);
     }
 
     #[test]
@@ -265,7 +275,7 @@ mod tests {
         let mut world = setup_world();
         let mut state = EntityState::new_player(Vec3::ZERO, ServerId(2));
         state.last_input_seq = 55;
-        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some(10));
+        let entity = spawn_from_entity_state_direct(&mut world, &state, false, Some((10, 10)));
 
         // Player shadow should have LastInputSeq
         let seq = world.get::<LastInputSeq>(entity).unwrap();

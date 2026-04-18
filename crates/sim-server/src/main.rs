@@ -1,17 +1,17 @@
-mod network;
-mod receiver;
+mod components;
+mod conversion;
 mod coordinator_client;
+mod delta;
+mod encoding;
+mod game_loop;
 mod metrics;
 mod metrics_server;
-mod components;
-mod resources;
-mod conversion;
-mod encoding;
-mod delta;
-mod systems;
-mod schedule;
-mod game_loop;
+mod network;
 pub mod peer_bounds;
+mod receiver;
+mod resources;
+mod schedule;
+mod systems;
 
 use clap::Parser;
 use shared::entity::ServerId;
@@ -59,7 +59,6 @@ struct Args {
     /// Path to TLS private key file (PEM).
     #[arg(long)]
     tls_key: Option<PathBuf>,
-
 }
 
 #[tokio::main]
@@ -69,6 +68,16 @@ async fn main() {
 
     let server_id = ServerId(args.server_id);
     let metrics_port = args.metrics_port.unwrap_or(8100 + args.server_id);
+
+    // Generate a unique session id for this process run (design 013).
+    // Used on every outbound PeerMessage so peers can detect a restart and
+    // reset stale receiver state (reassembly map, latest_tick, shadows).
+    let session_id: u64 = rand::random();
+    tracing::info!(
+        server_id = server_id.0,
+        session_id = format_args!("0x{:016x}", session_id),
+        "sim-server session id generated"
+    );
 
     // Build TLS config if cert+key provided
     let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
@@ -92,12 +101,16 @@ async fn main() {
     let ws_scheme = if use_tls { "wss" } else { "ws" };
     tracing::info!(
         "Sim-server {} starting ({ws_scheme}:{} udp:{} metrics:{})",
-        server_id, args.port, args.udp_port, metrics_port
+        server_id,
+        args.port,
+        args.udp_port,
+        metrics_port
     );
 
     // Create shared async-to-ECS buffers
     let shared_inbound = Arc::new(std::sync::Mutex::new(resources::InboundQueue::default()));
-    let shared_coord_events = Arc::new(std::sync::Mutex::new(resources::CoordEventQueue::default()));
+    let shared_coord_events =
+        Arc::new(std::sync::Mutex::new(resources::CoordEventQueue::default()));
 
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
@@ -107,10 +120,14 @@ async fn main() {
     let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Create metrics collector
-    let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
+    let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(
+        args.server_id,
+    )));
 
     // Shared peer health accumulator (WI-102/105): receiver writes, game loop reads
-    let peer_health = Arc::new(std::sync::Mutex::new(game_loop::PeerHealthAccumulator::default()));
+    let peer_health = Arc::new(std::sync::Mutex::new(
+        game_loop::PeerHealthAccumulator::default(),
+    ));
 
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
@@ -159,9 +176,8 @@ async fn main() {
     let (udp_repl_tx, udp_repl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
         game_loop::UDP_REPLICATION_CHANNEL_SIZE,
     );
-    let (udp_ctrl_tx, udp_ctrl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
-        game_loop::UDP_CONTROL_CHANNEL_SIZE,
-    );
+    let (udp_ctrl_tx, udp_ctrl_rx) =
+        tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(game_loop::UDP_CONTROL_CHANNEL_SIZE);
     let sender_handle = tokio::spawn(game_loop::run_udp_sender(
         Arc::clone(&udp_socket),
         udp_ctrl_rx,
@@ -171,6 +187,7 @@ async fn main() {
     // Run the ECS game loop (receives both channel senders, not the socket)
     let sim_handle = tokio::spawn(game_loop::run_game_loop_ecs(
         server_id,
+        session_id,
         args.initial_npcs,
         Arc::clone(&shared_inbound),
         Arc::clone(&shared_coord_events),
@@ -207,4 +224,3 @@ async fn main() {
         }
     }
 }
-

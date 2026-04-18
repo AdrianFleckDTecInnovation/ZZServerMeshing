@@ -1,6 +1,6 @@
+use crate::systems;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::ScheduleLabel;
-use crate::systems;
 
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TickSchedule;
@@ -47,6 +47,7 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
@@ -82,7 +83,9 @@ mod tests {
         // Register a test client so prepare_client_snapshot sends a frame
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -138,10 +141,13 @@ mod tests {
         // Push a peer update
         let entity_state = EntityState::new_npc(Vec3::new(50.0, 0.0, 50.0), ServerId(2));
         let eid = entity_state.id;
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 10,
-            entities: vec![entity_state],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 10,
+                entities: vec![entity_state],
+            });
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -158,7 +164,8 @@ mod tests {
     fn client_input_in_schedule() {
         let mut world = setup_world(1);
 
-        world.resource_mut::<InboundQueue>().client_inputs.push((0,
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
             shared::protocol::ClientMessage::SpawnEntity {
                 position: [10.0, 0.0, 10.0],
                 entity_type: "npc".to_string(),
@@ -181,12 +188,14 @@ mod tests {
         spawn_from_entity_state_direct(&mut world, &state, true, None);
 
         let shadow = EntityState::new_npc(Vec3::X, ServerId(2));
-        spawn_from_entity_state_direct(&mut world, &shadow, false, Some(1));
+        spawn_from_entity_state_direct(&mut world, &shadow, false, Some((1, 1)));
 
         // Register a test client to verify client snapshot content
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -212,13 +221,15 @@ mod tests {
         let eid = shared::entity::EntityId::new();
 
         // Queue both spawn and move for same entity on same tick
-        world.resource_mut::<InboundQueue>().client_inputs.push((0,
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
             shared::protocol::ClientMessage::SpawnPlayer {
                 player_id: eid,
                 position: [0.0, 0.0, 0.0],
             },
         ));
-        world.resource_mut::<InboundQueue>().client_inputs.push((0,
+        world.resource_mut::<InboundQueue>().client_inputs.push((
+            0,
             shared::protocol::ClientMessage::MoveInput {
                 entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
@@ -251,20 +262,36 @@ mod tests {
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], shared::entity::ServerId(2)));
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world.resource_mut::<PendingTransfers>().transfers =
+            Some((vec![], shared::entity::ServerId(2)));
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
         schedule.run(&mut world);
 
         // Two-phase: transferred entities keep Authoritative + TransferOutbound
-        let auth_count = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
-        assert_eq!(auth_count, 10, "all entities should still be authoritative (two-phase)");
+        let auth_count = world
+            .query_filtered::<(), With<Authoritative>>()
+            .iter(&world)
+            .count();
+        assert_eq!(
+            auth_count, 10,
+            "all entities should still be authoritative (two-phase)"
+        );
 
         // Some should have TransferOutbound marker
-        let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
-        assert!(outbound_count > 0, "some entities should be marked for transfer");
+        let outbound_count = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
+        assert!(
+            outbound_count > 0,
+            "some entities should be marked for transfer"
+        );
 
         // Replication output includes TransferOutbound entities so peers maintain
         // up-to-date shadows for crash recovery.
@@ -284,12 +311,14 @@ mod tests {
         // Shadow entity that will be cleaned up this tick
         let shadow = EntityState::new_npc(Vec3::new(50.0, 0.0, 50.0), ServerId(2));
         let shadow_eid = shadow.id;
-        spawn_from_entity_state_direct(&mut world, &shadow, false, Some(0));
+        spawn_from_entity_state_direct(&mut world, &shadow, false, Some((0, 0)));
 
         // Register a test client to verify frame content
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         // Set tick well past stale threshold (SHADOW_STALE_TICKS = 300)
         world.resource_mut::<TickCounter>().0 = 400;
@@ -328,9 +357,13 @@ mod tests {
         });
 
         // ACK arrives at the same tick as the timeout would fire
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 12 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 12,
+            });
 
         // Set tick past timeout
         world.resource_mut::<TickCounter>().0 = 12;
@@ -340,12 +373,16 @@ mod tests {
 
         // Because process_transfer_acks runs BEFORE process_transfer_timeouts,
         // the ACK should have despawned the entity BEFORE timeout had a chance to retry.
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid),
-            "ACK should despawn the entity before timeout can retry it");
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&eid),
+            "ACK should despawn the entity before timeout can retry it"
+        );
 
         // No retry messages should have been sent
-        assert!(world.resource::<OutboundTransfers>().messages.is_empty(),
-            "no retry should be attempted because ACK was processed first");
+        assert!(
+            world.resource::<OutboundTransfers>().messages.is_empty(),
+            "no retry should be attempted because ACK was processed first"
+        );
     }
 
     // -- Schedule ordering: both ack + timeout run after drain_inbound_events --
@@ -371,14 +408,21 @@ mod tests {
         // Push both a peer update (inbound event) and a transfer ACK in the same tick
         let shadow_state = EntityState::new_npc(Vec3::new(50.0, 0.0, 50.0), ServerId(3));
         let shadow_eid = shadow_state.id;
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 12,
-            entities: vec![shadow_state],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 12,
+                entities: vec![shadow_state],
+            });
 
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 12 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 12,
+            });
 
         world.resource_mut::<TickCounter>().0 = 12;
 
@@ -387,11 +431,15 @@ mod tests {
 
         // Both should have been processed:
         // 1. Peer update creates the shadow (drain_inbound_events)
-        assert!(world.resource::<EntityLookup>().0.contains_key(&shadow_eid),
-            "shadow from peer update should exist");
+        assert!(
+            world.resource::<EntityLookup>().0.contains_key(&shadow_eid),
+            "shadow from peer update should exist"
+        );
         // 2. Transfer ACK despawns the entity (process_transfer_acks)
-        assert!(!world.resource::<EntityLookup>().0.contains_key(&eid),
-            "transfer ACK should have despawned entity");
+        assert!(
+            !world.resource::<EntityLookup>().0.contains_key(&eid),
+            "transfer ACK should have despawned entity"
+        );
     }
 
     // -- Schedule ordering: drain_client_events runs after transfer systems --
@@ -415,9 +463,13 @@ mod tests {
         });
 
         // ACK for the entity
-        world.resource_mut::<InboundQueue>().transfer_acks.push(
-            InboundTransferAck { entity_id: eid, tick: 5 }
-        );
+        world
+            .resource_mut::<InboundQueue>()
+            .transfer_acks
+            .push(InboundTransferAck {
+                entity_id: eid,
+                tick: 5,
+            });
 
         // Also register a new client (drain_client_events)
         let (tx, _rx) = tokio::sync::mpsc::channel::<crate::resources::ClientFrame>(8);
@@ -428,7 +480,7 @@ mod tests {
                 tx,
                 acked_tick: acked,
                 player_uuid: shared::entity::EntityId::new(),
-            }
+            },
         );
 
         world.resource_mut::<TickCounter>().0 = 5;
@@ -440,7 +492,10 @@ mod tests {
         assert!(!world.resource::<EntityLookup>().0.contains_key(&eid));
 
         // Client registered (drain_client_events ran after)
-        assert!(world.resource::<crate::resources::ClientRegistry>().clients.contains_key(&42));
+        assert!(world
+            .resource::<crate::resources::ClientRegistry>()
+            .clients
+            .contains_key(&42));
     }
 
     // -- Schedule integration: peer update + shadow cleanup race --
@@ -453,10 +508,13 @@ mod tests {
         let eid = entity_state.id;
 
         // Push peer update with current tick
-        world.resource_mut::<InboundQueue>().peer_updates.push(PeerUpdate {
-            tick: 100,
-            entities: vec![entity_state],
-        });
+        world
+            .resource_mut::<InboundQueue>()
+            .peer_updates
+            .push(PeerUpdate {
+                tick: 100,
+                entities: vec![entity_state],
+            });
 
         world.resource_mut::<TickCounter>().0 = 100;
 
@@ -482,8 +540,14 @@ mod tests {
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![shared::entity::ServerId(2)]);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<CoordEventQueue>()
+            .drain_directives
+            .push(vec![shared::entity::ServerId(2)]);
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -491,15 +555,28 @@ mod tests {
 
         // After first tick: drain active, entities have TransferOutbound, NOT yet shutdown
         assert!(world.resource::<DrainState>().0.is_some());
-        let outbound_count = world.query_filtered::<(), With<TransferOutbound>>().iter(&world).count();
-        assert_eq!(outbound_count, 3, "all 3 entities should have TransferOutbound");
-        assert!(!world.resource::<ShutdownRequested>().0, "should not shutdown yet (waiting for ACKs)");
+        let outbound_count = world
+            .query_filtered::<(), With<TransferOutbound>>()
+            .iter(&world)
+            .count();
+        assert_eq!(
+            outbound_count, 3,
+            "all 3 entities should have TransferOutbound"
+        );
+        assert!(
+            !world.resource::<ShutdownRequested>().0,
+            "should not shutdown yet (waiting for ACKs)"
+        );
 
         // Simulate ACKs arriving for all 3 entities
         for eid in &eids {
-            world.resource_mut::<InboundQueue>().transfer_acks.push(
-                InboundTransferAck { entity_id: *eid, tick: 2 }
-            );
+            world
+                .resource_mut::<InboundQueue>()
+                .transfer_acks
+                .push(InboundTransferAck {
+                    entity_id: *eid,
+                    tick: 2,
+                });
         }
 
         // Tick 2: ACKs processed, entities despawned, drain complete
@@ -508,22 +585,33 @@ mod tests {
         world.resource_mut::<OutboundTransfers>().messages.clear();
         schedule.run(&mut world);
 
-        let remaining = world.query_filtered::<(), With<Authoritative>>().iter(&world).count();
+        let remaining = world
+            .query_filtered::<(), With<Authoritative>>()
+            .iter(&world)
+            .count();
         assert_eq!(remaining, 0, "all entities should be despawned after ACKs");
-        assert!(world.resource::<ShutdownRequested>().0, "shutdown should be requested");
+        assert!(
+            world.resource::<ShutdownRequested>().0,
+            "shutdown should be requested"
+        );
     }
 
     #[test]
     fn coord_drain_timeout_forces_shutdown() {
-
         let mut world = setup_world(1);
         for _ in 0..2 {
             let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
 
-        world.resource_mut::<PeerAddresses>().0.insert(2, "127.0.0.1:9102".parse().unwrap());
-        world.resource_mut::<CoordEventQueue>().drain_directives.push(vec![shared::entity::ServerId(2)]);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<CoordEventQueue>()
+            .drain_directives
+            .push(vec![shared::entity::ServerId(2)]);
         world.resource_mut::<TickCounter>().0 = 1;
 
         let mut schedule = build_schedule();
@@ -537,7 +625,10 @@ mod tests {
         schedule.run(&mut world);
 
         // Should force shutdown even with pending transfers
-        assert!(world.resource::<ShutdownRequested>().0, "drain timeout should force shutdown");
+        assert!(
+            world.resource::<ShutdownRequested>().0,
+            "drain timeout should force shutdown"
+        );
     }
 
     // -- Schedule: empty world tick does not panic --
@@ -549,7 +640,9 @@ mod tests {
         // Register a test client to verify empty frame
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        world.resource_mut::<ClientRegistry>().register_from_event(1, tx, acked);
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -557,7 +650,10 @@ mod tests {
         schedule.run(&mut world);
 
         // Replication should be None (no entities)
-        assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
+        assert!(world
+            .resource::<OutboundReplication>()
+            .full_snapshot
+            .is_none());
         // Client snapshot should still produce a valid frame (0 entities) via test channel
         let frame = rx.try_recv().unwrap();
         assert_eq!(frame[0], 0x01);

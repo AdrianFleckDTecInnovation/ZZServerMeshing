@@ -317,7 +317,6 @@ async fn run_registry(
     }
 }
 
-
 const COORDINATOR_DASHBOARD: &str = include_str!("../static/dashboard.html");
 
 /// Build an HTTP response with standard headers.
@@ -399,9 +398,7 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             drop(r);
 
             let resp = match assignment {
-                Some(ws_url) => {
-                    json_response(200, &format!(r#"{{"ws_url":"{}"}}"#, ws_url))
-                }
+                Some(ws_url) => json_response(200, &format!(r#"{{"ws_url":"{}"}}"#, ws_url)),
                 None => json_response(503, r#"{"error":"no servers available"}"#),
             };
             let _ = stream.write_all(&resp).await;
@@ -409,9 +406,14 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         "/servers" => {
             let r = registry.read().await;
             let list = r.get_server_list();
+            let ttl_prunes = r.ttl_prunes_total();
             drop(r);
 
-            let body = serde_json::json!({ "servers": list }).to_string();
+            let body = serde_json::json!({
+                "servers": list,
+                "ttl_prunes_total": ttl_prunes,
+            })
+            .to_string();
             let _ = stream.write_all(&json_response(200, &body)).await;
         }
         "/dashboard" => {
@@ -428,7 +430,8 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 let server_info = r.get_server_list();
                 drop(r);
 
-                let host = server_info.iter()
+                let host = server_info
+                    .iter()
                     .find(|s| s["server_id"].as_u64() == Some(sid as u64))
                     .and_then(|s| s["host"].as_str())
                     .map(|h| h.to_string());
@@ -449,18 +452,32 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 let body = &resp[idx + 4..];
                                 let _ = stream.write_all(&json_response(200, body)).await;
                             } else {
-                                let _ = stream.write_all(&json_response(502, r#"{"error":"bad upstream response"}"#)).await;
+                                let _ = stream
+                                    .write_all(&json_response(
+                                        502,
+                                        r#"{"error":"bad upstream response"}"#,
+                                    ))
+                                    .await;
                             }
                         }
                         Err(_) => {
-                            let _ = stream.write_all(&json_response(502, r#"{"error":"upstream unreachable"}"#)).await;
+                            let _ = stream
+                                .write_all(&json_response(
+                                    502,
+                                    r#"{"error":"upstream unreachable"}"#,
+                                ))
+                                .await;
                         }
                     }
                 } else {
-                    let _ = stream.write_all(&json_response(404, r#"{"error":"unknown server"}"#)).await;
+                    let _ = stream
+                        .write_all(&json_response(404, r#"{"error":"unknown server"}"#))
+                        .await;
                 }
             } else {
-                let _ = stream.write_all(&json_response(400, r#"{"error":"invalid server id"}"#)).await;
+                let _ = stream
+                    .write_all(&json_response(400, r#"{"error":"invalid server id"}"#))
+                    .await;
             }
         }
         _ => {
@@ -480,14 +497,20 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                         Some("ico") => "image/x-icon",
                         _ => "application/octet-stream",
                     };
-                    let _ = stream.write_all(&http_response(200, content_type, &body)).await;
+                    let _ = stream
+                        .write_all(&http_response(200, content_type, &body))
+                        .await;
                 } else {
                     // SPA fallback: serve index.html for unknown paths
                     let index = dir.join("index.html");
                     if let Ok(body) = tokio::fs::read(&index).await {
-                        let _ = stream.write_all(&http_response(200, "text/html", &body)).await;
+                        let _ = stream
+                            .write_all(&http_response(200, "text/html", &body))
+                            .await;
                     } else {
-                        let _ = stream.write_all(&http_response(404, "text/plain", b"Not Found")).await;
+                        let _ = stream
+                            .write_all(&http_response(404, "text/plain", b"Not Found"))
+                            .await;
                     }
                 }
             } else {
@@ -513,7 +536,11 @@ async fn run_assignment_server(
         .await
         .expect("Failed to bind HTTP assignment port");
     let static_dir = static_dir.map(Arc::new);
-    let scheme = if tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+    let scheme = if tls_acceptor.is_some() {
+        "HTTPS"
+    } else {
+        "HTTP"
+    };
     if let Some(ref dir) = static_dir {
         tracing::info!("Client assignment {scheme} on port {port} (serving client from {dir:?})");
     } else {

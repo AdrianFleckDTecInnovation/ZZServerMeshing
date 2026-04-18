@@ -40,7 +40,10 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
 
             if path == "/metrics" {
                 // JSON metrics
-                let snapshot = collector.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+                let snapshot = collector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .snapshot();
                 let body = match serde_json::to_string_pretty(&snapshot) {
                     Ok(b) => b,
                     Err(_) => return,
@@ -49,7 +52,8 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                      Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
                      Connection: close\r\n\r\n{}",
-                    body.len(), body
+                    body.len(),
+                    body
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             } else {
@@ -57,7 +61,8 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    DASHBOARD_HTML.len(), DASHBOARD_HTML
+                    DASHBOARD_HTML.len(),
+                    DASHBOARD_HTML
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             }
