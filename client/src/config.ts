@@ -29,7 +29,7 @@ export const NETCODE = {
 // ── Gameplay ──
 
 export const GAMEPLAY = {
-  /** Player movement speed (units/second). MUST MATCH: crates/sim-server/src/systems.rs PLAYER_SPEED */
+  /** Player movement speed (units/second). Must match PLAYER_SPEED in crates/shared/src/tick.rs */
   PLAYER_SPEED: 5.0,
   /** Maximum pending unacknowledged inputs before dropping oldest */
   MAX_PENDING_INPUTS: 128,

@@ -17,14 +17,32 @@ export interface PhaseMetrics {
   total_ms: Percentiles;
 }
 
+export interface PeerHealthSnapshot {
+  latest_tick: number;
+  staleness_ticks: number;
+  packets_received: number;
+  chunk_evictions: number;
+  /**
+   * Most recently observed session id for this peer (WI-136). The server emits
+   * a u64 decimal number in JSON, but JavaScript `Number` only has 53 bits of
+   * precision. The runner re-parses the raw JSON with a precision-safe regex
+   * and delivers this as a decimal string so scenarios can compare exactly.
+   */
+  session_id: string;
+}
+
 export interface ServerMetrics {
   server_id: number;
+  /** Local sim-server session id (WI-136). See PeerHealthSnapshot.session_id for precision notes. */
+  session_id?: string;
   tick: number;
   entity_count: number;
   shadow_count: number;
   peer_count: number;
   tick_budget_pct: number;
   phases: PhaseMetrics;
+  /** Per-peer network health map (WI-103, WI-136). Keyed by peer server_id as a string. */
+  peer_health?: Record<string, PeerHealthSnapshot>;
 }
 
 // ── Gateway snapshot ──

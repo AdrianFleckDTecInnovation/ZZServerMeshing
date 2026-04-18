@@ -144,7 +144,6 @@ export class NetworkClient {
               type: 'WorldSnapshot',
               tick: frame.tick,
               entities: frame.entities,
-              _metrics: frame.metrics,
             });
           } else {
             diag.deltaFrames++;
@@ -156,7 +155,7 @@ export class NetworkClient {
             if (frameRemovals > 0) {
               console.warn(`[DELTA] tick=${frame.tick} +${frameUpdates} -${frameRemovals} removals: ${frame.removals.slice(0, 3).map(id => id.substring(0, 8)).join(', ')}${frameRemovals > 3 ? '...' : ''}`);
             }
-            this.worldView.applyDelta(frame.tick, frame.entities, frame.removals, frame.metrics);
+            this.worldView.applyDelta(frame.tick, frame.entities, frame.removals);
           }
           diag.applied++;
 

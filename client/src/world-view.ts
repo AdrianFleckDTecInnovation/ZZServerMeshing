@@ -18,14 +18,6 @@ export interface WorldSnapshot {
   type: 'WorldSnapshot';
   tick: number;
   entities: RawEntity[];
-  _metrics?: GatewayMetrics;
-}
-
-export interface GatewayMetrics {
-  snapshotsPerSec: number;
-  bandwidthKBps: number;
-  rebalanceEvents: number;
-  serverCount: number;
 }
 
 type Vec3Like = [number, number, number] | { x: number; y: number; z: number };
@@ -54,8 +46,6 @@ export class WorldView {
   currentTick: number = 0;
   serverEntityCounts: Map<number, number> = new Map();
   localPlayerId: string | null = null;
-  metrics: GatewayMetrics | null = null;
-
   /** Measured interval between snapshots (adapts to actual network rate) */
   private measuredIntervalMs: number = 100;
   private prevSnapshotTime: number = 0;
@@ -101,10 +91,6 @@ export class WorldView {
       // Run interpolation one last time before applying new data
       // so entity.position reflects what was actually rendered
       this.interpolate(0);
-    }
-
-    if (snapshot._metrics) {
-      this.metrics = snapshot._metrics;
     }
 
     const incomingIds = new Set<string>();
@@ -184,14 +170,10 @@ export class WorldView {
   /** Apply a delta frame: update changed entities, remove deleted ones.
    *  Only resets lastUpdateTime for entities present in the delta's update list.
    *  Unchanged entities continue interpolating with their existing timer. */
-  applyDelta(tick: number, updates: RawEntity[], removals: string[], metrics?: GatewayMetrics): void {
+  applyDelta(tick: number, updates: RawEntity[], removals: string[]): void {
     if (tick === this.currentTick) return;
     this.currentTick = tick;
     const now = performance.now();
-
-    if (metrics) {
-      this.metrics = metrics;
-    }
 
     // Apply updates (new or changed entities)
     for (const raw of updates) {

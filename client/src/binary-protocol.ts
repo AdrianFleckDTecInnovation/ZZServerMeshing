@@ -18,7 +18,7 @@
  *   [uuid:16][pos:3×f32][vel:3×f32][type:u8][authority:u16][last_input_seq:u32]
  */
 
-import type { WorldSnapshot, RawEntity, GatewayMetrics } from './world-view';
+import type { WorldSnapshot, RawEntity } from './world-view';
 import { PROTOCOL } from './config';
 
 // Pre-allocated hex lookup table
@@ -59,19 +59,9 @@ function readEntity(view: DataView, bytes: Uint8Array, offset: number): RawEntit
   };
 }
 
-function readMetrics(view: DataView, offset: number): GatewayMetrics {
-  return {
-    snapshotsPerSec: view.getUint32(offset, true),
-    bandwidthKBps: view.getUint32(offset + 4, true),
-    rebalanceEvents: view.getUint32(offset + 8, true),
-    serverCount: view.getUint16(offset + 12, true),
-  };
-}
-
 export interface BinaryFrame {
   type: 'full' | 'delta';
   tick: number;
-  metrics: GatewayMetrics;
   /** Full snapshot: all entities. Delta: only updated entities. */
   entities: RawEntity[];
   /** Delta only: IDs of removed entities. */
@@ -90,7 +80,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
     const tickHigh = view.getUint32(5, true);
     const tick = tickLow + tickHigh * 0x100000000;
     const entityCount = view.getUint32(9, true);
-    const metrics = readMetrics(view, 13);
+    // Skip 14 bytes of legacy metrics (offset 13-26) for protocol stability
 
     const entities: RawEntity[] = new Array(entityCount);
     let offset = PROTOCOL.FULL_HEADER_SIZE;
@@ -99,7 +89,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
       offset += PROTOCOL.ENTITY_SIZE;
     }
 
-    return { type: 'full', tick, metrics, entities, removals: [] };
+    return { type: 'full', tick, entities, removals: [] };
   }
 
   if (frameType === PROTOCOL.FRAME_DELTA) {
@@ -108,7 +98,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
     const tick = tickLow + tickHigh * 0x100000000;
     const updateCount = view.getUint32(9, true);
     const removalCount = view.getUint32(13, true);
-    const metrics = readMetrics(view, 17);
+    // Skip 14 bytes of legacy metrics (offset 17-30) for protocol stability
 
     const entities: RawEntity[] = new Array(updateCount);
     let offset = PROTOCOL.DELTA_HEADER_SIZE;
@@ -123,7 +113,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
       offset += 16;
     }
 
-    return { type: 'delta', tick, metrics, entities, removals };
+    return { type: 'delta', tick, entities, removals };
   }
 
   return null;
@@ -135,6 +125,5 @@ export function frameToSnapshot(frame: BinaryFrame): WorldSnapshot {
     type: 'WorldSnapshot',
     tick: frame.tick,
     entities: frame.entities,
-    _metrics: frame.metrics,
   };
 }

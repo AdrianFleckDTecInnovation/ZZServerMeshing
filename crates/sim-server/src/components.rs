@@ -16,7 +16,7 @@ pub struct Velocity(pub Vec3);
 
 /// What kind of entity this is.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntityKind(pub EntityType);
+pub struct EntityTypeComp(pub EntityType);
 
 /// Which server is authoritative for this entity.
 #[derive(Component, Debug, Clone, Copy)]
@@ -29,7 +29,13 @@ pub struct Authoritative;
 /// Marker + data: this is a shadow copy from a peer server.
 #[derive(Component, Debug)]
 pub struct Shadow {
-    pub last_seen_tick: u64,
+    /// Peer's tick from the most-recent accepted EntityStateUpdate. Used by
+    /// the inbound stale-packet guard. Zeroed on peer session reset (WI-135).
+    pub last_peer_tick: u64,
+    /// This server's TickCounter when the shadow was last refreshed. Used by
+    /// shadow_cleanup for wall-clock TTL. Never zeroed on peer session reset
+    /// (design 015: local clock domain is continuous across peer restarts).
+    pub last_local_tick: u64,
 }
 
 /// Last acknowledged input sequence number. Only present on player entities.
@@ -64,7 +70,7 @@ mod tests {
                 NetworkId(eid),
                 Position(Vec3::new(10.0, 0.0, -20.0)),
                 Velocity(Vec3::new(1.0, 0.0, 0.0)),
-                EntityKind(EntityType::Npc),
+                EntityTypeComp(EntityType::Npc),
                 AuthorityServer(ServerId(1)),
                 Authoritative,
             ))
@@ -75,7 +81,7 @@ mod tests {
         assert_eq!(pos.0, Vec3::new(10.0, 0.0, -20.0));
         let vel = world.get::<Velocity>(entity).unwrap();
         assert_eq!(vel.0, Vec3::new(1.0, 0.0, 0.0));
-        let kind = world.get::<EntityKind>(entity).unwrap();
+        let kind = world.get::<EntityTypeComp>(entity).unwrap();
         assert_eq!(kind.0, EntityType::Npc);
         let auth = world.get::<AuthorityServer>(entity).unwrap();
         assert_eq!(auth.0, ServerId(1));
@@ -93,7 +99,7 @@ mod tests {
             NetworkId(EntityId::new()),
             Position(Vec3::ZERO),
             Velocity(Vec3::ZERO),
-            EntityKind(EntityType::Npc),
+            EntityTypeComp(EntityType::Npc),
             AuthorityServer(ServerId(1)),
             Authoritative,
         ));
@@ -103,9 +109,12 @@ mod tests {
             NetworkId(EntityId::new()),
             Position(Vec3::X),
             Velocity(Vec3::ZERO),
-            EntityKind(EntityType::Npc),
+            EntityTypeComp(EntityType::Npc),
             AuthorityServer(ServerId(2)),
-            Shadow { last_seen_tick: 10 },
+            Shadow {
+                last_peer_tick: 10,
+                last_local_tick: 10,
+            },
         ));
 
         // With<Authoritative> filter
@@ -130,7 +139,7 @@ mod tests {
             NetworkId(EntityId::new()),
             Position(Vec3::ZERO),
             Velocity(Vec3::ZERO),
-            EntityKind(EntityType::Npc),
+            EntityTypeComp(EntityType::Npc),
             AuthorityServer(ServerId(1)),
             Authoritative,
         ));
@@ -140,13 +149,13 @@ mod tests {
             NetworkId(EntityId::new()),
             Position(Vec3::ZERO),
             Velocity(Vec3::ZERO),
-            EntityKind(EntityType::Player),
+            EntityTypeComp(EntityType::Player),
             AuthorityServer(ServerId(1)),
             Authoritative,
             LastInputSeq(42),
         ));
 
-        let mut query = world.query::<(&EntityKind, Option<&LastInputSeq>)>();
+        let mut query = world.query::<(&EntityTypeComp, Option<&LastInputSeq>)>();
         let results: Vec<_> = query.iter(&world).collect();
         assert_eq!(results.len(), 2);
 
@@ -170,7 +179,7 @@ mod tests {
                 NetworkId(eid),
                 Position(Vec3::ZERO),
                 Velocity(Vec3::ZERO),
-                EntityKind(EntityType::Npc),
+                EntityTypeComp(EntityType::Npc),
                 AuthorityServer(ServerId(1)),
                 Authoritative,
                 TransferOutbound {
@@ -197,13 +206,17 @@ mod tests {
                 NetworkId(EntityId::new()),
                 Position(Vec3::ZERO),
                 Velocity(Vec3::ZERO),
-                EntityKind(EntityType::Npc),
+                EntityTypeComp(EntityType::Npc),
                 AuthorityServer(ServerId(2)),
-                Shadow { last_seen_tick: 99 },
+                Shadow {
+                    last_peer_tick: 99,
+                    last_local_tick: 99,
+                },
             ))
             .id();
 
         let shadow = world.get::<Shadow>(entity).unwrap();
-        assert_eq!(shadow.last_seen_tick, 99);
+        assert_eq!(shadow.last_peer_tick, 99);
+        assert_eq!(shadow.last_local_tick, 99);
     }
 }

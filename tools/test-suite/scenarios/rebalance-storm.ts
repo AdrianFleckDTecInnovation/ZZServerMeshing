@@ -26,21 +26,27 @@ export const rebalanceStorm: Scenario = {
     const baselineTotal = baseline.reduce((sum, m) => sum + m.entity_count, 0);
     details.push(`Baseline: ${baselineTotal} entities`);
 
-    // Pick server 1 to overload — get its URL from coordinator or derive from ctx
-    const targetServer = 1;
+    // Pick an alive server to overload — query coordinator for registered servers
     const wsProto = ctx.serverUrl.startsWith('wss') ? 'wss' : 'ws';
     const wsOpts = wsProto === 'wss' ? { rejectUnauthorized: false } : {};
 
-    // Try to get the actual server URL from coordinator (handles distributed clusters)
+    let targetServer: number;
     let directUrl: string;
     try {
       const coordUrl = process.env.COORDINATOR_URL ||
         ctx.serverUrl.replace(/^wss?/, ctx.serverUrl.startsWith('wss') ? 'https' : 'http').replace(/:\d+$/, ':7871');
       const resp = await fetch(`${coordUrl}/servers`);
       const data: { servers: { server_id: number; host: string; ws_port: number }[] } = await resp.json();
-      const s1 = data.servers.find(s => s.server_id === targetServer);
-      directUrl = s1 ? `${wsProto}://${s1.host}:${s1.ws_port}` : `${wsProto}://localhost:${7877 + targetServer}`;
+      if (data.servers.length === 0) {
+        return { name: 'rebalance-storm', status: 'fail', summary: 'No servers registered with coordinator', details, durationMs: 0 };
+      }
+      // Pick the first registered server
+      const target = data.servers[0];
+      targetServer = target.server_id;
+      directUrl = `${wsProto}://${target.host}:${target.ws_port}`;
     } catch {
+      // Fallback: try server 1
+      targetServer = 1;
       const parsedUrl = new URL(ctx.serverUrl.replace(/^ws/, 'http'));
       directUrl = `${wsProto}://${parsedUrl.hostname}:${7877 + targetServer}`;
     }
@@ -48,11 +54,22 @@ export const rebalanceStorm: Scenario = {
     ctx.log(`Dumping ${DUMP_COUNT} entities on S${targetServer} (${directUrl})...`);
 
     // Connect directly to the sim-server to bypass server round-robin
-    const directWs = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(directUrl, wsOpts);
-      ws.on('open', () => resolve(ws));
-      ws.on('error', reject);
-    });
+    let directWs: WebSocket;
+    try {
+      directWs = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(directUrl, wsOpts);
+        ws.on('open', () => resolve(ws));
+        ws.on('error', reject);
+      });
+    } catch (err) {
+      return {
+        name: 'rebalance-storm',
+        status: 'fail',
+        summary: `Cannot connect to S${targetServer} at ${directUrl} — server may be down`,
+        details: [...details, `Connection error: ${err}`],
+        durationMs: 0,
+      };
+    }
 
     for (let i = 0; i < DUMP_COUNT; i++) {
       const x = (Math.random() - 0.5) * 800;

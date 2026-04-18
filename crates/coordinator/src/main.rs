@@ -80,7 +80,7 @@ async fn main() {
     // Build TLS config if cert+key provided
     let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
         (Some(cert_path), Some(key_path)) => {
-            let acceptor = build_tls_acceptor(cert_path, key_path)
+            let acceptor = shared::tls::build_tls_acceptor(cert_path, key_path)
                 .expect("Failed to build TLS config from provided cert/key");
             tracing::info!(
                 "TLS enabled for HTTP server (cert={}, key={})",
@@ -166,19 +166,20 @@ async fn handle_server_connection(
                     tls,
                     protocol_version,
                 }) => {
+                    let sid_raw = sid.0;
                     if protocol_version != shared::PROTOCOL_VERSION && protocol_version != 0 {
                         tracing::warn!(
-                            server_id = sid,
+                            server_id = sid_raw,
                             wire = protocol_version,
                             expected = shared::PROTOCOL_VERSION,
-                            "Protocol version mismatch from S{sid}"
+                            "Protocol version mismatch from S{sid_raw}"
                         );
                     }
                     // Use advertised host if provided, otherwise use the peer's source IP
                     let resolved_host = host.unwrap_or_else(|| addr.ip().to_string());
-                    server_id = Some(sid);
+                    server_id = Some(sid_raw);
                     let _ = event_tx.send(RegistryEvent::Register {
-                        server_id: sid,
+                        server_id: sid_raw,
                         udp_port,
                         ws_port,
                         host: Some(resolved_host),
@@ -192,13 +193,13 @@ async fn handle_server_connection(
                     weighted_load,
                 }) => {
                     let _ = event_tx.send(RegistryEvent::Heartbeat {
-                        server_id: sid,
+                        server_id: sid.0,
                         entity_count,
                         weighted_load,
                     });
                 }
                 Ok(CoordClientMsg::Draining { server_id: sid }) => {
-                    let _ = event_tx.send(RegistryEvent::Draining { server_id: sid });
+                    let _ = event_tx.send(RegistryEvent::Draining { server_id: sid.0 });
                 }
                 Ok(CoordClientMsg::TransferResult {
                     entity_id: _,
@@ -208,7 +209,7 @@ async fn handle_server_connection(
                     if let Some(sid) = server_id {
                         let _ = event_tx.send(RegistryEvent::TransferResult {
                             server_id: sid,
-                            target_server,
+                            target_server: target_server.0,
                             success,
                         });
                     }
@@ -222,8 +223,8 @@ async fn handle_server_connection(
                     // requires the SQLite persistence layer (not yet built).
                     tracing::info!(
                         account_id,
-                        from_server,
-                        to_server,
+                        from_server = from_server.0,
+                        to_server = to_server.0,
                         "Player transfer request (persistence not yet implemented)"
                     );
                 }
@@ -316,263 +317,36 @@ async fn run_registry(
     }
 }
 
-/// Build a tokio-rustls TLS acceptor from PEM certificate and key files.
-fn build_tls_acceptor(
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
-    use rustls::pki_types::PrivateKeyDer;
-    use std::io::BufReader;
+const COORDINATOR_DASHBOARD: &str = include_str!("../static/dashboard.html");
 
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| format!("Failed to open cert file {}: {e}", cert_path.display()))?;
-    let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to parse certs: {e}"))?;
-    if certs.is_empty() {
-        return Err("No certificates found in cert file".into());
-    }
-
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| format!("Failed to open key file {}: {e}", key_path.display()))?;
-    let mut key_reader = BufReader::new(key_file);
-    let key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("Failed to parse private key: {e}"))?
-        .ok_or("No private key found in key file")?;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("Failed to build TLS config: {e}"))?;
-
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+/// Build an HTTP response with standard headers.
+fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let status_text = match status {
+        200 => "200 OK",
+        204 => "204 No Content",
+        400 => "400 Bad Request",
+        404 => "404 Not Found",
+        502 => "502 Bad Gateway",
+        503 => "503 Service Unavailable",
+        _ => "500 Internal Server Error",
+    };
+    let mut resp = format!(
+        "HTTP/1.1 {status_text}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(body);
+    resp
 }
 
-const COORDINATOR_DASHBOARD: &str = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mesh Coordinator</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0a; color: #0f0; font-family: 'Courier New', monospace; padding: 20px; }
-  h1 { font-size: 18px; margin-bottom: 16px; text-shadow: 0 0 6px rgba(0,255,0,0.4); }
-  .summary { display: flex; gap: 24px; margin-bottom: 20px; font-size: 14px; }
-  .summary .item { background: #111; border: 1px solid #1a1a1a; border-radius: 6px; padding: 14px 20px; text-align: center; }
-  .summary .value { font-size: 32px; font-weight: bold; }
-  .summary .label { font-size: 11px; color: #666; margin-top: 4px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 20px; }
-  .card { background: #111; border: 1px solid #1a1a1a; border-radius: 6px; padding: 16px; }
-  .card.offline { border-color: #f44; opacity: 0.5; }
-  .card h3 { font-size: 14px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-  .card h3 a { color: #4fc3f7; text-decoration: none; font-size: 11px; }
-  .card h3 a:hover { text-decoration: underline; }
-  .card .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; font-size: 12px; }
-  .card .stat-val { font-size: 20px; font-weight: bold; }
-  .card .stat-lbl { color: #666; font-size: 10px; }
-  .gauge-sm { width: 80px; height: 80px; margin: 0 auto 8px; }
-  .phase-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 10px; background: #1a1a1a; }
-  .phase-bar div { height: 100%; transition: width 0.3s; }
-  .phase-legend { display: flex; gap: 10px; margin-top: 6px; font-size: 10px; color: #888; flex-wrap: wrap; }
-  .phase-legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
-  .tick-sync { font-size: 12px; color: #888; margin-top: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
-  .dot.ok { background: #0f0; box-shadow: 0 0 4px #0f0; }
-  .dot.warn { background: #ffb74d; box-shadow: 0 0 4px #ffb74d; }
-  .dot.bad { background: #f44; box-shadow: 0 0 4px #f44; }
-  #error { color: #f44; font-size: 12px; margin-top: 8px; }
-</style>
-</head>
-<body>
-<h1>Mesh Coordinator</h1>
-
-<div class="summary">
-  <div class="item"><div class="value" id="server-count">-</div><div class="label">Servers</div></div>
-  <div class="item"><div class="value" id="total-entities">-</div><div class="label">Total Entities</div></div>
-  <div class="item"><div class="value" id="total-shadows">-</div><div class="label">Total Shadows</div></div>
-  <div class="item"><div class="value" id="tick-drift">-</div><div class="label">Tick Drift</div></div>
-</div>
-
-<div class="grid" id="cards"></div>
-<div id="error"></div>
-
-<script>
-const PHASE_COLORS = {
-  input_drain_ms: '#4fc3f7',
-  simulation_ms: '#81c784',
-  transfers_ms: '#ffb74d',
-  replication_ms: '#ba68c8',
-  shadow_cleanup_ms: '#e57373',
-};
-const PHASE_LABELS = {
-  input_drain_ms: 'Input',
-  simulation_ms: 'Sim',
-  transfers_ms: 'Transfer',
-  replication_ms: 'Repl',
-  shadow_cleanup_ms: 'Shadow',
-};
-
-let servers = [];
-
-function drawGaugeSm(canvas, pct) {
-  const ctx = canvas.getContext('2d');
-  const cx = 40, cy = 40, r = 32;
-  ctx.clearRect(0, 0, 80, 80);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0.75 * Math.PI, 0.25 * Math.PI);
-  ctx.lineWidth = 8; ctx.strokeStyle = '#1a1a1a'; ctx.stroke();
-  const span = 1.5 * Math.PI;
-  const end = 0.75 * Math.PI + span * Math.min(pct / 100, 1);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0.75 * Math.PI, end);
-  ctx.lineWidth = 8; ctx.lineCap = 'round';
-  ctx.strokeStyle = pct < 50 ? '#0f0' : pct < 80 ? '#ffb74d' : '#f44';
-  ctx.stroke();
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px Courier New';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(pct.toFixed(0) + '%', cx, cy);
+/// Convenience wrapper for JSON HTTP responses.
+fn json_response(status: u16, body: &str) -> Vec<u8> {
+    http_response(status, "application/json", body.as_bytes())
 }
-
-function renderCard(s, metrics) {
-  const offline = !metrics;
-  const m = metrics || {};
-  const budget = m.tick_budget_pct ?? 0;
-  const phases = m.phases || {};
-  const totalMs = phases.total_ms?.p95 ?? 0;
-
-  // Phase bar widths
-  let phaseBar = '';
-  let legend = '';
-  const budgetMs = 50;
-  for (const [key, color] of Object.entries(PHASE_COLORS)) {
-    const val = phases[key]?.p95 ?? 0;
-    const pct = (val / budgetMs) * 100;
-    phaseBar += `<div style="width:${pct}%;background:${color}"></div>`;
-    legend += `<span style="--c:${color}"><span style="background:${color};width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:3px;vertical-align:middle"></span>${PHASE_LABELS[key]} ${val.toFixed(1)}ms</span>`;
-  }
-
-  const peerCount = m.peer_count ?? 0;
-  const clientCount = m.connected_clients ?? 0;
-  const peerStatus = peerCount > 0
-    ? `<span class="dot ok"></span>${peerCount} peer${peerCount > 1 ? 's' : ''}`
-    : `<span class="dot bad"></span>No peers`;
-  const clientStatus = `${clientCount} client${clientCount !== 1 ? 's' : ''}`;
-
-  // Replication info
-  const replMode = m.replication_mode ?? '-';
-  const replHot = m.replication_hot_count ?? 0;
-  const replCold = m.replication_cold_count ?? 0;
-  const replFull = m.replication_full_count ?? 0;
-  const replSaved = replFull > 0 ? Math.round((1 - (replHot + replCold) / replFull) * 100) : 0;
-
-  // Network health
-  const replDrops = m.udp_repl_drops ?? 0;
-  const ctrlDrops = m.udp_ctrl_drops ?? 0;
-  const bytesOut = m.udp_bytes_out ?? 0;
-  const bytesKB = (bytesOut / 1024).toFixed(1);
-  const dropDot = ctrlDrops > 0 ? 'bad' : replDrops > 0 ? 'warn' : 'ok';
-
-  // Per-peer health rows
-  const peerHealth = m.peer_health || {};
-  let peerRows = '';
-  for (const [pid, ph] of Object.entries(peerHealth)) {
-    const staleDot = ph.staleness_ticks > 20 ? 'bad' : ph.staleness_ticks > 5 ? 'warn' : 'ok';
-    const rxRate = ph.packets_received ?? 0;
-    const evictions = ph.chunk_evictions ?? 0;
-    peerRows += `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #1a1a1a">
-      <span><span class="dot ${staleDot}"></span>S${pid}</span>
-      <span style="color:#888">${ph.staleness_ticks}t stale</span>
-      <span style="color:#888">${rxRate} rx/5s</span>
-      <span style="color:${evictions > 0 ? '#f44' : '#888'}">${evictions} evict</span>
-    </div>`;
-  }
-
-  return `<div class="card${offline ? ' offline' : ''}">
-    <h3>
-      <span>${offline ? '<span class="dot bad"></span>' : '<span class="dot ok"></span>'} S${s.server_id} — ${s.host}</span>
-      <a href="http://${s.host}:${s.metrics_port}/" target="_blank">dashboard ↗</a>
-    </h3>
-    <div style="display:flex;align-items:center;gap:16px">
-      <canvas class="gauge-sm" id="gauge-${s.server_id}" width="80" height="80"></canvas>
-      <div class="stats" style="flex:1">
-        <div><div class="stat-val">${m.entity_count ?? '-'}</div><div class="stat-lbl">Auth</div></div>
-        <div><div class="stat-val">${m.shadow_count ?? '-'}</div><div class="stat-lbl">Shadow</div></div>
-        <div><div class="stat-val">${m.tick ?? '-'}</div><div class="stat-lbl">Tick</div></div>
-      </div>
-    </div>
-    <div style="font-size:12px;margin-top:8px">${peerStatus} · ${clientStatus} · p95: ${totalMs.toFixed(1)}ms</div>
-    <div style="font-size:11px;margin-top:6px;color:#888">
-      Repl: <span style="color:#0f0">${replMode}</span> · hot:${replHot} cold:${replCold} / ${replFull} (${replSaved}% saved)
-    </div>
-    <div style="font-size:11px;margin-top:4px;color:#888">
-      UDP: <span class="dot ${dropDot}"></span>repl:${replDrops} ctrl:${ctrlDrops} drops · ${bytesKB}KB/tick
-    </div>
-    ${peerRows ? `<div style="font-size:11px;margin-top:8px"><div style="color:#666;margin-bottom:4px">Peer Health</div>${peerRows}</div>` : ''}
-    <div class="phase-bar">${phaseBar}</div>
-    <div class="phase-legend">${legend}</div>
-  </div>`;
-}
-
-async function fetchServers() {
-  try {
-    const res = await fetch('/servers');
-    servers = (await res.json()).servers || [];
-  } catch (e) {
-    document.getElementById('error').textContent = 'Failed to fetch server list: ' + e.message;
-  }
-}
-
-async function poll() {
-  if (servers.length === 0) await fetchServers();
-
-  const results = await Promise.all(servers.map(async (s) => {
-    try {
-      const res = await fetch(`/metrics/${s.server_id}`, { signal: AbortSignal.timeout(3000) });
-      return { server: s, metrics: await res.json() };
-    } catch {
-      return { server: s, metrics: null };
-    }
-  }));
-
-  // Summary
-  let totalEntities = 0, totalShadows = 0, ticks = [];
-  for (const { metrics: m } of results) {
-    if (m) {
-      totalEntities += m.entity_count;
-      totalShadows += m.shadow_count;
-      ticks.push(m.tick);
-    }
-  }
-  const drift = ticks.length > 1 ? Math.max(...ticks) - Math.min(...ticks) : 0;
-
-  document.getElementById('server-count').textContent = servers.length;
-  document.getElementById('total-entities').textContent = totalEntities;
-  document.getElementById('total-shadows').textContent = totalShadows;
-  const driftEl = document.getElementById('tick-drift');
-  driftEl.textContent = drift;
-  driftEl.style.color = drift < 5 ? '#0f0' : drift < 20 ? '#ffb74d' : '#f44';
-
-  // Cards
-  document.getElementById('cards').innerHTML = results.map(r => renderCard(r.server, r.metrics)).join('');
-
-  // Draw gauges after DOM update
-  for (const { server: s, metrics: m } of results) {
-    const canvas = document.getElementById(`gauge-${s.server_id}`);
-    if (canvas) drawGaugeSm(canvas, m?.tick_budget_pct ?? 0);
-  }
-
-  document.getElementById('error').textContent = '';
-}
-
-// Refresh server list every 10s, metrics every 1s
-fetchServers().then(() => poll());
-setInterval(poll, 1000);
-setInterval(fetchServers, 10000);
-</script>
-</body>
-</html>"##;
 
 /// Handle a single HTTP request on a stream that implements AsyncRead + AsyncWrite.
 /// This contains all the routing logic, shared between plain TCP and TLS connections.
@@ -623,46 +397,29 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             let assignment = r.get_least_loaded_ws_addr(client_host.as_deref());
             drop(r);
 
-            let (status, body) = match assignment {
-                Some(ws_url) => (
-                    "200 OK",
-                    format!(r#"{{"ws_url":"{}"}}"#, ws_url),
-                ),
-                None => (
-                    "503 Service Unavailable",
-                    r#"{"error":"no servers available"}"#.to_string(),
-                ),
+            let resp = match assignment {
+                Some(ws_url) => json_response(200, &format!(r#"{{"ws_url":"{}"}}"#, ws_url)),
+                None => json_response(503, r#"{"error":"no servers available"}"#),
             };
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                 Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-                 Connection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(&resp).await;
         }
         "/servers" => {
             let r = registry.read().await;
             let list = r.get_server_list();
+            let ttl_prunes = r.ttl_prunes_total();
             drop(r);
 
-            let body = serde_json::json!({ "servers": list }).to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                 Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-                 Connection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
+            let body = serde_json::json!({
+                "servers": list,
+                "ttl_prunes_total": ttl_prunes,
+            })
+            .to_string();
+            let _ = stream.write_all(&json_response(200, &body)).await;
         }
         "/dashboard" => {
             // Always serve coordinator dashboard at /dashboard
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
+            let resp = http_response(200, "text/html", COORDINATOR_DASHBOARD.as_bytes());
+            let _ = stream.write_all(&resp).await;
         }
         _ if path.starts_with("/metrics/") => {
             // Proxy metrics from sim-servers so the HTTPS dashboard can fetch them
@@ -673,7 +430,8 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 let server_info = r.get_server_list();
                 drop(r);
 
-                let host = server_info.iter()
+                let host = server_info
+                    .iter()
                     .find(|s| s["server_id"].as_u64() == Some(sid as u64))
                     .and_then(|s| s["host"].as_str())
                     .map(|h| h.to_string());
@@ -692,50 +450,34 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             let resp = String::from_utf8_lossy(&buf);
                             if let Some(idx) = resp.find("\r\n\r\n") {
                                 let body = &resp[idx + 4..];
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                                     Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-                                     Connection: close\r\n\r\n{body}",
-                                    body.len()
-                                );
-                                let _ = stream.write_all(response.as_bytes()).await;
+                                let _ = stream.write_all(&json_response(200, body)).await;
                             } else {
-                                let body = r#"{"error":"bad upstream response"}"#;
-                                let response = format!(
-                                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\n\
-                                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                    body.len()
-                                );
-                                let _ = stream.write_all(response.as_bytes()).await;
+                                let _ = stream
+                                    .write_all(&json_response(
+                                        502,
+                                        r#"{"error":"bad upstream response"}"#,
+                                    ))
+                                    .await;
                             }
                         }
                         Err(_) => {
-                            let body = r#"{"error":"upstream unreachable"}"#;
-                            let response = format!(
-                                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\n\
-                                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
-                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = stream
+                                .write_all(&json_response(
+                                    502,
+                                    r#"{"error":"upstream unreachable"}"#,
+                                ))
+                                .await;
                         }
                     }
                 } else {
-                    let body = r#"{"error":"unknown server"}"#;
-                    let response = format!(
-                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream
+                        .write_all(&json_response(404, r#"{"error":"unknown server"}"#))
+                        .await;
                 }
             } else {
-                let body = r#"{"error":"invalid server id"}"#;
-                let response = format!(
-                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream
+                    .write_all(&json_response(400, r#"{"error":"invalid server id"}"#))
+                    .await;
             }
         }
         _ => {
@@ -755,40 +497,26 @@ async fn handle_http_request<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                         Some("ico") => "image/x-icon",
                         _ => "application/octet-stream",
                     };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
-                         Access-Control-Allow-Origin: *\r\n\
-                         Cache-Control: no-cache, no-store, must-revalidate\r\n\
-                         Content-Length: {}\r\n\
-                         Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.write_all(&body).await;
+                    let _ = stream
+                        .write_all(&http_response(200, content_type, &body))
+                        .await;
                 } else {
                     // SPA fallback: serve index.html for unknown paths
                     let index = dir.join("index.html");
                     if let Ok(body) = tokio::fs::read(&index).await {
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
-                             Cache-Control: no-cache, no-store, must-revalidate\r\n\
-                             Content-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        let _ = stream.write_all(&body).await;
+                        let _ = stream
+                            .write_all(&http_response(200, "text/html", &body))
+                            .await;
                     } else {
-                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        let _ = stream
+                            .write_all(&http_response(404, "text/plain", b"Not Found"))
+                            .await;
                     }
                 }
             } else {
                 // No static dir -- serve coordinator dashboard
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    COORDINATOR_DASHBOARD.len(), COORDINATOR_DASHBOARD
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
+                let resp = http_response(200, "text/html", COORDINATOR_DASHBOARD.as_bytes());
+                let _ = stream.write_all(&resp).await;
             }
         }
     }
@@ -808,7 +536,11 @@ async fn run_assignment_server(
         .await
         .expect("Failed to bind HTTP assignment port");
     let static_dir = static_dir.map(Arc::new);
-    let scheme = if tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+    let scheme = if tls_acceptor.is_some() {
+        "HTTPS"
+    } else {
+        "HTTP"
+    };
     if let Some(ref dir) = static_dir {
         tracing::info!("Client assignment {scheme} on port {port} (serving client from {dir:?})");
     } else {

@@ -1,7 +1,10 @@
 use crate::game_loop::SharedInbound;
 use crate::resources::{ClientFrame, ClientRegistrationEvent, PER_CLIENT_CHANNEL_SIZE};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use shared::protocol::{ClientMessage, ServerMessage};
-use futures_util::{SinkExt, StreamExt, stream::{SplitSink, SplitStream}};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -119,7 +122,10 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     addr: std::net::SocketAddr,
     inbound: Arc<SharedInbound>,
 ) {
-    let (mut ws_sink, mut ws_stream): (SplitSink<WebSocketStream<S>, Message>, SplitStream<WebSocketStream<S>>) = ws_stream.split();
+    let (mut ws_sink, mut ws_stream): (
+        SplitSink<WebSocketStream<S>, Message>,
+        SplitStream<WebSocketStream<S>>,
+    ) = ws_stream.split();
 
     // Assign a unique client ID
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
@@ -132,34 +138,40 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Generate player UUID and push SpawnPlayer to the inbound queue.
     // The player entity is created on the next game loop tick.
-    let player_uuid = uuid::Uuid::new_v4();
+    let player_id = shared::entity::EntityId(uuid::Uuid::new_v4());
     {
-        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push((client_id, ClientMessage::SpawnPlayer {
-            player_id: player_uuid.to_string(),
-            position: [0.0, 0.0, 0.0],
-        }));
+        let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
+        q.client_inputs.push((
+            client_id,
+            ClientMessage::SpawnPlayer {
+                player_id,
+                position: [0.0, 0.0, 0.0],
+            },
+        ));
         // Register this client in the ECS via the inbound queue
         q.register_clients.push(ClientRegistrationEvent {
             client_id,
             tx: frame_tx,
             acked_tick: Arc::clone(&acked_tick),
-            player_uuid: player_uuid.to_string(),
+            player_uuid: player_id,
         });
     }
 
     // Send PlayerAssigned as JSON text frame
     let assign_msg = ServerMessage::PlayerAssigned {
-        player_id: player_uuid.to_string(),
+        player_id: player_id.to_string(),
         protocol_version: shared::PROTOCOL_VERSION,
     };
     if let Ok(json) = serde_json::to_string(&assign_msg) {
         if ws_sink.send(Message::Text(json.into())).await.is_err() {
             // Client disconnected during assignment -- remove the player
-            let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-            q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
-                entity_id: player_uuid.to_string(),
-            }));
+            let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
+            q.client_inputs.push((
+                client_id,
+                ClientMessage::RemoveEntity {
+                    entity_id: player_id,
+                },
+            ));
             q.unregister_clients.push(client_id);
             return;
         }
@@ -168,7 +180,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     tracing::info!(
         client_id,
         "Assigned player {} to client {addr}",
-        &player_uuid.to_string()[..8]
+        &player_id.to_string()[..8]
     );
 
     let mut input_limiter = RateLimiter::new(INPUT_RATE_LIMIT);
@@ -180,8 +192,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             frame = frame_rx.recv() => {
                 match frame {
                     Some(client_frame) => {
-                        let data = client_frame.into_vec();
-                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                        if ws_sink.send(Message::Binary(client_frame.into())).await.is_err() {
                             break;
                         }
                     }
@@ -197,12 +208,12 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(ClientMessage::RequestSnapshot) => {
-                                let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                 q.force_full_snapshot_clients.push(client_id);
                             }
                             Ok(msg @ (ClientMessage::SpawnEntity { .. } | ClientMessage::SpawnPlayer { .. })) => {
                                 if spawn_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, msg));
                                 } else {
                                     tracing::warn!(client_id, "Spawn rate limited for client {addr}");
@@ -210,14 +221,14 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                             Ok(msg @ ClientMessage::MoveInput { .. }) => {
                                 if input_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, msg));
                                 }
                                 // Silently drop excess move inputs (too noisy to log)
                             }
                             Ok(input) => {
                                 if input_limiter.check() {
-                                    let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                                     q.client_inputs.push((client_id, input));
                                 }
                             }
@@ -258,44 +269,28 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Client disconnected -- push RemoveEntity and unregister
     {
-        let mut q = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push((client_id, ClientMessage::RemoveEntity {
-            entity_id: player_uuid.to_string(),
-        }));
+        let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
+        q.client_inputs.push((
+            client_id,
+            ClientMessage::RemoveEntity {
+                entity_id: player_id,
+            },
+        ));
         q.unregister_clients.push(client_id);
     }
     tracing::info!(
         client_id,
         "Removed player {} on disconnect",
-        &player_uuid.to_string()[..8]
+        &player_id.to_string()[..8]
     );
-}
-
-// Encoding is now in encoding.rs; test-only delegates below.
-
-#[cfg(test)]
-use shared::entity::EntityState;
-
-#[cfg(test)]
-fn encode_entity(buf: &mut Vec<u8>, e: &EntityState) {
-    crate::encoding::encode_entity(buf, e);
-}
-
-#[cfg(test)]
-fn encode_binary_snapshot(tick: u64, entities: &[EntityState]) -> Vec<u8> {
-    crate::encoding::encode_binary_snapshot(tick, entities)
-}
-
-#[cfg(test)]
-fn encode_binary_delta(tick: u64, updates: &[EntityState], removals: &[shared::entity::EntityId]) -> Vec<u8> {
-    crate::encoding::encode_binary_delta(tick, updates, removals)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::entity::{EntityId, EntityState, ServerId};
+    use crate::encoding::{encode_binary_delta, encode_binary_snapshot, encode_entity};
     use glam::Vec3;
+    use shared::entity::{EntityId, EntityState, ServerId};
 
     #[test]
     fn encode_binary_snapshot_empty() {
@@ -343,9 +338,7 @@ mod tests {
 
     #[test]
     fn encode_binary_delta_roundtrip() {
-        let updates = vec![
-            EntityState::new_npc(Vec3::new(5.0, 0.0, 5.0), ServerId(1)),
-        ];
+        let updates = vec![EntityState::new_npc(Vec3::new(5.0, 0.0, 5.0), ServerId(1))];
         let removals = vec![EntityId::new()];
         let buf = encode_binary_delta(50, &updates, &removals);
         // header(31) + 1 entity(47) + 1 removal UUID(16)
@@ -363,7 +356,10 @@ mod tests {
 
         // Verify removal UUID matches
         let removal_offset = 31 + 47;
-        assert_eq!(&buf[removal_offset..removal_offset + 16], removals[0].0.as_bytes());
+        assert_eq!(
+            &buf[removal_offset..removal_offset + 16],
+            removals[0].0.as_bytes()
+        );
     }
 
     // -- last_input_seq encoding tests --
@@ -497,7 +493,7 @@ mod tests {
     #[test]
     fn ack_wrong_type_ignored() {
         let buf = vec![0x04u8, 0, 0, 0, 0, 0, 0, 0, 0]; // wrong type byte
-        // Should not be parsed as ACK
+                                                        // Should not be parsed as ACK
         assert!(buf.len() == 9 && buf[0] != 0x03);
     }
 
@@ -513,9 +509,7 @@ mod tests {
     /// The actual code runs in an async context; this helper extracts the logic.
     fn apply_ack_validation(acked_tick: &AtomicU64, data: &[u8]) {
         if data.len() == 9 && data[0] == 0x03 {
-            let tick = u64::from_le_bytes(
-                data[1..9].try_into().unwrap_or([0; 8]),
-            );
+            let tick = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0; 8]));
             if tick > 0 {
                 let prev = acked_tick.load(Ordering::Relaxed);
                 if tick > prev {
@@ -541,7 +535,11 @@ mod tests {
 
         // ACK tick=50 -> rejected (not monotonically increasing)
         apply_ack_validation(&acked, &make_ack_frame(50));
-        assert_eq!(acked.load(Ordering::Relaxed), 100, "lower tick should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            100,
+            "lower tick should be rejected"
+        );
 
         // ACK tick=150 -> accepted
         apply_ack_validation(&acked, &make_ack_frame(150));
@@ -549,7 +547,11 @@ mod tests {
 
         // ACK tick=100 again -> rejected
         apply_ack_validation(&acked, &make_ack_frame(100));
-        assert_eq!(acked.load(Ordering::Relaxed), 150, "equal-to-previous tick should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            150,
+            "equal-to-previous tick should be rejected"
+        );
     }
 
     #[test]
@@ -558,7 +560,11 @@ mod tests {
 
         // ACK tick=0 -> rejected (tick > 0 required)
         apply_ack_validation(&acked, &make_ack_frame(0));
-        assert_eq!(acked.load(Ordering::Relaxed), 0, "tick=0 should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            0,
+            "tick=0 should be rejected"
+        );
 
         // ACK tick=1 -> accepted
         apply_ack_validation(&acked, &make_ack_frame(1));
@@ -566,7 +572,11 @@ mod tests {
 
         // ACK tick=0 again -> still rejected
         apply_ack_validation(&acked, &make_ack_frame(0));
-        assert_eq!(acked.load(Ordering::Relaxed), 1, "tick=0 should still be rejected after valid ACK");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            1,
+            "tick=0 should still be rejected after valid ACK"
+        );
     }
 
     #[test]
@@ -591,7 +601,11 @@ mod tests {
 
         // Duplicate ACK tick=50 -> rejected (requires tick > prev, not >=)
         apply_ack_validation(&acked, &make_ack_frame(50));
-        assert_eq!(acked.load(Ordering::Relaxed), 50, "duplicate ACK with same tick should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            50,
+            "duplicate ACK with same tick should be rejected"
+        );
     }
 
     #[test]
@@ -604,8 +618,11 @@ mod tests {
 
         // ACK jumps to 1_000_000 -> accepted (monotonically increasing)
         apply_ack_validation(&acked, &make_ack_frame(1_000_000));
-        assert_eq!(acked.load(Ordering::Relaxed), 1_000_000,
-            "large jump forward should be accepted");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            1_000_000,
+            "large jump forward should be accepted"
+        );
     }
 
     #[test]
@@ -620,11 +637,19 @@ mod tests {
 
         // Attempt to reset to 1 -> rejected
         apply_ack_validation(&acked, &make_ack_frame(1));
-        assert_eq!(acked.load(Ordering::Relaxed), 5, "reset attempt should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            5,
+            "reset attempt should be rejected"
+        );
 
         // Attempt to reset to 0 -> rejected
         apply_ack_validation(&acked, &make_ack_frame(0));
-        assert_eq!(acked.load(Ordering::Relaxed), 5, "reset to 0 should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            5,
+            "reset to 0 should be rejected"
+        );
 
         // Can still advance
         apply_ack_validation(&acked, &make_ack_frame(6));
@@ -640,16 +665,28 @@ mod tests {
         assert_eq!(acked.load(Ordering::Relaxed), 3);
 
         apply_ack_validation(&acked, &make_ack_frame(1));
-        assert_eq!(acked.load(Ordering::Relaxed), 3, "1 < 3, should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            3,
+            "1 < 3, should be rejected"
+        );
 
         apply_ack_validation(&acked, &make_ack_frame(5));
         assert_eq!(acked.load(Ordering::Relaxed), 5);
 
         apply_ack_validation(&acked, &make_ack_frame(2));
-        assert_eq!(acked.load(Ordering::Relaxed), 5, "2 < 5, should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            5,
+            "2 < 5, should be rejected"
+        );
 
         apply_ack_validation(&acked, &make_ack_frame(4));
-        assert_eq!(acked.load(Ordering::Relaxed), 5, "4 < 5, should be rejected");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            5,
+            "4 < 5, should be rejected"
+        );
     }
 
     #[test]
@@ -657,11 +694,15 @@ mod tests {
         let acked = AtomicU64::new(0);
 
         // Various malformed frames
-        apply_ack_validation(&acked, &[0x03]);           // only type byte
-        apply_ack_validation(&acked, &[0x03, 0, 0, 0]);  // 4 bytes (need 9)
-        apply_ack_validation(&acked, &[]);                // empty
+        apply_ack_validation(&acked, &[0x03]); // only type byte
+        apply_ack_validation(&acked, &[0x03, 0, 0, 0]); // 4 bytes (need 9)
+        apply_ack_validation(&acked, &[]); // empty
 
-        assert_eq!(acked.load(Ordering::Relaxed), 0, "malformed frames should not change acked_tick");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            0,
+            "malformed frames should not change acked_tick"
+        );
     }
 
     #[test]
@@ -673,7 +714,11 @@ mod tests {
         buf.extend_from_slice(&42u64.to_le_bytes());
         apply_ack_validation(&acked, &buf);
 
-        assert_eq!(acked.load(Ordering::Relaxed), 0, "wrong type byte should not change acked_tick");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            0,
+            "wrong type byte should not change acked_tick"
+        );
     }
 
     #[test]
@@ -681,12 +726,19 @@ mod tests {
         let acked = AtomicU64::new(0);
 
         apply_ack_validation(&acked, &make_ack_frame(u64::MAX));
-        assert_eq!(acked.load(Ordering::Relaxed), u64::MAX,
-            "u64::MAX should be accepted from initial state");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            u64::MAX,
+            "u64::MAX should be accepted from initial state"
+        );
 
         // Nothing can advance past u64::MAX
         apply_ack_validation(&acked, &make_ack_frame(1));
-        assert_eq!(acked.load(Ordering::Relaxed), u64::MAX, "cannot regress from u64::MAX");
+        assert_eq!(
+            acked.load(Ordering::Relaxed),
+            u64::MAX,
+            "cannot regress from u64::MAX"
+        );
     }
 
     // -- ClientRegistry tests --
@@ -715,5 +767,4 @@ mod tests {
         registry.unregister(1);
         assert_eq!(registry.clients.len(), 0);
     }
-
 }

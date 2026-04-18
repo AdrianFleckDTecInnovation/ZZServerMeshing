@@ -1,5 +1,6 @@
 use crate::game_loop::SharedCoordEvents;
 use futures_util::{SinkExt, StreamExt};
+use shared::entity::ServerId;
 use shared::protocol::{CoordClientMsg, CoordServerMsg};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -36,7 +37,7 @@ pub async fn run_coordinator_client(
 
         // Register
         let reg = CoordClientMsg::Register {
-            server_id,
+            server_id: ServerId(server_id),
             udp_port,
             ws_port,
             host: advertise_host.clone(),
@@ -59,7 +60,7 @@ pub async fn run_coordinator_client(
 
                 // Drain any outbound coordinator messages (TransferResult, etc.)
                 let outbound: Vec<CoordClientMsg> = {
-                    let mut q = hb_coord_outbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut q = hb_coord_outbound.lock().unwrap_or_else(|e| e.into_inner());
                     std::mem::take(&mut *q)
                 };
                 for msg in outbound {
@@ -73,7 +74,7 @@ pub async fn run_coordinator_client(
                 let count = hb_entity_count.load(Ordering::Relaxed);
                 let wl = hb_weighted_load.load(Ordering::Relaxed);
                 let hb = CoordClientMsg::Heartbeat {
-                    server_id,
+                    server_id: ServerId(server_id),
                     entity_count: count,
                     weighted_load: wl,
                 };
@@ -115,7 +116,7 @@ pub async fn run_coordinator_client(
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<CoordServerMsg>(&text) {
                     Ok(CoordServerMsg::PeerList { peers }) => {
-                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = coord_events.lock().unwrap_or_else(|e| e.into_inner());
                         q.peer_list_updates.push(peers);
                         tracing::info!("Received PeerList update");
                     }
@@ -123,18 +124,18 @@ pub async fn run_coordinator_client(
                         entity_ids,
                         target_server,
                     }) => {
-                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = coord_events.lock().unwrap_or_else(|e| e.into_inner());
                         q.rebalance_directives.push((entity_ids, target_server));
-                        tracing::info!("Received rebalance directive -> S{target_server}");
+                        tracing::info!("Received rebalance directive -> {target_server}");
                     }
                     Ok(CoordServerMsg::DrainDirective { target_servers }) => {
-                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = coord_events.lock().unwrap_or_else(|e| e.into_inner());
                         q.drain_directives.push(target_servers.clone());
                         tracing::info!(
                             "Received drain directive -> {:?}",
                             target_servers
                                 .iter()
-                                .map(|s| format!("S{s}"))
+                                .map(|s| format!("{s}"))
                                 .collect::<Vec<_>>()
                         );
                     }
@@ -142,7 +143,7 @@ pub async fn run_coordinator_client(
                         dead_server_id,
                         survivors,
                     }) => {
-                        let mut q = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = coord_events.lock().unwrap_or_else(|e| e.into_inner());
                         q.recover_events.push((dead_server_id, survivors));
                     }
                     Ok(CoordServerMsg::PlayerTransferResult {
@@ -171,7 +172,10 @@ pub async fn run_coordinator_client(
         }
 
         hb_task.abort();
-        tracing::warn!(server_id, "Lost coordinator connection, will re-register as S{server_id} in 2s...");
+        tracing::warn!(
+            server_id,
+            "Lost coordinator connection, will re-register as S{server_id} in 2s..."
+        );
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }

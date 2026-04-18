@@ -6,46 +6,22 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use crate::delta::CompactEntityState;
-
-/// Frame sent through per-client channels. Full snapshots are reference-counted
-/// (shared across all clients) to avoid cloning the same bytes N times.
-/// Delta frames are unique per client and owned directly.
-#[derive(Debug)]
-pub enum ClientFrame {
-    /// Full snapshot shared across all clients via Arc (zero-copy).
-    /// Retained for backwards compatibility; currently AoI filtering
-    /// produces per-client Owned frames instead.
-    #[allow(dead_code)]
-    Shared(Arc<Vec<u8>>),
-    /// Per-client delta frame (unique content).
-    Owned(Vec<u8>),
-}
-
-impl ClientFrame {
-    /// Get a reference to the underlying bytes.
-    #[allow(dead_code)]
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            ClientFrame::Shared(arc) => arc.as_slice(),
-            ClientFrame::Owned(vec) => vec.as_slice(),
-        }
-    }
-
-    /// Convert into owned bytes, cloning from Arc only if necessary.
-    pub fn into_vec(self) -> Vec<u8> {
-        match self {
-            ClientFrame::Shared(arc) => Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()),
-            ClientFrame::Owned(vec) => vec,
-        }
-    }
-}
+/// Frame sent through per-client channels. Each frame is a binary-encoded
+/// snapshot or delta, sent as `Vec<u8>` through the per-client mpsc channel.
+pub type ClientFrame = Vec<u8>;
 
 /// Server identity and configuration.
 #[derive(Resource)]
 pub struct ServerConfig {
     pub server_id: ServerId,
 }
+
+/// Unique per-process session identifier. Generated at sim-server boot from
+/// `rand::random::<u64>()` and carried on every outbound `PeerMessage` so peers
+/// can detect when this server has restarted and reset stale receiver state
+/// (see design 013: peer-restart-recovery).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SessionId(pub u64);
 
 /// Monotonically increasing tick counter.
 #[derive(Resource, Default)]
@@ -80,6 +56,26 @@ pub struct InboundQueue {
     pub force_full_snapshot_clients: Vec<u64>,
     /// Acknowledgements of accepted authority transfers from target servers.
     pub transfer_acks: Vec<InboundTransferAck>,
+    /// Signals from the UDP receiver that a peer's session_id changed (peer
+    /// restart detected). Downstream ECS systems can consume these to reset
+    /// per-peer state (e.g., shadow last_peer_tick — see WI-135 + design 015).
+    pub peer_session_resets: Vec<PeerSessionReset>,
+}
+
+/// Event emitted by the UDP receiver when it observes a peer replicating with
+/// a new `session_id` that differs from the previously-known session for that
+/// `server_id`. Used to signal the ECS that the peer has restarted so stale
+/// per-peer state (shadow last_peer_tick, etc.) can be reset.
+///
+/// See design 013 (peer-restart-recovery) and design 015 (shadow-tick-split).
+/// Consumed by `systems::inbound::drain_inbound_events` (WI-135), which zeroes
+/// `Shadow.last_peer_tick` for every shadow whose `AuthorityServer == server_id`
+/// so the first post-restart update from the peer is accepted. `last_local_tick`
+/// is intentionally NOT zeroed — that field lives in our local clock domain.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerSessionReset {
+    pub server_id: ServerId,
+    pub new_session_id: u64,
 }
 
 /// Event pushed by handle_client when a new WebSocket client connects.
@@ -87,32 +83,25 @@ pub struct ClientRegistrationEvent {
     pub client_id: u64,
     pub tx: tokio::sync::mpsc::Sender<ClientFrame>,
     pub acked_tick: Arc<AtomicU64>,
-    pub player_uuid: String,
+    pub player_uuid: EntityId,
 }
 
 /// Coordinator events received between ticks.
 #[derive(Resource, Default)]
 pub struct CoordEventQueue {
     pub peer_list_updates: Vec<Vec<PeerInfo>>,
-    pub rebalance_directives: Vec<(Vec<String>, u16)>,
-    pub drain_directives: Vec<Vec<u16>>,
-    pub recover_events: Vec<(u16, Vec<u16>)>,
+    pub rebalance_directives: Vec<(Vec<EntityId>, ServerId)>,
+    pub drain_directives: Vec<Vec<ServerId>>,
+    pub recover_events: Vec<(ServerId, Vec<ServerId>)>,
 }
-
-/// Full replication interval in ticks. Every FULL_REPL_INTERVAL ticks,
-/// send ALL authoritative entities to ALL peers (unfiltered broadcast).
-/// At 20Hz, 600 ticks = 30 seconds. With the cold tier at 5Hz refreshing
-/// all entities every 200ms, this is a rarely-needed fallback.
-/// Configurable via --full-repl-interval. Only used when --full-snapshot is enabled.
-pub const FULL_REPL_INTERVAL: u64 = 600;
 
 /// Outbound replication data, written by prepare_replication system,
 /// consumed by the async UDP sender task.
 ///
-/// On full-replication ticks (tick % full_interval == 0), `full_snapshot` is
-/// populated and `per_peer` is empty -- all entities go to all peers.
 /// On normal ticks, `per_peer` contains spatially filtered entity lists
 /// per peer, and `full_snapshot` is None.
+/// When filtering provides no benefit (e.g., no shadows to compute bounds from),
+/// `full_snapshot` is populated and `per_peer` is empty.
 #[derive(Resource, Default)]
 pub struct OutboundReplication {
     /// Per-peer filtered entity lists. Key is peer server_id (u16).
@@ -129,40 +118,10 @@ pub struct OutboundReplication {
     pub cold_count: usize,
 }
 
-/// Runtime configuration for replication filtering.
-/// Inserted as an ECS resource; read by prepare_replication.
-#[derive(Resource)]
-pub struct ReplicationConfig {
-    /// How often to send a full (unfiltered) replication to all peers.
-    /// Default: FULL_REPL_INTERVAL (600 ticks = 30s at 20Hz).
-    /// Only used when `full_snapshot_enabled` is true.
-    /// Set to 1 to disable filtering entirely (every tick is full).
-    pub full_interval: u64,
-    /// Whether periodic full snapshots are enabled. Default: false.
-    /// The cold tier at 5Hz makes full snapshots redundant for crash recovery.
-    pub full_snapshot_enabled: bool,
-}
-
-impl Default for ReplicationConfig {
-    fn default() -> Self {
-        Self {
-            full_interval: FULL_REPL_INTERVAL,
-            full_snapshot_enabled: false,
-        }
-    }
-}
-
-/// Outbound client snapshot, written by prepare_client_snapshot system,
-/// consumed by the async WebSocket broadcast task.
-#[derive(Resource, Default)]
-pub struct ClientSnapshot {
-    pub frame: Option<Vec<u8>>,
-}
-
 /// Pending authority transfers to send this tick.
 #[derive(Resource, Default)]
 pub struct PendingTransfers {
-    pub transfers: Option<(Vec<String>, u16)>,
+    pub transfers: Option<(Vec<EntityId>, ServerId)>,
 }
 
 /// Outbound transfer messages to send via UDP.
@@ -177,14 +136,15 @@ pub struct OutboundForwards {
     pub messages: Vec<(SocketAddr, Vec<u8>)>,
 }
 
+/// Info about an active drain operation.
+pub struct DrainInfo {
+    pub targets: Vec<ServerId>,
+    pub started_tick: u64,
+}
+
 /// Graceful drain state.
 #[derive(Resource, Default)]
-pub struct DrainState {
-    pub draining: bool,
-    pub targets: Option<Vec<u16>>,
-    /// Tick when drain was started. Used for drain timeout.
-    pub started_tick: Option<u64>,
-}
+pub struct DrainState(pub Option<DrainInfo>);
 
 /// Shutdown requested (set when drain completes).
 #[derive(Resource, Default)]
@@ -205,18 +165,6 @@ pub struct EntityOwnership {
     pub owners: HashMap<EntityId, u64>,
 }
 
-/// Per-tick timing accumulator for metrics (reserved for future per-system timing).
-#[derive(Resource, Default)]
-#[allow(dead_code)]
-pub struct TimingAccumulator {
-    pub phase_start: Option<std::time::Instant>,
-    pub input_drain: std::time::Duration,
-    pub simulation: std::time::Duration,
-    pub transfers: std::time::Duration,
-    pub replication: std::time::Duration,
-    pub shadow_cleanup: std::time::Duration,
-}
-
 /// Per-client channel size. 8 frames = 400ms at 20Hz -- enough buffer for brief lag spikes.
 pub const PER_CLIENT_CHANNEL_SIZE: usize = 8;
 
@@ -230,7 +178,6 @@ pub const ACK_STALE_TICKS: u64 = 40;
 #[derive(Resource, Default)]
 pub struct ClientRegistry {
     pub clients: HashMap<u64, ClientHandle>,
-    next_id: u64,
 }
 
 impl ClientRegistry {
@@ -252,9 +199,6 @@ impl ClientRegistry {
                 last_sent_tick: 0,
             },
         );
-        if client_id >= self.next_id {
-            self.next_id = client_id + 1;
-        }
     }
 
     pub fn unregister(&mut self, id: u64) {
@@ -272,7 +216,7 @@ pub struct ClientHandle {
     /// Used by prepare_client_snapshot for stale-ACK detection (audit #021).
     pub acked_tick: Arc<AtomicU64>,
     /// Baseline entity state for delta computation. None until first full snapshot sent.
-    pub baseline: Option<HashMap<EntityId, CompactEntityState>>,
+    pub baseline: Option<HashMap<EntityId, EntityState>>,
     /// Ticks since last forced full snapshot.
     pub ticks_since_full: u32,
     /// Tick of the most recently sent frame. Used with acked_tick for stale-ACK detection.
@@ -283,14 +227,10 @@ pub struct ClientHandle {
 
 pub struct PeerUpdate {
     pub tick: u64,
-    #[allow(dead_code)]
-    pub server_id: ServerId,
     pub entities: Vec<EntityState>,
 }
 
 pub struct InboundTransfer {
-    #[allow(dead_code)]
-    pub tick: u64,
     pub entity_id: EntityId,
     pub from_server: ServerId,
     pub to_server: ServerId,
@@ -328,30 +268,36 @@ mod tests {
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
-        world.init_resource::<ReplicationConfig>();
-        world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
         world.init_resource::<OutboundForwards>();
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
-        world.init_resource::<TimingAccumulator>();
 
         assert_eq!(world.resource::<TickCounter>().0, 0);
         assert!(world.resource::<PeerAddresses>().0.is_empty());
         assert!(world.resource::<EntityLookup>().0.is_empty());
         assert!(world.resource::<InboundQueue>().peer_updates.is_empty());
         assert!(world.resource::<InboundQueue>().transfer_acks.is_empty());
-        assert!(world.resource::<CoordEventQueue>().peer_list_updates.is_empty());
-        assert!(world.resource::<OutboundReplication>().full_snapshot.is_none());
+        assert!(world
+            .resource::<InboundQueue>()
+            .peer_session_resets
+            .is_empty());
+        assert!(world
+            .resource::<CoordEventQueue>()
+            .peer_list_updates
+            .is_empty());
+        assert!(world
+            .resource::<OutboundReplication>()
+            .full_snapshot
+            .is_none());
         assert!(world.resource::<OutboundReplication>().per_peer.is_empty());
         assert_eq!(world.resource::<OutboundReplication>().hot_count, 0);
         assert_eq!(world.resource::<OutboundReplication>().cold_count, 0);
-        assert!(world.resource::<ClientSnapshot>().frame.is_none());
         assert!(world.resource::<PendingTransfers>().transfers.is_none());
         assert!(world.resource::<OutboundTransfers>().messages.is_empty());
         assert!(world.resource::<OutboundForwards>().messages.is_empty());
-        assert!(!world.resource::<DrainState>().draining);
+        assert!(world.resource::<DrainState>().0.is_none());
         assert!(!world.resource::<ShutdownRequested>().0);
     }
 
@@ -380,6 +326,38 @@ mod tests {
     }
 
     #[test]
+    fn session_id_resource_can_be_inserted_and_read() {
+        let mut world = World::default();
+        world.insert_resource(SessionId(0xDEADBEEFCAFEBABE));
+        let sid = *world.resource::<SessionId>();
+        assert_eq!(sid.0, 0xDEADBEEFCAFEBABE);
+    }
+
+    #[test]
+    fn session_id_is_copy_and_debug() {
+        // Copy check: binding the resource should not move it.
+        let sid = SessionId(42);
+        let _a = sid; // Copy
+        let _b = sid; // Still usable
+        assert_eq!(sid.0, 42);
+        // Debug must format without panicking.
+        let debug_str = format!("{:?}", sid);
+        assert!(
+            debug_str.contains("42"),
+            "Debug output should contain the value"
+        );
+    }
+
+    #[test]
+    fn session_id_random_generation_differs() {
+        // Two independent invocations of rand::random::<u64>() should
+        // overwhelmingly differ. Collision probability is 1 / 2^64.
+        let a: u64 = rand::random();
+        let b: u64 = rand::random();
+        assert_ne!(a, b, "two random u64 values should differ");
+    }
+
+    #[test]
     fn inbound_queue_push_and_drain() {
         let mut world = World::default();
         world.init_resource::<InboundQueue>();
@@ -393,39 +371,13 @@ mod tests {
             .resource_mut::<InboundQueue>()
             .forwarded_inputs
             .push(fwd);
-        assert_eq!(
-            world.resource::<InboundQueue>().forwarded_inputs.len(),
-            1
-        );
+        assert_eq!(world.resource::<InboundQueue>().forwarded_inputs.len(), 1);
 
         // Drain
-        let inputs: Vec<_> = std::mem::take(
-            &mut world.resource_mut::<InboundQueue>().forwarded_inputs,
-        );
+        let inputs: Vec<_> =
+            std::mem::take(&mut world.resource_mut::<InboundQueue>().forwarded_inputs);
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].seq, 5);
         assert!(world.resource::<InboundQueue>().forwarded_inputs.is_empty());
-    }
-
-    #[test]
-    fn replication_config_default_full_interval_600() {
-        let config = ReplicationConfig::default();
-        assert_eq!(config.full_interval, 600);
-    }
-
-    #[test]
-    fn replication_config_default_full_snapshot_disabled() {
-        let config = ReplicationConfig::default();
-        assert!(!config.full_snapshot_enabled);
-    }
-
-    #[test]
-    fn replication_config_full_snapshot_enabled() {
-        let config = ReplicationConfig {
-            full_interval: 100,
-            full_snapshot_enabled: true,
-        };
-        assert!(config.full_snapshot_enabled);
-        assert_eq!(config.full_interval, 100);
     }
 }

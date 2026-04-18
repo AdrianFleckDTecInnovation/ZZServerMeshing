@@ -1,17 +1,17 @@
-mod network;
-mod receiver;
+mod components;
+mod conversion;
 mod coordinator_client;
+mod delta;
+mod encoding;
+mod game_loop;
 mod metrics;
 mod metrics_server;
-mod components;
+mod network;
+pub mod peer_bounds;
+mod receiver;
 mod resources;
-mod conversion;
-#[allow(dead_code)]
-mod encoding;
-mod delta;
-mod systems;
 mod schedule;
-mod game_loop;
+mod systems;
 
 use clap::Parser;
 use shared::entity::ServerId;
@@ -59,17 +59,6 @@ struct Args {
     /// Path to TLS private key file (PEM).
     #[arg(long)]
     tls_key: Option<PathBuf>,
-
-    /// Full replication interval in ticks. Every N ticks, send ALL entities to
-    /// all peers (unfiltered broadcast). Only used when --full-snapshot is enabled.
-    /// Default: 600 (every 30 seconds at 20Hz). Set to 1 to disable filtering entirely.
-    #[arg(long, default_value_t = 600)]
-    full_repl_interval: u64,
-
-    /// Enable periodic full snapshots to all peers. Disabled by default because
-    /// the cold tier at 5Hz provides sufficient crash recovery coverage.
-    #[arg(long, default_value_t = false)]
-    full_snapshot: bool,
 }
 
 #[tokio::main]
@@ -80,10 +69,20 @@ async fn main() {
     let server_id = ServerId(args.server_id);
     let metrics_port = args.metrics_port.unwrap_or(8100 + args.server_id);
 
+    // Generate a unique session id for this process run (design 013).
+    // Used on every outbound PeerMessage so peers can detect a restart and
+    // reset stale receiver state (reassembly map, latest_tick, shadows).
+    let session_id: u64 = rand::random();
+    tracing::info!(
+        server_id = server_id.0,
+        session_id = format_args!("0x{:016x}", session_id),
+        "sim-server session id generated"
+    );
+
     // Build TLS config if cert+key provided
     let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
         (Some(cert_path), Some(key_path)) => {
-            let acceptor = build_tls_acceptor(cert_path, key_path)
+            let acceptor = shared::tls::build_tls_acceptor(cert_path, key_path)
                 .expect("Failed to build TLS config from provided cert/key");
             tracing::info!(
                 "TLS enabled for WebSocket server (cert={}, key={})",
@@ -102,33 +101,33 @@ async fn main() {
     let ws_scheme = if use_tls { "wss" } else { "ws" };
     tracing::info!(
         "Sim-server {} starting ({ws_scheme}:{} udp:{} metrics:{})",
-        server_id, args.port, args.udp_port, metrics_port
+        server_id,
+        args.port,
+        args.udp_port,
+        metrics_port
     );
 
     // Create shared async-to-ECS buffers
-    let shared_inbound = Arc::new(game_loop::SharedInbound {
-        queue: std::sync::Mutex::new(resources::InboundQueue::default()),
-    });
-    let shared_coord_events = Arc::new(game_loop::SharedCoordEvents {
-        queue: std::sync::Mutex::new(resources::CoordEventQueue::default()),
-    });
+    let shared_inbound = Arc::new(std::sync::Mutex::new(resources::InboundQueue::default()));
+    let shared_coord_events =
+        Arc::new(std::sync::Mutex::new(resources::CoordEventQueue::default()));
 
     // Shared entity count for coordinator heartbeats
     let entity_count_atomic = Arc::new(AtomicU32::new(0));
     // Weighted load: players count 3x, NPCs count 1x
     let weighted_load_atomic = Arc::new(AtomicU32::new(0));
     // Outbound coordinator messages (TransferResult, etc.) from game loop
-    let coord_outbound = Arc::new(game_loop::SharedCoordOutbound {
-        queue: std::sync::Mutex::new(Vec::new()),
-    });
+    let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Create metrics collector
-    let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(args.server_id)));
+    let metrics_collector = Arc::new(std::sync::Mutex::new(metrics::MetricsCollector::new(
+        args.server_id,
+    )));
 
     // Shared peer health accumulator (WI-102/105): receiver writes, game loop reads
-    let peer_health = Arc::new(game_loop::SharedPeerHealth {
-        stats: std::sync::Mutex::new(game_loop::PeerHealthAccumulator::default()),
-    });
+    let peer_health = Arc::new(std::sync::Mutex::new(
+        game_loop::PeerHealthAccumulator::default(),
+    ));
 
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
@@ -177,9 +176,8 @@ async fn main() {
     let (udp_repl_tx, udp_repl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
         game_loop::UDP_REPLICATION_CHANNEL_SIZE,
     );
-    let (udp_ctrl_tx, udp_ctrl_rx) = tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(
-        game_loop::UDP_CONTROL_CHANNEL_SIZE,
-    );
+    let (udp_ctrl_tx, udp_ctrl_rx) =
+        tokio::sync::mpsc::channel::<game_loop::UdpOutbound>(game_loop::UDP_CONTROL_CHANNEL_SIZE);
     let sender_handle = tokio::spawn(game_loop::run_udp_sender(
         Arc::clone(&udp_socket),
         udp_ctrl_rx,
@@ -189,6 +187,7 @@ async fn main() {
     // Run the ECS game loop (receives both channel senders, not the socket)
     let sim_handle = tokio::spawn(game_loop::run_game_loop_ecs(
         server_id,
+        session_id,
         args.initial_npcs,
         Arc::clone(&shared_inbound),
         Arc::clone(&shared_coord_events),
@@ -197,8 +196,6 @@ async fn main() {
         Arc::clone(&metrics_collector),
         Arc::clone(&entity_count_atomic),
         Arc::clone(&weighted_load_atomic),
-        args.full_repl_interval,
-        args.full_snapshot,
         Arc::clone(&coord_outbound),
         Arc::clone(&peer_health),
     ));
@@ -214,7 +211,7 @@ async fn main() {
             tracing::info!("Received shutdown signal -- initiating graceful drain");
             // Push drain event through the coordinator event queue
             {
-                let mut q = shared_coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = shared_coord_events.lock().unwrap_or_else(|e| e.into_inner());
                 // Drain targets: we need the peer addresses, but we don't have direct access
                 // to the ECS world. Instead, push an empty drain directive -- the game loop
                 // will use whatever peers it knows about.
@@ -226,37 +223,4 @@ async fn main() {
             tracing::info!("Shutdown complete");
         }
     }
-}
-
-/// Build a tokio-rustls TLS acceptor from PEM certificate and key files.
-fn build_tls_acceptor(
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
-    use rustls::pki_types::PrivateKeyDer;
-    use std::io::BufReader;
-
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| format!("Failed to open cert file {}: {e}", cert_path.display()))?;
-    let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to parse certs: {e}"))?;
-    if certs.is_empty() {
-        return Err("No certificates found in cert file".into());
-    }
-
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| format!("Failed to open key file {}: {e}", key_path.display()))?;
-    let mut key_reader = BufReader::new(key_file);
-    let key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("Failed to parse private key: {e}"))?
-        .ok_or("No private key found in key file")?;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("Failed to build TLS config: {e}"))?;
-
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }

@@ -8,16 +8,13 @@ use glam::Vec3;
 use rand::Rng;
 use shared::entity::{EntityState, ServerId};
 use shared::protocol::PeerMessage;
-use shared::spatial::WORLD_EXTENT;
-use shared::tick::TICK_DURATION_MS;
+use shared::tick::TICK_DURATION;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::error::TrySendError;
-
-const TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(TICK_DURATION_MS);
 
 /// Serialize a PeerMessage with protocol version prefix (2 bytes LE).
 /// All UDP datagrams use this format so the receiver can reject version mismatches.
@@ -110,19 +107,13 @@ pub async fn run_udp_sender(
 }
 
 /// Shared inbound buffer for async tasks to push events into.
-pub struct SharedInbound {
-    pub queue: std::sync::Mutex<InboundQueue>,
-}
+pub type SharedInbound = std::sync::Mutex<InboundQueue>;
 
 /// Shared coordinator event buffer.
-pub struct SharedCoordEvents {
-    pub queue: std::sync::Mutex<CoordEventQueue>,
-}
+pub type SharedCoordEvents = std::sync::Mutex<CoordEventQueue>;
 
 /// Shared outbound buffer for ECS -> coordinator messages (e.g., TransferResult).
-pub struct SharedCoordOutbound {
-    pub queue: std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>,
-}
+pub type SharedCoordOutbound = std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>;
 
 /// Per-peer network health statistics accumulated by the UDP receiver.
 /// Read and reset by the game loop for metrics reporting.
@@ -133,6 +124,11 @@ pub struct PeerHealthAccumulator {
     pub packets_received: std::collections::HashMap<u16, u32>,
     /// Chunk reassembly evictions per peer since last reset.
     pub chunk_evictions: std::collections::HashMap<u16, u32>,
+    /// Most recently observed `session_id` for each peer (WI-136). Populated
+    /// by the UDP receiver via `note_session`. Exposed on `/metrics` as
+    /// `peer_health[<id>].session_id` so operators can see when a peer has
+    /// restarted.
+    pub peer_sessions: std::collections::HashMap<u16, u64>,
 }
 
 impl Default for PeerHealthAccumulator {
@@ -141,19 +137,19 @@ impl Default for PeerHealthAccumulator {
             latest_tick: std::collections::HashMap::new(),
             packets_received: std::collections::HashMap::new(),
             chunk_evictions: std::collections::HashMap::new(),
+            peer_sessions: std::collections::HashMap::new(),
         }
     }
 }
 
 /// Thread-safe wrapper for PeerHealthAccumulator.
 /// Shared between the UDP receiver task (writes) and the game loop (reads/resets).
-pub struct SharedPeerHealth {
-    pub stats: std::sync::Mutex<PeerHealthAccumulator>,
-}
+pub type SharedPeerHealth = std::sync::Mutex<PeerHealthAccumulator>;
 
 /// Run the new ECS-based game loop.
 pub async fn run_game_loop_ecs(
     server_id: ServerId,
+    session_id: u64,
     initial_npcs: u32,
     inbound: Arc<SharedInbound>,
     coord_events: Arc<SharedCoordEvents>,
@@ -162,8 +158,6 @@ pub async fn run_game_loop_ecs(
     metrics: Arc<std::sync::Mutex<MetricsCollector>>,
     entity_count_atomic: Arc<AtomicU32>,
     weighted_load_atomic: Arc<AtomicU32>,
-    full_repl_interval: u64,
-    full_snapshot_enabled: bool,
     coord_outbound: Arc<SharedCoordOutbound>,
     peer_health: Arc<SharedPeerHealth>,
 ) {
@@ -172,23 +166,18 @@ pub async fn run_game_loop_ecs(
 
     // Register all resources
     world.insert_resource(ServerConfig { server_id });
+    world.insert_resource(SessionId(session_id));
     world.init_resource::<TickCounter>();
     world.init_resource::<PeerAddresses>();
     world.init_resource::<EntityLookup>();
     world.init_resource::<InboundQueue>();
     world.init_resource::<CoordEventQueue>();
     world.init_resource::<OutboundReplication>();
-    world.insert_resource(ReplicationConfig {
-        full_interval: full_repl_interval,
-        full_snapshot_enabled,
-    });
-    world.init_resource::<ClientSnapshot>();
     world.init_resource::<PendingTransfers>();
     world.init_resource::<OutboundTransfers>();
     world.init_resource::<OutboundForwards>();
     world.init_resource::<DrainState>();
     world.init_resource::<ShutdownRequested>();
-    world.init_resource::<TimingAccumulator>();
     world.init_resource::<ClientRegistry>();
     world.init_resource::<OutboundCoordMessages>();
     world.init_resource::<EntityOwnership>();
@@ -197,19 +186,27 @@ pub async fn run_game_loop_ecs(
     // origin where players spawn. With AoI filtering (500 unit radius), spreading
     // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
     {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let spawn_range = 400.0_f32;
         for _ in 0..initial_npcs {
             let pos = Vec3::new(
-                rng.gen_range(-spawn_range..spawn_range),
+                rng.random_range(-spawn_range..spawn_range),
                 0.0,
-                rng.gen_range(-spawn_range..spawn_range),
+                rng.random_range(-spawn_range..spawn_range),
             );
             let state = EntityState::new_npc(pos, server_id);
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
     }
     tracing::info!("ECS World initialized with {} NPCs", initial_npcs);
+
+    // Wire the local session id into the metrics collector so /metrics can
+    // expose it (WI-136). We do this once, right after resource insertion —
+    // the session id never changes over the lifetime of this process.
+    {
+        let mut m = metrics.lock().unwrap_or_else(|e| e.into_inner());
+        m.set_session_id(session_id);
+    }
 
     // Build the schedule
     let mut schedule = build_schedule();
@@ -228,12 +225,6 @@ pub async fn run_game_loop_ecs(
     // Outbound UDP byte counter, reset each tick (WI-101)
     let mut udp_bytes_out: u64 = 0;
 
-    // UDP backpressure: when the replication channel is saturated, skip non-full
-    // replication ticks to cut outbound bandwidth. This breaks the feedback loop
-    // where dropped packets → shadow loss → full replication → more drops.
-    let mut repl_backpressure = false;
-    let mut repl_drops_this_tick: u64 = 0;
-
     loop {
         interval.tick().await;
         let tick_start = Instant::now();
@@ -247,42 +238,34 @@ pub async fn run_game_loop_ecs(
         // -- Phase 1: Swap inbound data from async buffers into ECS resources --
         let t0 = Instant::now();
         {
-            let mut iq = inbound.queue.lock().unwrap_or_else(|e| e.into_inner());
-            // Swap: move async buffer contents into ECS resource, leave empty buffer behind
-            let peer_updates = std::mem::take(&mut iq.peer_updates);
-            let authority_transfers = std::mem::take(&mut iq.authority_transfers);
-            let forwarded_inputs = std::mem::take(&mut iq.forwarded_inputs);
-            let client_inputs = std::mem::take(&mut iq.client_inputs);
-            let forwarded_removes = std::mem::take(&mut iq.forwarded_removes);
-            let register_clients = std::mem::take(&mut iq.register_clients);
-            let unregister_clients = std::mem::take(&mut iq.unregister_clients);
-            let client_player_assignments = std::mem::take(&mut iq.client_player_assignments);
-            let force_full_snapshot_clients = std::mem::take(&mut iq.force_full_snapshot_clients);
-            let transfer_acks = std::mem::take(&mut iq.transfer_acks);
+            let mut iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<InboundQueue>();
-            ecs_queue.peer_updates = peer_updates;
-            ecs_queue.authority_transfers = authority_transfers;
-            ecs_queue.forwarded_inputs = forwarded_inputs;
-            ecs_queue.client_inputs = client_inputs;
-            ecs_queue.forwarded_removes = forwarded_removes;
-            ecs_queue.register_clients = register_clients;
-            ecs_queue.unregister_clients = unregister_clients;
-            ecs_queue.client_player_assignments = client_player_assignments;
-            ecs_queue.force_full_snapshot_clients = force_full_snapshot_clients;
-            ecs_queue.transfer_acks = transfer_acks;
+            std::mem::swap(&mut *iq, &mut *ecs_queue);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(
+                iq.peer_updates.is_empty(),
+                "InboundQueue.peer_updates was not drained last tick"
+            );
+            debug_assert!(
+                iq.client_inputs.is_empty(),
+                "InboundQueue.client_inputs was not drained last tick"
+            );
         }
         {
-            let mut cq = coord_events.queue.lock().unwrap_or_else(|e| e.into_inner());
-            let peer_list_updates = std::mem::take(&mut cq.peer_list_updates);
-            let rebalance_directives = std::mem::take(&mut cq.rebalance_directives);
-            let drain_directives = std::mem::take(&mut cq.drain_directives);
-            let recover_events = std::mem::take(&mut cq.recover_events);
-
+            let mut cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<CoordEventQueue>();
-            ecs_queue.peer_list_updates = peer_list_updates;
-            ecs_queue.rebalance_directives = rebalance_directives;
-            ecs_queue.drain_directives = drain_directives;
-            ecs_queue.recover_events = recover_events;
+            std::mem::swap(&mut *cq, &mut *ecs_queue);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(
+                cq.peer_list_updates.is_empty(),
+                "CoordEventQueue.peer_list_updates was not drained last tick"
+            );
         }
         let input_drain_dur = t0.elapsed();
 
@@ -303,18 +286,23 @@ pub async fn run_game_loop_ecs(
         tokio::task::yield_now().await;
 
         // -- Phase 3: Extract outbound data --
-        let repl_full = world.resource_mut::<OutboundReplication>().full_snapshot.take();
-        let repl_per_peer = std::mem::take(&mut world.resource_mut::<OutboundReplication>().per_peer);
+        let repl_full = world
+            .resource_mut::<OutboundReplication>()
+            .full_snapshot
+            .take();
+        let repl_per_peer =
+            std::mem::take(&mut world.resource_mut::<OutboundReplication>().per_peer);
         let repl_tick = world.resource::<OutboundReplication>().tick;
         let repl_hot_count = world.resource::<OutboundReplication>().hot_count;
         let repl_cold_count = world.resource::<OutboundReplication>().cold_count;
         let transfers = std::mem::take(&mut world.resource_mut::<OutboundTransfers>().messages);
         let forwards = std::mem::take(&mut world.resource_mut::<OutboundForwards>().messages);
-        let coord_msgs = std::mem::take(&mut world.resource_mut::<OutboundCoordMessages>().messages);
+        let coord_msgs =
+            std::mem::take(&mut world.resource_mut::<OutboundCoordMessages>().messages);
 
         // Push coordinator-bound messages to the shared outbound queue
         if !coord_msgs.is_empty() {
-            let mut q = coord_outbound.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut q = coord_outbound.lock().unwrap_or_else(|e| e.into_inner());
             q.extend(coord_msgs);
         }
 
@@ -338,7 +326,7 @@ pub async fn run_game_loop_ecs(
         // Used by coordinator for smarter rebalance decisions.
         let mut weighted = 0u32;
         for kind in world
-            .query_filtered::<&EntityKind, (With<Authoritative>, Without<TransferOutbound>)>()
+            .query_filtered::<&EntityTypeComp, (With<Authoritative>, Without<TransferOutbound>)>()
             .iter(&world)
         {
             weighted += match kind.0 {
@@ -392,6 +380,7 @@ pub async fn run_game_loop_ecs(
             entities: &[EntityState],
             tick: u64,
             server_id: ServerId,
+            session_id: u64,
             addr: SocketAddr,
             tx: &tokio::sync::mpsc::Sender<UdpOutbound>,
             drops: &mut u64,
@@ -405,10 +394,17 @@ pub async fn run_game_loop_ecs(
                 let msg = PeerMessage::EntityStateUpdate {
                     tick,
                     server_id,
+                    session_id,
                     entities: entities.to_vec(),
                 };
                 if let Some(bytes) = serialize_versioned(&msg) {
-                    try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed, bytes_out);
+                    try_enqueue(
+                        tx,
+                        UdpOutbound::Send { addr, data: bytes },
+                        drops,
+                        closed,
+                        bytes_out,
+                    );
                 }
             } else {
                 let total_chunks =
@@ -417,12 +413,19 @@ pub async fn run_game_loop_ecs(
                     let msg = PeerMessage::ChunkedEntityUpdate {
                         tick,
                         server_id,
+                        session_id,
                         chunk_index: i as u16,
                         total_chunks,
                         entities: chunk.to_vec(),
                     };
                     if let Some(bytes) = serialize_versioned(&msg) {
-                        try_enqueue(tx, UdpOutbound::Send { addr, data: bytes }, drops, closed, bytes_out);
+                        try_enqueue(
+                            tx,
+                            UdpOutbound::Send { addr, data: bytes },
+                            drops,
+                            closed,
+                            bytes_out,
+                        );
                     }
                 }
             }
@@ -430,12 +433,12 @@ pub async fn run_game_loop_ecs(
 
         let t2 = Instant::now();
         let server_id_u16 = world.resource::<ServerConfig>().server_id;
-        repl_drops_this_tick = 0;
+        let session_id_u64 = world.resource::<SessionId>().0;
         udp_bytes_out = 0;
 
         if let Some(entities) = &repl_full {
-            // Full replication tick: ALWAYS broadcast (1/sec crash recovery).
-            // These go through even under backpressure.
+            // Full snapshot fallback: broadcast to all peers when filtering
+            // provides no benefit (e.g., no shadows to compute bounds from).
             let peer_addrs: Vec<_> = world
                 .resource::<PeerAddresses>()
                 .0
@@ -447,6 +450,7 @@ pub async fn run_game_loop_ecs(
                     entities,
                     repl_tick,
                     server_id_u16,
+                    session_id_u64,
                     *addr,
                     &udp_repl_tx,
                     &mut udp_repl_drops,
@@ -468,6 +472,7 @@ pub async fn run_game_loop_ecs(
                         entities,
                         repl_tick,
                         server_id_u16,
+                        session_id_u64,
                         addr,
                         &udp_repl_tx,
                         &mut udp_repl_drops,
@@ -477,9 +482,6 @@ pub async fn run_game_loop_ecs(
                 }
             }
         }
-
-        // Track per-tick drops for backpressure detection
-        repl_drops_this_tick = udp_repl_drops;
 
         // Enqueue authority transfers (control channel -- latency-critical)
         if !transfers.is_empty() {
@@ -541,9 +543,13 @@ pub async fn run_game_loop_ecs(
             m.udp_bytes_out = udp_bytes_out;
             // Per-peer inbound health from receiver (WI-105)
             {
-                let active_peers: std::collections::HashSet<u16> =
-                    world.resource::<PeerAddresses>().0.keys().copied().collect();
-                let ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let active_peers: std::collections::HashSet<u16> = world
+                    .resource::<PeerAddresses>()
+                    .0
+                    .keys()
+                    .copied()
+                    .collect();
+                let ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 let mut health_map = std::collections::HashMap::new();
                 for &pid in &active_peers {
                     let latest = ph.latest_tick.get(&pid).copied().unwrap_or(0);
@@ -552,12 +558,19 @@ pub async fn run_game_loop_ecs(
                     } else {
                         u64::MAX
                     };
-                    health_map.insert(pid, crate::metrics::PeerHealthSnapshot {
-                        latest_tick: latest,
-                        staleness_ticks: staleness,
-                        packets_received: ph.packets_received.get(&pid).copied().unwrap_or(0),
-                        chunk_evictions: ph.chunk_evictions.get(&pid).copied().unwrap_or(0),
-                    });
+                    health_map.insert(
+                        pid,
+                        crate::metrics::PeerHealthSnapshot {
+                            latest_tick: latest,
+                            staleness_ticks: staleness,
+                            packets_received: ph.packets_received.get(&pid).copied().unwrap_or(0),
+                            chunk_evictions: ph.chunk_evictions.get(&pid).copied().unwrap_or(0),
+                            // WI-136: peer session id. 0 until the first packet
+                            // from this peer is observed by the receiver; updates
+                            // atomically on session change (peer restart).
+                            session_id: ph.peer_sessions.get(&pid).copied().unwrap_or(0),
+                        },
+                    );
                 }
                 m.peer_health = health_map;
             }
@@ -588,25 +601,14 @@ pub async fn run_game_loop_ecs(
                 client_count,
             );
 
-            // Rate-limited UDP sender drop logging + backpressure control
+            // Rate-limited UDP sender drop logging
             if udp_repl_drops > 0 {
-                if !repl_backpressure {
-                    tracing::warn!(
-                        drops = udp_repl_drops,
-                        "UDP replication saturated, enabling backpressure (skipping per-tick replication)"
-                    );
-                } else {
-                    tracing::warn!(
-                        drops = udp_repl_drops,
-                        "UDP replication still saturated: {} drops in last 5s",
-                        udp_repl_drops
-                    );
-                }
-                repl_backpressure = true;
+                tracing::warn!(
+                    drops = udp_repl_drops,
+                    "UDP replication channel saturated: {} drops in last 5s",
+                    udp_repl_drops
+                );
                 udp_repl_drops = 0;
-            } else if repl_backpressure {
-                tracing::info!("UDP replication recovered, disabling backpressure");
-                repl_backpressure = false;
             }
             if udp_ctrl_drops > 0 {
                 tracing::warn!(
@@ -618,7 +620,7 @@ pub async fn run_game_loop_ecs(
             }
             // Reset per-peer health counters every 5s reporting window (WI-105)
             {
-                let mut ph = peer_health.stats.lock().unwrap_or_else(|e| e.into_inner());
+                let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 ph.packets_received.clear();
                 ph.chunk_evictions.clear();
                 // Don't clear latest_tick -- it's a high-water mark, not a counter
@@ -634,10 +636,9 @@ mod tests {
     use super::*;
     use crate::conversion::spawn_from_entity_state_direct;
     use crate::resources::{
-        ClientRegistry, ClientSnapshot, CoordEventQueue, DrainState, EntityLookup,
-        InboundQueue, OutboundForwards, OutboundReplication, OutboundTransfers,
-        PeerAddresses, PendingTransfers, ServerConfig, ShutdownRequested,
-        TimingAccumulator,
+        ClientRegistry, CoordEventQueue, DrainInfo, DrainState, EntityLookup, InboundQueue,
+        OutboundForwards, OutboundReplication, OutboundTransfers, PeerAddresses, PendingTransfers,
+        ServerConfig, SessionId, ShutdownRequested,
     };
     use crate::schedule::build_schedule;
     use shared::entity::{EntityState, ServerId};
@@ -648,20 +649,18 @@ mod tests {
         world.insert_resource(ServerConfig {
             server_id: ServerId(server_id),
         });
+        world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
         world.init_resource::<EntityLookup>();
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
         world.init_resource::<OutboundReplication>();
-        world.init_resource::<ReplicationConfig>();
-        world.init_resource::<ClientSnapshot>();
         world.init_resource::<PendingTransfers>();
         world.init_resource::<OutboundTransfers>();
         world.init_resource::<OutboundForwards>();
         world.init_resource::<DrainState>();
         world.init_resource::<ShutdownRequested>();
-        world.init_resource::<TimingAccumulator>();
         world.init_resource::<ClientRegistry>();
         world
     }
@@ -677,11 +676,9 @@ mod tests {
         // If SharedInbound used tokio::sync::Mutex, calling .lock() would require
         // .await and would not compile. The fact that this compiles and runs
         // proves it uses std::sync::Mutex.
-        let inbound = SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        };
+        let inbound = std::sync::Mutex::new(InboundQueue::default());
 
-        let mut q = inbound.queue.lock().unwrap();
+        let mut q = inbound.lock().unwrap();
         q.forwarded_inputs.push(crate::resources::ForwardedInput {
             entity_id: shared::entity::EntityId::new(),
             direction: [1.0, 0.0, 0.0],
@@ -694,14 +691,18 @@ mod tests {
     #[test]
     fn shared_coord_events_lockable_from_non_async_context() {
         // Same proof for SharedCoordEvents.
-        let coord = SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        };
+        let coord = std::sync::Mutex::new(CoordEventQueue::default());
 
-        let mut q = coord.queue.lock().unwrap();
-        q.drain_directives.push(vec![2, 3]);
+        let mut q = coord.lock().unwrap();
+        q.drain_directives.push(vec![
+            shared::entity::ServerId(2),
+            shared::entity::ServerId(3),
+        ]);
         assert_eq!(q.drain_directives.len(), 1);
-        assert_eq!(q.drain_directives[0], vec![2, 3]);
+        assert_eq!(
+            q.drain_directives[0],
+            vec![shared::entity::ServerId(2), shared::entity::ServerId(3)]
+        );
     }
 
     #[test]
@@ -710,26 +711,21 @@ mod tests {
         // std::sync::Mutex can become poisoned; tokio::sync::Mutex cannot.
         // This test proves both that we use std::sync::Mutex AND that the
         // poison-recovery pattern works correctly.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
 
         // Poison the mutex by panicking while holding the lock
         let inbound_clone = Arc::clone(&inbound);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = inbound_clone.queue.lock().unwrap();
+            let _guard = inbound_clone.lock().unwrap();
             panic!("intentional poison");
         }));
         assert!(result.is_err(), "panic should have been caught");
 
         // The mutex is now poisoned. lock() returns Err.
-        assert!(inbound.queue.lock().is_err(), "mutex should be poisoned");
+        assert!(inbound.lock().is_err(), "mutex should be poisoned");
 
         // But the recovery pattern should still work
-        let mut q = inbound
-            .queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
         q.forwarded_inputs.push(crate::resources::ForwardedInput {
             entity_id: shared::entity::EntityId::new(),
             direction: [0.0, 0.0, 1.0],
@@ -744,16 +740,14 @@ mod tests {
         // Verify multiple threads can use SharedInbound safely.
         // This would also compile with tokio::sync::Mutex (via block_on),
         // but combined with the non-async tests above, proves the migration.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
 
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 let inbound = Arc::clone(&inbound);
                 std::thread::spawn(move || {
                     for seq in 0..10 {
-                        let mut q = inbound.queue.lock().unwrap();
+                        let mut q = inbound.lock().unwrap();
                         q.forwarded_inputs.push(crate::resources::ForwardedInput {
                             entity_id: shared::entity::EntityId::new(),
                             direction: [i as f32, 0.0, 0.0],
@@ -768,7 +762,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        let q = inbound.queue.lock().unwrap();
+        let q = inbound.lock().unwrap();
         assert_eq!(q.forwarded_inputs.len(), 40); // 4 threads x 10 items
     }
 
@@ -781,12 +775,8 @@ mod tests {
         // If the old code used process::exit(0), this test would kill the
         // entire test process. The fact that the test completes normally
         // proves the game loop uses `break` instead.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
-        let coord_events = Arc::new(SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
+        let coord_events = Arc::new(std::sync::Mutex::new(CoordEventQueue::default()));
         let metrics = Arc::new(std::sync::Mutex::new(
             crate::metrics::MetricsCollector::new(1),
         ));
@@ -803,19 +793,16 @@ mod tests {
         // no auth entities remain. With 0 initial NPCs, drain completes in 1 tick.
         // targets must be non-empty (process_drain returns early if empty).
         {
-            let mut q = coord_events.queue.lock().unwrap();
-            q.drain_directives.push(vec![2]); // target server 2 (no peer needed with 0 entities)
+            let mut q = coord_events.lock().unwrap();
+            q.drain_directives.push(vec![shared::entity::ServerId(2)]); // target server 2 (no peer needed with 0 entities)
         }
 
         let weighted_load = Arc::new(AtomicU32::new(0));
-        let coord_outbound = Arc::new(SharedCoordOutbound {
-            queue: std::sync::Mutex::new(Vec::new()),
-        });
-        let peer_health = Arc::new(SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        });
+        let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
+            0xAB_u64,
             0, // no initial NPCs -- drain will find zero entities
             inbound,
             coord_events,
@@ -824,29 +811,20 @@ mod tests {
             metrics,
             entity_count,
             weighted_load,
-            FULL_REPL_INTERVAL,
-            false,
             coord_outbound,
             peer_health,
         ));
 
         // The game loop should exit cleanly (break, not process::exit).
         // If it used process::exit, this would never complete.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
 
         assert!(
             result.is_ok(),
             "game loop should return within 5s (proves break, not exit)"
         );
         let inner = result.unwrap();
-        assert!(
-            inner.is_ok(),
-            "game loop should complete without panic"
-        );
+        assert!(inner.is_ok(), "game loop should complete without panic");
     }
 
     #[test]
@@ -856,9 +834,10 @@ mod tests {
         let mut world = setup_world(1);
 
         // Activate drain with non-empty targets (process_drain returns early if targets empty)
-        world.resource_mut::<DrainState>().draining = true;
-        world.resource_mut::<DrainState>().targets = Some(vec![2]);
-        world.resource_mut::<DrainState>().started_tick = Some(1);
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![shared::entity::ServerId(2)],
+            started_tick: 1,
+        });
         world.resource_mut::<TickCounter>().0 = 2;
 
         let mut schedule = build_schedule();
@@ -921,8 +900,7 @@ mod tests {
     fn try_enqueue_success_on_open_channel() {
         // Create a channel with room and verify try_enqueue succeeds
         // (drops counter stays 0, closed stays false).
-        let (tx, _rx) =
-            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
         let mut drops: u64 = 0;
         let mut closed = false;
 
@@ -966,7 +944,10 @@ mod tests {
             &mut drops,
             &mut closed,
         );
-        assert_eq!(drops, 1, "drop counter should increment when channel is full");
+        assert_eq!(
+            drops, 1,
+            "drop counter should increment when channel is full"
+        );
         assert!(!closed, "channel is full but not closed");
 
         // Third message: still full
@@ -1046,9 +1027,7 @@ mod tests {
     async fn udp_sender_task_processes_send_via_control() {
         // Verify the run_udp_sender task reads Send messages from the control
         // channel and actually sends them over the UDP socket.
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0").await.unwrap()
-        );
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let local_addr = socket.local_addr().unwrap();
 
         // Receiver socket to verify the datagram arrives
@@ -1060,16 +1039,16 @@ mod tests {
         let (_repl_tx, repl_rx) =
             tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
 
-        let sender_handle =
-            tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
+        let sender_handle = tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
 
         // Send a message through the control channel
-        ctrl_tx.send(UdpOutbound::Send {
-            addr: recv_addr,
-            data: vec![0xDE, 0xAD],
-        })
-        .await
-        .unwrap();
+        ctrl_tx
+            .send(UdpOutbound::Send {
+                addr: recv_addr,
+                data: vec![0xDE, 0xAD],
+            })
+            .await
+            .unwrap();
 
         // Receive on the other socket
         let mut buf = [0u8; 64];
@@ -1086,18 +1065,12 @@ mod tests {
         // Drop senders to close channels, which makes run_udp_sender exit
         drop(ctrl_tx);
         drop(_repl_tx);
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            sender_handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), sender_handle).await;
     }
 
     #[tokio::test]
     async fn udp_sender_task_processes_batch_via_replication() {
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0").await.unwrap()
-        );
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
         let recv_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let recv_addr = recv_socket.local_addr().unwrap();
@@ -1107,8 +1080,7 @@ mod tests {
         let (repl_tx, repl_rx) =
             tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
 
-        let _sender_handle =
-            tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
+        let _sender_handle = tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
 
         // Send a batch with 3 datagrams via the replication channel
         let batch = vec![
@@ -1141,30 +1113,29 @@ mod tests {
 
     #[tokio::test]
     async fn udp_sender_task_exits_on_both_channels_close() {
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0").await.unwrap()
-        );
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
         let (ctrl_tx, ctrl_rx) =
             tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
         let (repl_tx, repl_rx) =
             tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
 
-        let sender_handle =
-            tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
+        let sender_handle = tokio::spawn(run_udp_sender(Arc::clone(&socket), ctrl_rx, repl_rx));
 
         // Drop both senders to close both channels
         drop(ctrl_tx);
         drop(repl_tx);
 
         // The sender task should exit cleanly
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            sender_handle,
-        )
-        .await;
-        assert!(result.is_ok(), "sender task should exit when both channels close");
-        assert!(result.unwrap().is_ok(), "sender task should exit without panic");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), sender_handle).await;
+        assert!(
+            result.is_ok(),
+            "sender task should exit when both channels close"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "sender task should exit without panic"
+        );
     }
 
     // =========================================================================
@@ -1175,12 +1146,8 @@ mod tests {
     async fn game_loop_produces_replication_through_std_mutex() {
         // Full integration: push peer data through SharedInbound (std::sync::Mutex),
         // run the game loop for 1 tick, verify replication output is produced.
-        let inbound = Arc::new(SharedInbound {
-            queue: std::sync::Mutex::new(InboundQueue::default()),
-        });
-        let coord_events = Arc::new(SharedCoordEvents {
-            queue: std::sync::Mutex::new(CoordEventQueue::default()),
-        });
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
+        let coord_events = Arc::new(std::sync::Mutex::new(CoordEventQueue::default()));
         let metrics = Arc::new(std::sync::Mutex::new(
             crate::metrics::MetricsCollector::new(1),
         ));
@@ -1194,20 +1161,17 @@ mod tests {
         // Pre-drain: set a drain directive so the loop will exit after one tick.
         // targets must be non-empty (process_drain returns early if empty).
         {
-            let mut q = coord_events.queue.lock().unwrap();
-            q.drain_directives.push(vec![2]);
+            let mut q = coord_events.lock().unwrap();
+            q.drain_directives.push(vec![shared::entity::ServerId(2)]);
         }
 
         // Start with 0 NPCs so drain completes immediately (no entities to transfer).
         let weighted_load = Arc::new(AtomicU32::new(0));
-        let coord_outbound = Arc::new(SharedCoordOutbound {
-            queue: std::sync::Mutex::new(Vec::new()),
-        });
-        let peer_health = Arc::new(SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        });
+        let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
+            0xCD_u64,
             0,
             Arc::clone(&inbound),
             coord_events,
@@ -1216,18 +1180,12 @@ mod tests {
             Arc::clone(&metrics),
             entity_count.clone(),
             weighted_load,
-            FULL_REPL_INTERVAL,
-            false,
             coord_outbound,
             peer_health,
         ));
 
         // The loop should complete (drain with 0 entities = immediate shutdown).
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         assert!(result.is_ok(), "game loop should complete within 5s");
 
         // Verify tick advanced in the metrics collector
@@ -1237,6 +1195,139 @@ mod tests {
         // The std::sync::Mutex was used to push drain events (above)
         // and to read metrics (here), proving the mutex swap is functional.
         udp_rx.close();
+    }
+
+    // -- WI-132: Real SessionId flows through game_loop replication path --
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn game_loop_stamps_session_id_on_entity_state_update_over_udp() {
+        // Run the game loop with a known session_id. Register a peer so
+        // prepare_replication emits EntityStateUpdate. Inspect UDP output.
+        let inbound = Arc::new(std::sync::Mutex::new(InboundQueue::default()));
+        let coord_events = Arc::new(std::sync::Mutex::new(CoordEventQueue::default()));
+        let metrics = Arc::new(std::sync::Mutex::new(
+            crate::metrics::MetricsCollector::new(1),
+        ));
+        let entity_count = Arc::new(AtomicU32::new(0));
+
+        let (udp_repl_tx, mut udp_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
+        let (udp_ctrl_tx, _udp_ctrl_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
+
+        // Seed a peer so replication has somewhere to send.
+        {
+            let mut q = coord_events.lock().unwrap();
+            q.peer_list_updates.push(vec![shared::protocol::PeerInfo {
+                server_id: ServerId(2),
+                udp_addr: "127.0.0.1:9102".to_string(),
+                ws_addr: "127.0.0.1:7879".to_string(),
+            }]);
+        }
+
+        // Arrange shutdown after a few ticks via drain with 0 entities.
+        {
+            let mut q = coord_events.lock().unwrap();
+            q.drain_directives.push(vec![ServerId(2)]);
+        }
+
+        let weighted_load = Arc::new(AtomicU32::new(0));
+        let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
+
+        const EXPECTED_SESSION: u64 = 0xBEEF_F00D_DEAD_BABE;
+
+        // Spawn 1 NPC initially so prepare_replication has something to send.
+        let handle = tokio::spawn(run_game_loop_ecs(
+            ServerId(1),
+            EXPECTED_SESSION,
+            1, // initial_npcs
+            Arc::clone(&inbound),
+            coord_events,
+            udp_repl_tx,
+            udp_ctrl_tx,
+            Arc::clone(&metrics),
+            entity_count,
+            weighted_load,
+            coord_outbound,
+            peer_health,
+        ));
+
+        // Poll UDP outbound for an EntityStateUpdate, up to 2 seconds.
+        let mut seen_session_id: Option<u64> = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), udp_rx.recv()).await {
+                Ok(Some(UdpOutbound::Send { data, .. })) => {
+                    if data.len() < 2 {
+                        continue;
+                    }
+                    let v = u16::from_le_bytes([data[0], data[1]]);
+                    if v != shared::PROTOCOL_VERSION {
+                        continue;
+                    }
+                    if let Ok(msg) =
+                        bincode::deserialize::<shared::protocol::PeerMessage>(&data[2..])
+                    {
+                        match msg {
+                            shared::protocol::PeerMessage::EntityStateUpdate {
+                                session_id, ..
+                            }
+                            | shared::protocol::PeerMessage::ChunkedEntityUpdate {
+                                session_id,
+                                ..
+                            } => {
+                                seen_session_id = Some(session_id);
+                                break;
+                            }
+                            _ => continue,
+                        }
+                    }
+                }
+                Ok(Some(UdpOutbound::Batch(batch))) => {
+                    for (_, data) in batch {
+                        if data.len() < 2 {
+                            continue;
+                        }
+                        let v = u16::from_le_bytes([data[0], data[1]]);
+                        if v != shared::PROTOCOL_VERSION {
+                            continue;
+                        }
+                        if let Ok(msg) =
+                            bincode::deserialize::<shared::protocol::PeerMessage>(&data[2..])
+                        {
+                            match msg {
+                                shared::protocol::PeerMessage::EntityStateUpdate {
+                                    session_id,
+                                    ..
+                                }
+                                | shared::protocol::PeerMessage::ChunkedEntityUpdate {
+                                    session_id,
+                                    ..
+                                } => {
+                                    seen_session_id = Some(session_id);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if seen_session_id.is_some() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            seen_session_id,
+            Some(EXPECTED_SESSION),
+            "replication should carry the session_id inserted at game loop start"
+        );
     }
 
     #[test]
@@ -1251,6 +1342,13 @@ mod tests {
             let state = EntityState::new_npc(pos, ServerId(1));
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
+
+        // Register a test client so prepare_client_snapshot sends a frame
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::resources::ClientFrame>(8);
+        let acked = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event(1, tx, acked);
 
         world.resource_mut::<TickCounter>().0 = 1;
 
@@ -1268,8 +1366,8 @@ mod tests {
             assert_eq!(e.authority_server, ServerId(1));
         }
 
-        // Verify client snapshot frame
-        let frame = world.resource::<ClientSnapshot>().frame.as_ref().unwrap();
+        // Verify client snapshot frame via test client channel
+        let frame = rx.try_recv().unwrap();
         assert_eq!(frame[0], 0x01); // full snapshot
         let count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
         assert_eq!(count, 3);
@@ -1344,10 +1442,8 @@ mod tests {
     #[test]
     fn shared_peer_health_lockable_from_non_async_context() {
         // Proves SharedPeerHealth uses std::sync::Mutex (not tokio).
-        let sph = SharedPeerHealth {
-            stats: std::sync::Mutex::new(PeerHealthAccumulator::default()),
-        };
-        let mut acc = sph.stats.lock().unwrap();
+        let sph = std::sync::Mutex::new(PeerHealthAccumulator::default());
+        let mut acc = sph.lock().unwrap();
         acc.latest_tick.insert(2, 42);
         assert_eq!(acc.latest_tick[&2], 42);
     }
@@ -1359,15 +1455,24 @@ mod tests {
         let mut acc = PeerHealthAccumulator::default();
         let lt = acc.latest_tick.entry(2).or_insert(0);
         // Tick 50 arrives
-        if 50 > *lt { *lt = 50; }
+        if 50 > *lt {
+            *lt = 50;
+        }
         assert_eq!(acc.latest_tick[&2], 50);
         // Tick 30 arrives (out of order) -- should NOT overwrite
         let lt = acc.latest_tick.entry(2).or_insert(0);
-        if 30 > *lt { *lt = 30; }
-        assert_eq!(acc.latest_tick[&2], 50, "later OOO tick should not reduce latest_tick");
+        if 30 > *lt {
+            *lt = 30;
+        }
+        assert_eq!(
+            acc.latest_tick[&2], 50,
+            "later OOO tick should not reduce latest_tick"
+        );
         // Tick 100 arrives -- should overwrite
         let lt = acc.latest_tick.entry(2).or_insert(0);
-        if 100 > *lt { *lt = 100; }
+        if 100 > *lt {
+            *lt = 100;
+        }
         assert_eq!(acc.latest_tick[&2], 100);
     }
 
@@ -1386,8 +1491,14 @@ mod tests {
         // Do NOT clear latest_tick
 
         assert_eq!(acc.latest_tick[&2], 500, "latest_tick should survive reset");
-        assert!(acc.packets_received.is_empty(), "packets_received should be cleared");
-        assert!(acc.chunk_evictions.is_empty(), "chunk_evictions should be cleared");
+        assert!(
+            acc.packets_received.is_empty(),
+            "packets_received should be cleared"
+        );
+        assert!(
+            acc.chunk_evictions.is_empty(),
+            "chunk_evictions should be cleared"
+        );
     }
 
     #[test]
@@ -1501,13 +1612,25 @@ mod tests {
         let mut bytes_out: u64 = 0;
 
         let items = vec![
-            ("127.0.0.1:9101".parse::<SocketAddr>().unwrap(), vec![0u8; 30]),
-            ("127.0.0.1:9102".parse::<SocketAddr>().unwrap(), vec![0u8; 70]),
-            ("127.0.0.1:9103".parse::<SocketAddr>().unwrap(), vec![0u8; 100]),
+            (
+                "127.0.0.1:9101".parse::<SocketAddr>().unwrap(),
+                vec![0u8; 30],
+            ),
+            (
+                "127.0.0.1:9102".parse::<SocketAddr>().unwrap(),
+                vec![0u8; 70],
+            ),
+            (
+                "127.0.0.1:9103".parse::<SocketAddr>().unwrap(),
+                vec![0u8; 100],
+            ),
         ];
         let msg = UdpOutbound::Batch(items);
         try_enqueue_with_bytes(&tx, msg, &mut drops, &mut closed, &mut bytes_out);
-        assert_eq!(bytes_out, 200, "batch bytes should be sum of all items (30+70+100)");
+        assert_eq!(
+            bytes_out, 200,
+            "batch bytes should be sum of all items (30+70+100)"
+        );
     }
 
     #[test]

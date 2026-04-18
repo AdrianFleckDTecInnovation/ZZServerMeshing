@@ -4,7 +4,7 @@ True server meshing: multiple Rust simulation servers share authority over the S
 
 ## Architecture
 
-- `crates/shared/` — Shared types: entities, protocol messages, spatial grid, tick constants
+- `crates/shared/` — Shared types: entities, protocol messages, spatial grid, tick constants, TLS utilities, gameplay constants
 - `crates/sim-server/` — Rust game simulation server (run N instances, each with unique `--server-id`)
 - `crates/coordinator/` — Mesh coordinator: server registry, peer discovery, health monitoring, client assignment
 - `client/` — Three.js WebGPU browser client: renders entities, debug overlay
@@ -98,6 +98,51 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 ```
 
 To regenerate (e.g., new board IP): `rm certs/mesh-coordinator.*` then run `start-unoq.sh`.
+
+#### Rolling redeploys and wire protocol version (v2 as of 2026-04-18)
+The UDP peer-to-peer wire protocol (`PeerMessage` over UDP between sim-servers)
+is at **`PROTOCOL_VERSION = 2`** as of design 013 (peer-restart-recovery). Every
+UDP datagram carries a 2-byte little-endian version prefix and every
+`PeerMessage` variant now carries a `session_id: u64` that is generated fresh at
+sim-server boot.
+
+During a rolling redeploy, servers running different versions will drop each
+other's replication packets. The wire-version check lives in
+`crates/sim-server/src/receiver.rs` (around lines 202–209) and silently drops
+mismatched packets with a `warn!` log line of the form:
+
+```
+UDP protocol version mismatch from <peer_addr>, dropping packet (wire_version=1 expected=2)
+```
+
+Concrete behavior during a mixed-version window:
+
+- v1 → v2: v2 receiver drops with the warning above. v2 server cannot see v1
+  peer's entities (they become shadows stuck at their last-known tick and
+  eventually age out via `SHADOW_STALE_TICKS`).
+- v2 → v1: v1 receiver drops the same way (the prefix check was present in v1
+  too). v1 server cannot see v2 peer's entities.
+- Coordinator control plane is **unaffected** — version gating applies only to
+  the sim-server UDP data plane, so `/assign`, `/servers`, heartbeats, rebalance
+  directives, etc. continue to work across the window.
+
+**Deploy practice.** `./start-unoq.sh` cross-compiles once and SCPs the binary
+to all 3 boards together, then restarts all 3 sim-servers near-simultaneously.
+The observed cross-version window is ~5 s end-to-end (mostly SSH connection
+overhead). If a partial deploy happens — e.g. SCP to unoq2 fails — run
+`./start-unoq.sh` again; the script is idempotent. What to watch for:
+
+- `wire_version` warnings in `~/mesh/sim*.log` on the boards that never stop:
+  one or more boards is still running v1, investigate which.
+- `peer_health[N].latest_tick` on `/metrics` that never advances for a given
+  peer after deploy: that peer is effectively invisible to this server, almost
+  certainly a version skew.
+- `shadow_count` halving or worse on all survivors: half the mesh is talking to
+  the other half but not the reverse.
+
+Once all boards are on v2, shadow reconvergence is automatic (that is the whole
+point of Batch 4). Session-id driven reset clears stale receiver state the
+moment the first post-deploy packet from each peer arrives.
 
 #### Coordinator auto-start
 The coordinator runs as a systemd user service on zzttpi (`mesh-coordinator.service`). It starts on boot and restarts on crash. The coordinator is stateless — sim-servers reconnect automatically when it restarts.
@@ -247,6 +292,18 @@ Use it for:
 - "Are there data loss risks in authority transfers?"
 
 Defined in `.claude/agents/mesh-auditor.md`. Writes to `docs/mesh-auditor/`.
+
+### @mesh-cleanup
+Implements codebase simplification work items from design 012. Removes dead code, splits monoliths, deduplicates, cleans abstractions. Pure refactoring with zero behavior change. Follows the work items in `docs/mesh-architect/work-items/012-codebase-simplification.md`.
+
+Use it for:
+- "Remove dead code (WI-120 to WI-125)"
+- "Split systems.rs into modules"
+- "Make the protocol types type-safe"
+- "Continue the simplification work"
+- "Run the next batch of cleanup"
+
+Defined in `.claude/agents/mesh-cleanup.md`. Writes worklogs to `worklogs/mesh-cleanup/`.
 
 ### @cluster-ops
 Manages the Pi/UNO Q hardware cluster. SSHs into boards, monitors CPU/memory/network/temperature, deploys binaries, checks logs, diagnoses issues, and verifies fixes on live hardware. Knows all board IPs, systemd services, and deployment layout.

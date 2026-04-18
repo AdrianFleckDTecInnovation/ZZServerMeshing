@@ -3,206 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sim-Server Dashboard</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0a; color: #0f0; font-family: 'Courier New', monospace; padding: 20px; }
-  h1 { font-size: 18px; margin-bottom: 16px; color: #0f0; text-shadow: 0 0 6px rgba(0,255,0,0.4); }
-  .section { background: #111; border: 1px solid #1a1a1a; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
-  .section h2 { font-size: 13px; color: #888; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-  .stat { text-align: center; }
-  .stat .value { font-size: 28px; font-weight: bold; }
-  .stat .label { font-size: 11px; color: #666; margin-top: 4px; }
-  .gauge-container { display: flex; justify-content: center; align-items: center; margin: 12px 0; }
-  .gauge { width: 160px; height: 160px; }
-  .phase-bar { display: flex; align-items: center; margin: 4px 0; font-size: 12px; }
-  .phase-bar .name { width: 120px; color: #888; }
-  .phase-bar .bar-bg { flex: 1; height: 16px; background: #1a1a1a; border-radius: 3px; overflow: hidden; position: relative; }
-  .phase-bar .bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
-  .phase-bar .bar-val { position: absolute; right: 6px; top: 0; line-height: 16px; font-size: 10px; color: #ccc; }
-  .sparkline { width: 100%; height: 50px; }
-  .peer-status { display: flex; gap: 12px; align-items: center; font-size: 13px; }
-  .peer-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .peer-dot.ok { background: #0f0; box-shadow: 0 0 6px #0f0; }
-  .peer-dot.bad { background: #f00; box-shadow: 0 0 6px #f00; }
-  .offline { color: #f00; font-size: 16px; text-align: center; padding: 40px; }
-  #error { color: #f44; font-size: 12px; margin-top: 8px; }
-</style>
-</head>
-<body>
-<h1 id="title">Sim-Server Dashboard</h1>
-
-<div class="section">
-  <h2>Tick Budget</h2>
-  <div class="gauge-container">
-    <canvas class="gauge" id="gauge" width="160" height="160"></canvas>
-  </div>
-  <div class="stat-grid">
-    <div class="stat"><div class="value" id="tick">-</div><div class="label">Tick</div></div>
-    <div class="stat"><div class="value" id="budget">-</div><div class="label">Budget %</div></div>
-    <div class="stat"><div class="value" id="total-ms">-</div><div class="label">Total p95 ms</div></div>
-  </div>
-</div>
-
-<div class="section">
-  <h2>Entities</h2>
-  <div class="stat-grid">
-    <div class="stat"><div class="value" id="auth-count">-</div><div class="label">Authoritative</div></div>
-    <div class="stat"><div class="value" id="shadow-count">-</div><div class="label">Shadows</div></div>
-    <div class="stat"><div class="value" id="total-count">-</div><div class="label">Total</div></div>
-  </div>
-</div>
-
-<div class="section">
-  <h2>Peer Connections</h2>
-  <div class="peer-status" id="peers">-</div>
-</div>
-
-<div class="section">
-  <h2>Phase Timings (p95)</h2>
-  <div id="phases"></div>
-</div>
-
-<div class="section">
-  <h2>Budget History (60s)</h2>
-  <canvas class="sparkline" id="sparkline" width="600" height="50"></canvas>
-</div>
-
-<div id="error"></div>
-
-<script>
-const history = [];
-const MAX_HISTORY = 60;
-const PHASES = [
-  { key: 'input_drain_ms', label: 'Input Drain', color: '#4fc3f7' },
-  { key: 'simulation_ms', label: 'Simulation', color: '#81c784' },
-  { key: 'transfers_ms', label: 'Transfers', color: '#ffb74d' },
-  { key: 'replication_ms', label: 'Replication', color: '#ba68c8' },
-  { key: 'shadow_cleanup_ms', label: 'Shadow Cleanup', color: '#e57373' },
-];
-
-function drawGauge(pct) {
-  const c = document.getElementById('gauge');
-  const ctx = c.getContext('2d');
-  const cx = 80, cy = 80, r = 65;
-  ctx.clearRect(0, 0, 160, 160);
-
-  // Background arc
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0.75 * Math.PI, 0.25 * Math.PI);
-  ctx.lineWidth = 14;
-  ctx.strokeStyle = '#1a1a1a';
-  ctx.stroke();
-
-  // Value arc
-  const span = 1.5 * Math.PI;
-  const end = 0.75 * Math.PI + span * Math.min(pct / 100, 1);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0.75 * Math.PI, end);
-  ctx.lineWidth = 14;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = pct < 50 ? '#0f0' : pct < 80 ? '#ffb74d' : '#f44';
-  ctx.stroke();
-
-  // Center text
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 24px Courier New';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(pct.toFixed(1) + '%', cx, cy);
-}
-
-function drawSparkline() {
-  const c = document.getElementById('sparkline');
-  const ctx = c.getContext('2d');
-  const w = c.width, h = c.height;
-  ctx.clearRect(0, 0, w, h);
-
-  if (history.length < 2) return;
-
-  // Threshold lines
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 1;
-  [50, 80].forEach(t => {
-    const y = h - (t / 100) * h;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-  });
-
-  // Sparkline
-  ctx.beginPath();
-  const step = w / (MAX_HISTORY - 1);
-  for (let i = 0; i < history.length; i++) {
-    const x = i * step;
-    const y = h - (Math.min(history[i], 100) / 100) * h;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
-  ctx.strokeStyle = '#0f0';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-}
-
-function renderPhases(phases) {
-  const container = document.getElementById('phases');
-  const maxMs = 50; // tick budget
-  let html = '';
-  for (const p of PHASES) {
-    const val = phases[p.key]?.p95 ?? 0;
-    const pct = Math.min((val / maxMs) * 100, 100);
-    html += `<div class="phase-bar">
-      <span class="name">${p.label}</span>
-      <div class="bar-bg">
-        <div class="bar-fill" style="width:${pct}%;background:${p.color}"></div>
-        <span class="bar-val">${val.toFixed(2)}ms</span>
-      </div>
-    </div>`;
-  }
-  container.innerHTML = html;
-}
-
-async function poll() {
-  try {
-    const res = await fetch('/metrics');
-    const m = await res.json();
-
-    document.getElementById('title').textContent = `Sim-Server S${m.server_id}`;
-    document.title = `S${m.server_id} Dashboard`;
-    document.getElementById('tick').textContent = m.tick;
-    document.getElementById('budget').textContent = m.tick_budget_pct.toFixed(1);
-    document.getElementById('total-ms').textContent = m.phases.total_ms.p95.toFixed(2);
-    document.getElementById('auth-count').textContent = m.entity_count;
-    document.getElementById('shadow-count').textContent = m.shadow_count;
-    document.getElementById('total-count').textContent = m.entity_count + m.shadow_count;
-
-    // Peers
-    const peerHtml = m.peer_count > 0
-      ? `<span class="peer-dot ok"></span> ${m.peer_count} peer${m.peer_count > 1 ? 's' : ''} connected`
-      : `<span class="peer-dot bad"></span> No peers`;
-    document.getElementById('peers').innerHTML = peerHtml;
-
-    drawGauge(m.tick_budget_pct);
-    renderPhases(m.phases);
-
-    history.push(m.tick_budget_pct);
-    if (history.length > MAX_HISTORY) history.shift();
-    drawSparkline();
-
-    document.getElementById('error').textContent = '';
-  } catch (e) {
-    document.getElementById('error').textContent = 'Failed to fetch metrics: ' + e.message;
-  }
-}
-
-poll();
-setInterval(poll, 1000);
-</script>
-</body>
-</html>"##;
+const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
 
 /// Minimal HTTP server that serves a dashboard at `/` and metrics JSON at `/metrics`.
 pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<MetricsCollector>>) {
@@ -239,7 +40,10 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
 
             if path == "/metrics" {
                 // JSON metrics
-                let snapshot = collector.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+                let snapshot = collector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .snapshot();
                 let body = match serde_json::to_string_pretty(&snapshot) {
                     Ok(b) => b,
                     Err(_) => return,
@@ -248,7 +52,8 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                      Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
                      Connection: close\r\n\r\n{}",
-                    body.len(), body
+                    body.len(),
+                    body
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             } else {
@@ -256,7 +61,8 @@ pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<Metri
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    DASHBOARD_HTML.len(), DASHBOARD_HTML
+                    DASHBOARD_HTML.len(),
+                    DASHBOARD_HTML
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             }

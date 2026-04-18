@@ -52,9 +52,8 @@ pub fn encode_binary_snapshot(tick: u64, entities: &[EntityState]) -> Vec<u8> {
 ///         [updated entities x N: 47 bytes each]
 ///         [removed UUIDs x M: 16 bytes each]
 pub fn encode_binary_delta(tick: u64, updates: &[EntityState], removals: &[EntityId]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        DELTA_HEADER_SIZE + updates.len() * ENTITY_SIZE + removals.len() * 16,
-    );
+    let mut buf =
+        Vec::with_capacity(DELTA_HEADER_SIZE + updates.len() * ENTITY_SIZE + removals.len() * 16);
 
     buf.push(0x02);
     buf.extend_from_slice(&tick.to_le_bytes());
@@ -266,10 +265,7 @@ mod tests {
             .collect();
         let removals: Vec<EntityId> = (0..3).map(|_| EntityId::new()).collect();
         let buf = encode_binary_delta(1, &updates, &removals);
-        assert_eq!(
-            buf.len(),
-            DELTA_HEADER_SIZE + 4 * ENTITY_SIZE + 3 * 16
-        );
+        assert_eq!(buf.len(), DELTA_HEADER_SIZE + 4 * ENTITY_SIZE + 3 * 16);
     }
 
     #[test]

@@ -6,15 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
-    WorldSnapshot {
-        tick: u64,
-        entities: Vec<EntityState>,
-    },
-    EntityDelta {
-        tick: u64,
-        updates: Vec<EntityState>,
-        removals: Vec<EntityId>,
-    },
     /// Sent to a client on connect to assign their player entity.
     PlayerAssigned {
         player_id: String,
@@ -22,9 +13,7 @@ pub enum ServerMessage {
         protocol_version: u16,
     },
     /// Instruct the client to reconnect to a different sim-server.
-    Reconnect {
-        url: String,
-    },
+    Reconnect { url: String },
 }
 
 // ── Browser Client / Gateway → Server (JSON over WebSocket) ──
@@ -38,33 +27,39 @@ pub enum ClientMessage {
     },
     /// Gateway assigns a specific UUID for a player entity.
     SpawnPlayer {
-        player_id: String,
+        player_id: EntityId,
         position: [f32; 3],
     },
     MoveInput {
-        entity_id: String,
+        entity_id: EntityId,
         direction: [f32; 3],
         #[serde(default)]
         seq: u32,
     },
     /// Gateway requests removal of a player entity on disconnect.
     RemoveEntity {
-        entity_id: String,
+        entity_id: EntityId,
     },
     RequestSnapshot,
 }
 
 // ── Sim-Server ↔ Sim-Server (bincode over UDP) ──
 
+/// Every variant carries `session_id: u64` — a random nonce generated once at
+/// sim-server boot. Peers use it to detect when a source server has restarted
+/// (new session = clear stale reassembly/latest_tick/shadow state). See
+/// design 013: peer-restart-recovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerMessage {
     EntityStateUpdate {
         tick: u64,
         server_id: ServerId,
+        session_id: u64,
         entities: Vec<EntityState>,
     },
     AuthorityTransfer {
         tick: u64,
+        session_id: u64,
         entity_id: EntityId,
         from_server: ServerId,
         to_server: ServerId,
@@ -73,6 +68,7 @@ pub enum PeerMessage {
     /// Forward a client input to the authority peer when a sim-server
     /// receives a MoveInput for an entity it doesn't own.
     ForwardedInput {
+        session_id: u64,
         entity_id: EntityId,
         direction: [f32; 3],
         seq: u32,
@@ -80,11 +76,13 @@ pub enum PeerMessage {
     /// Forward a remove request to the authority peer when a client
     /// disconnects but their player entity was transferred to another server.
     ForwardedRemove {
+        session_id: u64,
         entity_id: EntityId,
     },
     /// Acknowledgement that an authority transfer was received and accepted.
     /// Sent by the target server back to the source server.
     TransferAck {
+        session_id: u64,
         entity_id: EntityId,
         tick: u64,
     },
@@ -93,6 +91,7 @@ pub enum PeerMessage {
     ChunkedEntityUpdate {
         tick: u64,
         server_id: ServerId,
+        session_id: u64,
         chunk_index: u16,
         total_chunks: u16,
         entities: Vec<EntityState>,
@@ -105,7 +104,7 @@ pub enum PeerMessage {
 #[serde(tag = "type")]
 pub enum CoordClientMsg {
     Register {
-        server_id: u16,
+        server_id: ServerId,
         udp_port: u16,
         ws_port: u16,
         /// Advertised hostname for peer discovery (Docker/k8s networking).
@@ -120,7 +119,7 @@ pub enum CoordClientMsg {
         protocol_version: u16,
     },
     Heartbeat {
-        server_id: u16,
+        server_id: ServerId,
         entity_count: u32,
         /// Weighted load: players count 3x, NPCs count 1x.
         /// Used by the coordinator for smarter rebalance decisions.
@@ -128,21 +127,19 @@ pub enum CoordClientMsg {
         weighted_load: u32,
     },
     /// Server wants to leave gracefully — drain all entities first.
-    Draining {
-        server_id: u16,
-    },
+    Draining { server_id: ServerId },
     /// Atomically transfer player account ownership between servers.
     /// Sent after a two-phase authority transfer ACK confirms the entity arrived.
     PlayerTransfer {
         account_id: String,
-        from_server: u16,
-        to_server: u16,
+        from_server: ServerId,
+        to_server: ServerId,
     },
     /// Report the outcome of an authority transfer back to the coordinator.
     /// Enables closed-loop rebalancing (coordinator knows what happened).
     TransferResult {
-        entity_id: String,
-        target_server: u16,
+        entity_id: EntityId,
+        target_server: ServerId,
         success: bool,
     },
 }
@@ -152,23 +149,25 @@ pub enum CoordClientMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CoordServerMsg {
-    PeerList { peers: Vec<PeerInfo> },
+    PeerList {
+        peers: Vec<PeerInfo>,
+    },
     /// Instruct a server to transfer entities to another server.
     RebalanceDirective {
-        entity_ids: Vec<String>,
-        target_server: u16,
+        entity_ids: Vec<EntityId>,
+        target_server: ServerId,
     },
     /// Instruct a server to drain ALL entities to the listed targets, then exit.
     DrainDirective {
-        target_servers: Vec<u16>,
+        target_servers: Vec<ServerId>,
     },
     /// A server died — adopt its orphaned shadow entities.
     /// `survivors` is the sorted list of surviving sim-server IDs so each
     /// server adopts a distinct subset (by UUID hash).
     RecoverEntities {
-        dead_server_id: u16,
+        dead_server_id: ServerId,
         #[serde(default)]
-        survivors: Vec<u16>,
+        survivors: Vec<ServerId>,
     },
     /// Result of an atomic player transfer request.
     PlayerTransferResult {
@@ -184,7 +183,7 @@ pub enum CoordServerMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
-    pub server_id: u16,
+    pub server_id: ServerId,
     pub udp_addr: String,
     pub ws_addr: String,
 }
@@ -196,45 +195,6 @@ mod tests {
     use glam::Vec3;
 
     #[test]
-    fn server_message_world_snapshot_json_roundtrip() {
-        let e = EntityState::new_npc(Vec3::new(1.0, 0.0, 2.0), ServerId(1));
-        let msg = ServerMessage::WorldSnapshot {
-            tick: 42,
-            entities: vec![e],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"WorldSnapshot\""));
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::WorldSnapshot { tick, entities } => {
-                assert_eq!(tick, 42);
-                assert_eq!(entities.len(), 1);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn server_message_entity_delta_roundtrip() {
-        let e = EntityState::new_npc(Vec3::ZERO, ServerId(2));
-        let msg = ServerMessage::EntityDelta {
-            tick: 100,
-            updates: vec![e.clone()],
-            removals: vec![e.id],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::EntityDelta { tick, updates, removals } => {
-                assert_eq!(tick, 100);
-                assert_eq!(updates.len(), 1);
-                assert_eq!(removals.len(), 1);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
     fn client_message_spawn_entity_roundtrip() {
         let msg = ClientMessage::SpawnEntity {
             position: [10.0, 0.0, -5.0],
@@ -244,7 +204,10 @@ mod tests {
         assert!(json.contains("\"type\":\"SpawnEntity\""));
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::SpawnEntity { position, entity_type } => {
+            ClientMessage::SpawnEntity {
+                position,
+                entity_type,
+            } => {
                 assert_eq!(position, [10.0, 0.0, -5.0]);
                 assert_eq!(entity_type, "npc");
             }
@@ -254,16 +217,21 @@ mod tests {
 
     #[test]
     fn client_message_move_input_roundtrip() {
+        let eid = EntityId(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
         let msg = ClientMessage::MoveInput {
-            entity_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            entity_id: eid,
             direction: [1.0, 0.0, 0.0],
             seq: 42,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::MoveInput { entity_id, direction, seq } => {
-                assert_eq!(entity_id, "550e8400-e29b-41d4-a716-446655440000");
+            ClientMessage::MoveInput {
+                entity_id,
+                direction,
+                seq,
+            } => {
+                assert_eq!(entity_id, eid);
                 assert_eq!(direction, [1.0, 0.0, 0.0]);
                 assert_eq!(seq, 42);
             }
@@ -285,14 +253,21 @@ mod tests {
         let msg = PeerMessage::EntityStateUpdate {
             tick: 200,
             server_id: ServerId(1),
+            session_id: 0x11,
             entities: vec![e],
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::EntityStateUpdate { tick, server_id, entities } => {
+            PeerMessage::EntityStateUpdate {
+                tick,
+                server_id,
+                session_id,
+                entities,
+            } => {
                 assert_eq!(tick, 200);
                 assert_eq!(server_id, ServerId(1));
+                assert_eq!(session_id, 0x11);
                 assert_eq!(entities.len(), 1);
             }
             _ => panic!("wrong variant"),
@@ -305,6 +280,7 @@ mod tests {
         let eid = e.id;
         let msg = PeerMessage::AuthorityTransfer {
             tick: 300,
+            session_id: 0x22,
             entity_id: eid,
             from_server: ServerId(1),
             to_server: ServerId(2),
@@ -313,8 +289,16 @@ mod tests {
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::AuthorityTransfer { tick, entity_id, from_server, to_server, full_state } => {
+            PeerMessage::AuthorityTransfer {
+                tick,
+                session_id,
+                entity_id,
+                from_server,
+                to_server,
+                full_state,
+            } => {
                 assert_eq!(tick, 300);
+                assert_eq!(session_id, 0x22);
                 assert_eq!(entity_id, eid);
                 assert_eq!(from_server, ServerId(1));
                 assert_eq!(to_server, ServerId(2));
@@ -328,6 +312,7 @@ mod tests {
     fn peer_message_forwarded_input_bincode_roundtrip() {
         let eid = crate::entity::EntityId::new();
         let msg = PeerMessage::ForwardedInput {
+            session_id: 0x33,
             entity_id: eid,
             direction: [1.0, 0.0, -0.5],
             seq: 7,
@@ -335,7 +320,13 @@ mod tests {
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::ForwardedInput { entity_id, direction, seq } => {
+            PeerMessage::ForwardedInput {
+                session_id,
+                entity_id,
+                direction,
+                seq,
+            } => {
+                assert_eq!(session_id, 0x33);
                 assert_eq!(entity_id, eid);
                 assert_eq!(direction, [1.0, 0.0, -0.5]);
                 assert_eq!(seq, 7);
@@ -347,7 +338,7 @@ mod tests {
     #[test]
     fn coord_client_msg_register_roundtrip() {
         let msg = CoordClientMsg::Register {
-            server_id: 1,
+            server_id: ServerId(1),
             udp_port: 9101,
             ws_port: 7878,
             host: Some("10.0.0.1".to_string()),
@@ -358,8 +349,15 @@ mod tests {
         assert!(json.contains("\"type\":\"Register\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::Register { server_id, udp_port, ws_port, host, tls, .. } => {
-                assert_eq!(server_id, 1);
+            CoordClientMsg::Register {
+                server_id,
+                udp_port,
+                ws_port,
+                host,
+                tls,
+                ..
+            } => {
+                assert_eq!(server_id, ServerId(1));
                 assert_eq!(udp_port, 9101);
                 assert_eq!(ws_port, 7878);
                 assert_eq!(host, Some("10.0.0.1".to_string()));
@@ -373,7 +371,7 @@ mod tests {
     fn coord_client_msg_register_host_optional() {
         // host field should be omitted when None
         let msg = CoordClientMsg::Register {
-            server_id: 2,
+            server_id: ServerId(2),
             udp_port: 9102,
             ws_port: 7879,
             host: None,
@@ -404,7 +402,7 @@ mod tests {
     #[test]
     fn coord_client_msg_register_tls_true() {
         let msg = CoordClientMsg::Register {
-            server_id: 1,
+            server_id: ServerId(1),
             udp_port: 9101,
             ws_port: 7878,
             host: None,
@@ -424,8 +422,16 @@ mod tests {
     fn coord_server_msg_peer_list_roundtrip() {
         let msg = CoordServerMsg::PeerList {
             peers: vec![
-                PeerInfo { server_id: 1, udp_addr: "127.0.0.1:9101".into(), ws_addr: "127.0.0.1:7878".into() },
-                PeerInfo { server_id: 2, udp_addr: "127.0.0.1:9102".into(), ws_addr: "127.0.0.1:7879".into() },
+                PeerInfo {
+                    server_id: ServerId(1),
+                    udp_addr: "127.0.0.1:9101".into(),
+                    ws_addr: "127.0.0.1:7878".into(),
+                },
+                PeerInfo {
+                    server_id: ServerId(2),
+                    udp_addr: "127.0.0.1:9102".into(),
+                    ws_addr: "127.0.0.1:7879".into(),
+                },
             ],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -442,26 +448,12 @@ mod tests {
         let json = r#"{"type":"RecoverEntities","dead_server_id":3}"#;
         let decoded: CoordServerMsg = serde_json::from_str(json).unwrap();
         match decoded {
-            CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
-                assert_eq!(dead_server_id, 3);
+            CoordServerMsg::RecoverEntities {
+                dead_server_id,
+                survivors,
+            } => {
+                assert_eq!(dead_server_id, ServerId(3));
                 assert!(survivors.is_empty());
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn empty_world_snapshot() {
-        let msg = ServerMessage::WorldSnapshot {
-            tick: 0,
-            entities: vec![],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        match decoded {
-            ServerMessage::WorldSnapshot { tick, entities } => {
-                assert_eq!(tick, 0);
-                assert!(entities.is_empty());
             }
             _ => panic!("wrong variant"),
         }
@@ -482,8 +474,9 @@ mod tests {
 
     #[test]
     fn move_input_seq_preserved() {
+        let eid = crate::entity::EntityId::new();
         let msg = ClientMessage::MoveInput {
-            entity_id: "test".to_string(),
+            entity_id: eid,
             direction: [1.0, 0.0, 0.0],
             seq: 999,
         };
@@ -500,6 +493,7 @@ mod tests {
     fn forwarded_input_seq_bincode_roundtrip() {
         let eid = crate::entity::EntityId::new();
         let msg = PeerMessage::ForwardedInput {
+            session_id: 0x44,
             entity_id: eid,
             direction: [1.0, 0.0, -0.5],
             seq: 42,
@@ -507,7 +501,12 @@ mod tests {
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::ForwardedInput { seq, .. } => assert_eq!(seq, 42),
+            PeerMessage::ForwardedInput {
+                session_id, seq, ..
+            } => {
+                assert_eq!(session_id, 0x44);
+                assert_eq!(seq, 42);
+            }
             _ => panic!("wrong variant"),
         }
     }
@@ -515,11 +514,18 @@ mod tests {
     #[test]
     fn peer_message_forwarded_remove_bincode_roundtrip() {
         let eid = crate::entity::EntityId::new();
-        let msg = PeerMessage::ForwardedRemove { entity_id: eid };
+        let msg = PeerMessage::ForwardedRemove {
+            session_id: 0x55,
+            entity_id: eid,
+        };
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::ForwardedRemove { entity_id } => {
+            PeerMessage::ForwardedRemove {
+                session_id,
+                entity_id,
+            } => {
+                assert_eq!(session_id, 0x55);
                 assert_eq!(entity_id, eid);
             }
             _ => panic!("wrong variant"),
@@ -532,13 +538,19 @@ mod tests {
     fn peer_message_transfer_ack_bincode_roundtrip() {
         let eid = crate::entity::EntityId::new();
         let msg = PeerMessage::TransferAck {
+            session_id: 0x66,
             entity_id: eid,
             tick: 12345,
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::TransferAck { entity_id, tick } => {
+            PeerMessage::TransferAck {
+                session_id,
+                entity_id,
+                tick,
+            } => {
+                assert_eq!(session_id, 0x66);
                 assert_eq!(entity_id, eid);
                 assert_eq!(tick, 12345);
             }
@@ -556,6 +568,7 @@ mod tests {
         let msg = PeerMessage::ChunkedEntityUpdate {
             tick: 500,
             server_id: ServerId(1),
+            session_id: 0x77,
             chunk_index: 2,
             total_chunks: 5,
             entities,
@@ -566,12 +579,14 @@ mod tests {
             PeerMessage::ChunkedEntityUpdate {
                 tick,
                 server_id,
+                session_id,
                 chunk_index,
                 total_chunks,
                 entities,
             } => {
                 assert_eq!(tick, 500);
                 assert_eq!(server_id, ServerId(1));
+                assert_eq!(session_id, 0x77);
                 assert_eq!(chunk_index, 2);
                 assert_eq!(total_chunks, 5);
                 assert_eq!(entities.len(), 10);
@@ -585,6 +600,7 @@ mod tests {
         let msg = PeerMessage::ChunkedEntityUpdate {
             tick: 1,
             server_id: ServerId(1),
+            session_id: 0,
             chunk_index: 0,
             total_chunks: 1,
             entities: vec![],
@@ -611,6 +627,7 @@ mod tests {
         let msg = PeerMessage::ChunkedEntityUpdate {
             tick: 999,
             server_id: ServerId(7),
+            session_id: 0xABCD_EF01,
             chunk_index: 14,
             total_chunks: 20,
             entities: vec![],
@@ -619,10 +636,12 @@ mod tests {
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
             PeerMessage::ChunkedEntityUpdate {
+                session_id,
                 chunk_index,
                 total_chunks,
                 ..
             } => {
+                assert_eq!(session_id, 0xABCD_EF01);
                 assert_eq!(chunk_index, 14);
                 assert_eq!(total_chunks, 20);
             }
@@ -636,8 +655,8 @@ mod tests {
     fn coord_client_msg_player_transfer_roundtrip() {
         let msg = CoordClientMsg::PlayerTransfer {
             account_id: "player123".to_string(),
-            from_server: 1,
-            to_server: 2,
+            from_server: ServerId(1),
+            to_server: ServerId(2),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"PlayerTransfer\""));
@@ -649,8 +668,8 @@ mod tests {
                 to_server,
             } => {
                 assert_eq!(account_id, "player123");
-                assert_eq!(from_server, 1);
-                assert_eq!(to_server, 2);
+                assert_eq!(from_server, ServerId(1));
+                assert_eq!(to_server, ServerId(2));
             }
             _ => panic!("wrong variant"),
         }
@@ -726,13 +745,19 @@ mod tests {
     fn peer_message_transfer_ack_json_roundtrip() {
         let eid = crate::entity::EntityId::new();
         let msg = PeerMessage::TransferAck {
+            session_id: 0x88,
             entity_id: eid,
             tick: 42,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: PeerMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            PeerMessage::TransferAck { entity_id, tick } => {
+            PeerMessage::TransferAck {
+                session_id,
+                entity_id,
+                tick,
+            } => {
+                assert_eq!(session_id, 0x88);
                 assert_eq!(entity_id, eid);
                 assert_eq!(tick, 42);
             }
@@ -750,6 +775,7 @@ mod tests {
         let msg = PeerMessage::ChunkedEntityUpdate {
             tick: 100,
             server_id: ServerId(2),
+            session_id: 0x99,
             chunk_index: 0,
             total_chunks: 3,
             entities,
@@ -760,12 +786,14 @@ mod tests {
             PeerMessage::ChunkedEntityUpdate {
                 tick,
                 server_id,
+                session_id,
                 chunk_index,
                 total_chunks,
                 entities,
             } => {
                 assert_eq!(tick, 100);
                 assert_eq!(server_id, ServerId(2));
+                assert_eq!(session_id, 0x99);
                 assert_eq!(chunk_index, 0);
                 assert_eq!(total_chunks, 3);
                 assert_eq!(entities.len(), 3);
@@ -780,8 +808,8 @@ mod tests {
     fn coord_client_msg_player_transfer_json_fields() {
         let msg = CoordClientMsg::PlayerTransfer {
             account_id: "abc-123".to_string(),
-            from_server: 5,
-            to_server: 10,
+            from_server: ServerId(5),
+            to_server: ServerId(10),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"PlayerTransfer\""));
@@ -796,13 +824,16 @@ mod tests {
     fn peer_message_transfer_ack_tick_zero() {
         let eid = crate::entity::EntityId::new();
         let msg = PeerMessage::TransferAck {
+            session_id: 0,
             entity_id: eid,
             tick: 0,
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            PeerMessage::TransferAck { entity_id, tick } => {
+            PeerMessage::TransferAck {
+                entity_id, tick, ..
+            } => {
                 assert_eq!(entity_id, eid);
                 assert_eq!(tick, 0);
             }
@@ -817,6 +848,7 @@ mod tests {
         let msg = PeerMessage::ChunkedEntityUpdate {
             tick: 1,
             server_id: ServerId(1),
+            session_id: u64::MAX,
             chunk_index: u16::MAX,
             total_chunks: u16::MAX,
             entities: vec![],
@@ -840,17 +872,22 @@ mod tests {
 
     #[test]
     fn coord_server_msg_rebalance_directive_roundtrip() {
+        let eid1 = crate::entity::EntityId::new();
+        let eid2 = crate::entity::EntityId::new();
         let msg = CoordServerMsg::RebalanceDirective {
-            entity_ids: vec!["uuid-1".into(), "uuid-2".into()],
-            target_server: 3,
+            entity_ids: vec![eid1, eid2],
+            target_server: ServerId(3),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"RebalanceDirective\""));
         let decoded: CoordServerMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordServerMsg::RebalanceDirective { entity_ids, target_server } => {
+            CoordServerMsg::RebalanceDirective {
+                entity_ids,
+                target_server,
+            } => {
                 assert_eq!(entity_ids.len(), 2);
-                assert_eq!(target_server, 3);
+                assert_eq!(target_server, ServerId(3));
             }
             _ => panic!("wrong variant"),
         }
@@ -859,14 +896,14 @@ mod tests {
     #[test]
     fn coord_server_msg_drain_directive_roundtrip() {
         let msg = CoordServerMsg::DrainDirective {
-            target_servers: vec![2, 3, 4],
+            target_servers: vec![ServerId(2), ServerId(3), ServerId(4)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"DrainDirective\""));
         let decoded: CoordServerMsg = serde_json::from_str(&json).unwrap();
         match decoded {
             CoordServerMsg::DrainDirective { target_servers } => {
-                assert_eq!(target_servers, vec![2, 3, 4]);
+                assert_eq!(target_servers, vec![ServerId(2), ServerId(3), ServerId(4)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -875,15 +912,18 @@ mod tests {
     #[test]
     fn coord_server_msg_recover_entities_with_survivors_roundtrip() {
         let msg = CoordServerMsg::RecoverEntities {
-            dead_server_id: 5,
-            survivors: vec![1, 2, 3],
+            dead_server_id: ServerId(5),
+            survivors: vec![ServerId(1), ServerId(2), ServerId(3)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: CoordServerMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordServerMsg::RecoverEntities { dead_server_id, survivors } => {
-                assert_eq!(dead_server_id, 5);
-                assert_eq!(survivors, vec![1, 2, 3]);
+            CoordServerMsg::RecoverEntities {
+                dead_server_id,
+                survivors,
+            } => {
+                assert_eq!(dead_server_id, ServerId(5));
+                assert_eq!(survivors, vec![ServerId(1), ServerId(2), ServerId(3)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -894,7 +934,7 @@ mod tests {
     #[test]
     fn coord_client_msg_heartbeat_roundtrip() {
         let msg = CoordClientMsg::Heartbeat {
-            server_id: 2,
+            server_id: ServerId(2),
             entity_count: 150,
             weighted_load: 180,
         };
@@ -902,8 +942,12 @@ mod tests {
         assert!(json.contains("\"type\":\"Heartbeat\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::Heartbeat { server_id, entity_count, weighted_load } => {
-                assert_eq!(server_id, 2);
+            CoordClientMsg::Heartbeat {
+                server_id,
+                entity_count,
+                weighted_load,
+            } => {
+                assert_eq!(server_id, ServerId(2));
                 assert_eq!(entity_count, 150);
                 assert_eq!(weighted_load, 180);
             }
@@ -913,13 +957,15 @@ mod tests {
 
     #[test]
     fn coord_client_msg_draining_roundtrip() {
-        let msg = CoordClientMsg::Draining { server_id: 7 };
+        let msg = CoordClientMsg::Draining {
+            server_id: ServerId(7),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"Draining\""));
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
             CoordClientMsg::Draining { server_id } => {
-                assert_eq!(server_id, 7);
+                assert_eq!(server_id, ServerId(7));
             }
             _ => panic!("wrong variant"),
         }
@@ -933,15 +979,19 @@ mod tests {
         // the sending server, but the protocol message should still roundtrip.
         let msg = CoordClientMsg::PlayerTransfer {
             account_id: "test-player".to_string(),
-            from_server: 99, // mismatched
-            to_server: 2,
+            from_server: ServerId(99), // mismatched
+            to_server: ServerId(2),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: CoordClientMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordClientMsg::PlayerTransfer { from_server, to_server, .. } => {
-                assert_eq!(from_server, 99);
-                assert_eq!(to_server, 2);
+            CoordClientMsg::PlayerTransfer {
+                from_server,
+                to_server,
+                ..
+            } => {
+                assert_eq!(from_server, ServerId(99));
+                assert_eq!(to_server, ServerId(2));
             }
             _ => panic!("wrong variant"),
         }
@@ -1007,15 +1057,14 @@ mod tests {
 
     #[test]
     fn client_message_remove_entity_roundtrip() {
-        let msg = ClientMessage::RemoveEntity {
-            entity_id: "some-uuid".to_string(),
-        };
+        let eid = crate::entity::EntityId::new();
+        let msg = ClientMessage::RemoveEntity { entity_id: eid };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"RemoveEntity\""));
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
             ClientMessage::RemoveEntity { entity_id } => {
-                assert_eq!(entity_id, "some-uuid");
+                assert_eq!(entity_id, eid);
             }
             _ => panic!("wrong variant"),
         }
@@ -1023,16 +1072,20 @@ mod tests {
 
     #[test]
     fn client_message_spawn_player_roundtrip() {
+        let eid = crate::entity::EntityId::new();
         let msg = ClientMessage::SpawnPlayer {
-            player_id: "p-uuid".to_string(),
+            player_id: eid,
             position: [1.0, 2.0, 3.0],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"SpawnPlayer\""));
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::SpawnPlayer { player_id, position } => {
-                assert_eq!(player_id, "p-uuid");
+            ClientMessage::SpawnPlayer {
+                player_id,
+                position,
+            } => {
+                assert_eq!(player_id, eid);
                 assert_eq!(position, [1.0, 2.0, 3.0]);
             }
             _ => panic!("wrong variant"),
@@ -1050,25 +1103,36 @@ mod tests {
             PeerMessage::EntityStateUpdate {
                 tick: 1,
                 server_id: ServerId(1),
+                session_id: 0,
                 entities: vec![entity.clone()],
             },
             PeerMessage::AuthorityTransfer {
                 tick: 1,
+                session_id: 0,
                 entity_id: eid,
                 from_server: ServerId(1),
                 to_server: ServerId(2),
                 full_state: entity.clone(),
             },
             PeerMessage::ForwardedInput {
+                session_id: 0,
                 entity_id: eid,
                 direction: [1.0, 0.0, 0.0],
                 seq: 1,
             },
-            PeerMessage::ForwardedRemove { entity_id: eid },
-            PeerMessage::TransferAck { entity_id: eid, tick: 1 },
+            PeerMessage::ForwardedRemove {
+                session_id: 0,
+                entity_id: eid,
+            },
+            PeerMessage::TransferAck {
+                session_id: 0,
+                entity_id: eid,
+                tick: 1,
+            },
             PeerMessage::ChunkedEntityUpdate {
                 tick: 1,
                 server_id: ServerId(1),
+                session_id: 0,
                 chunk_index: 0,
                 total_chunks: 1,
                 entities: vec![entity],
@@ -1081,9 +1145,158 @@ mod tests {
             let bytes = bincode::serialize(msg).unwrap();
             // bincode encodes enum variant index as u32 LE
             let disc = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-            assert!(discriminants.insert(disc),
-                "duplicate bincode discriminant {} for {:?}", disc, msg);
+            assert!(
+                discriminants.insert(disc),
+                "duplicate bincode discriminant {} for {:?}",
+                disc,
+                msg
+            );
         }
         assert_eq!(discriminants.len(), 6);
+    }
+
+    // -- WI-131: PROTOCOL_VERSION bump + session_id field on every PeerMessage variant --
+
+    #[test]
+    fn peer_message_wire_version_is_2() {
+        // Design 013 (peer-restart-recovery) bumps the wire protocol version to 2
+        // because every PeerMessage variant grew a `session_id: u64` field.
+        assert_eq!(crate::PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn peer_message_entity_state_update_session_id_roundtrip() {
+        // Specifically verify that a non-zero session_id survives bincode roundtrip
+        // on the most common variant (every-tick replication).
+        let e = EntityState::new_npc(Vec3::new(1.0, 0.0, 2.0), ServerId(1));
+        let msg = PeerMessage::EntityStateUpdate {
+            tick: 42,
+            server_id: ServerId(1),
+            session_id: 0xDEAD_BEEF_CAFE_BABE,
+            entities: vec![e],
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: PeerMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PeerMessage::EntityStateUpdate { session_id, .. } => {
+                assert_eq!(session_id, 0xDEAD_BEEF_CAFE_BABE);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn peer_message_wire_size_grew_by_8_bytes_per_variant() {
+        // Every PeerMessage variant gained exactly 8 bytes (u64) for session_id.
+        // This test encodes each variant twice — once with session_id = 0 and
+        // once with session_id = u64::MAX — and asserts byte length is identical
+        // (session_id always takes 8 bytes regardless of value with bincode's
+        // fixint encoding). Then we assert each variant contains the full 8-byte
+        // little-endian session_id somewhere in its payload for MAX.
+        let eid = crate::entity::EntityId::new();
+        let entity = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+
+        let variants_zero: Vec<PeerMessage> = vec![
+            PeerMessage::EntityStateUpdate {
+                tick: 1,
+                server_id: ServerId(1),
+                session_id: 0,
+                entities: vec![entity.clone()],
+            },
+            PeerMessage::AuthorityTransfer {
+                tick: 1,
+                session_id: 0,
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: entity.clone(),
+            },
+            PeerMessage::ForwardedInput {
+                session_id: 0,
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+            PeerMessage::ForwardedRemove {
+                session_id: 0,
+                entity_id: eid,
+            },
+            PeerMessage::TransferAck {
+                session_id: 0,
+                entity_id: eid,
+                tick: 1,
+            },
+            PeerMessage::ChunkedEntityUpdate {
+                tick: 1,
+                server_id: ServerId(1),
+                session_id: 0,
+                chunk_index: 0,
+                total_chunks: 1,
+                entities: vec![entity.clone()],
+            },
+        ];
+
+        let variants_max: Vec<PeerMessage> = vec![
+            PeerMessage::EntityStateUpdate {
+                tick: 1,
+                server_id: ServerId(1),
+                session_id: u64::MAX,
+                entities: vec![entity.clone()],
+            },
+            PeerMessage::AuthorityTransfer {
+                tick: 1,
+                session_id: u64::MAX,
+                entity_id: eid,
+                from_server: ServerId(1),
+                to_server: ServerId(2),
+                full_state: entity.clone(),
+            },
+            PeerMessage::ForwardedInput {
+                session_id: u64::MAX,
+                entity_id: eid,
+                direction: [1.0, 0.0, 0.0],
+                seq: 1,
+            },
+            PeerMessage::ForwardedRemove {
+                session_id: u64::MAX,
+                entity_id: eid,
+            },
+            PeerMessage::TransferAck {
+                session_id: u64::MAX,
+                entity_id: eid,
+                tick: 1,
+            },
+            PeerMessage::ChunkedEntityUpdate {
+                tick: 1,
+                server_id: ServerId(1),
+                session_id: u64::MAX,
+                chunk_index: 0,
+                total_chunks: 1,
+                entities: vec![entity],
+            },
+        ];
+
+        assert_eq!(variants_zero.len(), 6);
+        assert_eq!(variants_max.len(), 6);
+        for (v0, vmax) in variants_zero.iter().zip(variants_max.iter()) {
+            let b0 = bincode::serialize(v0).unwrap();
+            let bmax = bincode::serialize(vmax).unwrap();
+            assert_eq!(
+                b0.len(),
+                bmax.len(),
+                "session_id value should not change encoded length"
+            );
+            // The MAX payload must contain all-ones 8-byte run somewhere (the
+            // session_id field). The zero payload must not contain such a run.
+            let all_ones = [0xFFu8; 8];
+            assert!(
+                bmax.windows(8).any(|w| w == all_ones),
+                "u64::MAX session_id should appear as 0xFFFF...FF in MAX encoding"
+            );
+            assert!(
+                !b0.windows(8).any(|w| w == all_ones),
+                "all-zero session_id should not contain 0xFFFF...FF run"
+            );
+        }
     }
 }

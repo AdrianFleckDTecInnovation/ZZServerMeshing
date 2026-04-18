@@ -5,7 +5,7 @@
 //! and HashMap only, making it thoroughly unit-testable.
 
 use glam::Vec3;
-use shared::entity::{EntityId, EntityState, EntityType, ServerId};
+use shared::entity::{EntityId, EntityState};
 use std::collections::{HashMap, HashSet};
 
 /// Threshold for considering a float "changed" (avoids floating-point noise).
@@ -20,29 +20,6 @@ const CHANGE_THRESHOLD_SQ: f32 = CHANGE_THRESHOLD * CHANGE_THRESHOLD;
 /// How often to force a full snapshot regardless of delta state.
 /// 100 ticks = 5 seconds at 20Hz. Well within SHADOW_STALE_TICKS (300 = 15s).
 pub const FULL_SNAPSHOT_INTERVAL: u32 = 100;
-
-/// Compact entity state for baseline comparison.
-/// No EntityId field -- the baseline map is keyed by EntityId.
-#[derive(Clone, Debug)]
-pub struct CompactEntityState {
-    pub position: Vec3,
-    pub velocity: Vec3,
-    pub entity_type: EntityType,
-    pub authority_server: ServerId,
-    pub last_input_seq: u32,
-}
-
-impl From<&EntityState> for CompactEntityState {
-    fn from(e: &EntityState) -> Self {
-        Self {
-            position: e.position,
-            velocity: e.velocity,
-            entity_type: e.entity_type,
-            authority_server: e.authority_server,
-            last_input_seq: e.last_input_seq,
-        }
-    }
-}
 
 /// Result of a delta computation.
 pub struct DeltaResult {
@@ -61,10 +38,8 @@ pub struct DeltaResult {
 /// Entities removed from the baseline are NOT counted as changes here because
 /// the purpose is to estimate delta frame size (removed entities are 16-byte UUIDs,
 /// not 47-byte entity records).
-pub fn change_ratio(
-    current: &[EntityState],
-    baseline: &HashMap<EntityId, CompactEntityState>,
-) -> f32 {
+#[cfg(test)]
+pub fn change_ratio(current: &[EntityState], baseline: &HashMap<EntityId, EntityState>) -> f32 {
     if current.is_empty() {
         return 0.0;
     }
@@ -85,7 +60,7 @@ pub fn change_ratio(
 /// Compare current entity set against a baseline. Returns the delta.
 pub fn compute_delta(
     current: &[EntityState],
-    baseline: &HashMap<EntityId, CompactEntityState>,
+    baseline: &HashMap<EntityId, EntityState>,
 ) -> DeltaResult {
     let mut updates = Vec::new();
     let mut current_ids = HashSet::with_capacity(current.len());
@@ -115,28 +90,22 @@ pub fn compute_delta(
 }
 
 /// Build a baseline map from a full entity snapshot.
-pub fn build_baseline(entities: &[EntityState]) -> HashMap<EntityId, CompactEntityState> {
-    entities
-        .iter()
-        .map(|e| (e.id, CompactEntityState::from(e)))
-        .collect()
+pub fn build_baseline(entities: &[EntityState]) -> HashMap<EntityId, EntityState> {
+    entities.iter().map(|e| (e.id, e.clone())).collect()
 }
 
 /// Update a baseline incrementally after sending a delta.
 /// More efficient than rebuilding from scratch -- O(changed) instead of O(all).
-pub fn update_baseline(
-    baseline: &mut HashMap<EntityId, CompactEntityState>,
-    delta: &DeltaResult,
-) {
+pub fn update_baseline(baseline: &mut HashMap<EntityId, EntityState>, delta: &DeltaResult) {
     for entity in &delta.updates {
-        baseline.insert(entity.id, CompactEntityState::from(entity));
+        baseline.insert(entity.id, entity.clone());
     }
     for id in &delta.removals {
         baseline.remove(id);
     }
 }
 
-fn entity_changed(current: &EntityState, baseline: &CompactEntityState) -> bool {
+fn entity_changed(current: &EntityState, baseline: &EntityState) -> bool {
     vec3_changed(current.position, baseline.position)
         || vec3_changed(current.velocity, baseline.velocity)
         || current.entity_type != baseline.entity_type
@@ -151,6 +120,7 @@ fn vec3_changed(a: Vec3, b: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::entity::{EntityType, ServerId};
 
     fn make_npc(pos: Vec3, server: u16) -> EntityState {
         EntityState::new_npc(pos, ServerId(server))
@@ -268,7 +238,11 @@ mod tests {
         current[0].position.x += 0.005;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 0, "movement below threshold should not produce update");
+        assert_eq!(
+            delta.updates.len(),
+            0,
+            "movement below threshold should not produce update"
+        );
     }
 
     #[test]
@@ -281,7 +255,11 @@ mod tests {
         current[0].position.x += 0.02;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "movement above threshold should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "movement above threshold should produce update"
+        );
     }
 
     #[test]
@@ -295,7 +273,11 @@ mod tests {
         current[0].velocity = Vec3::new(0.0, 0.0, 1.0);
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "velocity change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "velocity change should produce update"
+        );
     }
 
     #[test]
@@ -308,7 +290,11 @@ mod tests {
         current[0].authority_server = ServerId(2);
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "authority change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "authority change should produce update"
+        );
     }
 
     #[test]
@@ -322,7 +308,11 @@ mod tests {
         current[0].last_input_seq = 6;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "last_input_seq change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "last_input_seq change should produce update"
+        );
     }
 
     #[test]
@@ -335,7 +325,11 @@ mod tests {
         current[0].entity_type = EntityType::Player;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "entity_type change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "entity_type change should produce update"
+        );
     }
 
     #[test]
@@ -371,8 +365,16 @@ mod tests {
 
         // Now comparing current against updated baseline should yield empty delta
         let delta2 = compute_delta(&current, &baseline);
-        assert_eq!(delta2.updates.len(), 0, "baseline should match current after update");
-        assert_eq!(delta2.removals.len(), 0, "baseline should match current after update");
+        assert_eq!(
+            delta2.updates.len(),
+            0,
+            "baseline should match current after update"
+        );
+        assert_eq!(
+            delta2.removals.len(),
+            0,
+            "baseline should match current after update"
+        );
     }
 
     #[test]
@@ -390,7 +392,11 @@ mod tests {
         }
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 50, "10% of 500 entities should be in delta");
+        assert_eq!(
+            delta.updates.len(),
+            50,
+            "10% of 500 entities should be in delta"
+        );
         assert_eq!(delta.removals.len(), 0);
     }
 
@@ -410,7 +416,11 @@ mod tests {
         }
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 10, "all entities moved -> delta should contain all");
+        assert_eq!(
+            delta.updates.len(),
+            10,
+            "all entities moved -> delta should contain all"
+        );
         assert_eq!(delta.removals.len(), 0);
     }
 
@@ -425,12 +435,16 @@ mod tests {
 
         let delta = compute_delta(&[], &baseline);
         assert_eq!(delta.updates.len(), 0);
-        assert_eq!(delta.removals.len(), 3, "all baseline entities should be removals");
+        assert_eq!(
+            delta.removals.len(),
+            3,
+            "all baseline entities should be removals"
+        );
     }
 
     #[test]
     fn empty_current_empty_baseline() {
-        let baseline: HashMap<EntityId, CompactEntityState> = HashMap::new();
+        let baseline: HashMap<EntityId, EntityState> = HashMap::new();
         let delta = compute_delta(&[], &baseline);
         assert_eq!(delta.updates.len(), 0);
         assert_eq!(delta.removals.len(), 0);
@@ -446,7 +460,11 @@ mod tests {
         current[0].position.x += CHANGE_THRESHOLD;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 0, "movement exactly at threshold should not produce update");
+        assert_eq!(
+            delta.updates.len(),
+            0,
+            "movement exactly at threshold should not produce update"
+        );
     }
 
     #[test]
@@ -459,7 +477,11 @@ mod tests {
         current[0].position.x += CHANGE_THRESHOLD + 0.001;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "movement just above threshold should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "movement just above threshold should produce update"
+        );
     }
 
     #[test]
@@ -472,7 +494,11 @@ mod tests {
         current[0].position.y += 5.0;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "Y axis position change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "Y axis position change should produce update"
+        );
     }
 
     #[test]
@@ -484,7 +510,11 @@ mod tests {
         current[0].position.x = -100.0;
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 1, "large negative position change should produce update");
+        assert_eq!(
+            delta.updates.len(),
+            1,
+            "large negative position change should produce update"
+        );
     }
 
     #[test]
@@ -497,7 +527,11 @@ mod tests {
         current[0].velocity.x += 0.005; // below threshold
 
         let delta = compute_delta(&current, &baseline);
-        assert_eq!(delta.updates.len(), 0, "velocity below threshold should not produce update");
+        assert_eq!(
+            delta.updates.len(),
+            0,
+            "velocity below threshold should not produce update"
+        );
     }
 
     #[test]
@@ -510,8 +544,8 @@ mod tests {
         let baseline = build_baseline(&entities);
 
         let mut current = vec![
-            entities[0].clone(),  // unchanged
-            entities[2].clone(),  // will be moved
+            entities[0].clone(), // unchanged
+            entities[2].clone(), // will be moved
         ];
         current[1].position.x = 300.0; // move entity[2]
         let new_entity = make_npc(Vec3::new(4.0, 0.0, 0.0), 1);
@@ -566,21 +600,10 @@ mod tests {
 
     #[test]
     fn full_snapshot_interval_constant_value() {
-        assert_eq!(FULL_SNAPSHOT_INTERVAL, 100, "periodic full snapshot should be every 100 ticks (5s at 20Hz)");
-    }
-
-    #[test]
-    fn compact_entity_state_from_entity_state() {
-        let mut e = make_player(Vec3::new(1.0, 2.0, 3.0), 5);
-        e.velocity = Vec3::new(4.0, 5.0, 6.0);
-        e.last_input_seq = 42;
-
-        let compact = CompactEntityState::from(&e);
-        assert_eq!(compact.position, e.position);
-        assert_eq!(compact.velocity, e.velocity);
-        assert_eq!(compact.entity_type, e.entity_type);
-        assert_eq!(compact.authority_server, e.authority_server);
-        assert_eq!(compact.last_input_seq, e.last_input_seq);
+        assert_eq!(
+            FULL_SNAPSHOT_INTERVAL, 100,
+            "periodic full snapshot should be every 100 ticks (5s at 20Hz)"
+        );
     }
 
     #[test]
@@ -595,7 +618,10 @@ mod tests {
         assert_eq!(delta.updates[0].position, entities[0].position);
         assert_eq!(delta.updates[0].velocity, entities[0].velocity);
         assert_eq!(delta.updates[0].entity_type, entities[0].entity_type);
-        assert_eq!(delta.updates[0].authority_server, entities[0].authority_server);
+        assert_eq!(
+            delta.updates[0].authority_server,
+            entities[0].authority_server
+        );
     }
 
     // -- Diagonal movement tests (vec3 distance threshold, audit #022) --
@@ -642,8 +668,7 @@ mod tests {
     #[test]
     fn change_threshold_sq_value() {
         assert_eq!(
-            CHANGE_THRESHOLD_SQ,
-            0.0001,
+            CHANGE_THRESHOLD_SQ, 0.0001,
             "squared threshold should be 0.01^2 = 0.0001"
         );
     }
@@ -653,12 +678,18 @@ mod tests {
     #[test]
     fn vec3_changed_zero_movement() {
         let a = Vec3::new(1.0, 2.0, 3.0);
-        assert!(!vec3_changed(a, a), "identical vectors should not be changed");
+        assert!(
+            !vec3_changed(a, a),
+            "identical vectors should not be changed"
+        );
     }
 
     #[test]
     fn vec3_changed_zero_vectors() {
-        assert!(!vec3_changed(Vec3::ZERO, Vec3::ZERO), "two zero vectors should not be changed");
+        assert!(
+            !vec3_changed(Vec3::ZERO, Vec3::ZERO),
+            "two zero vectors should not be changed"
+        );
     }
 
     #[test]
@@ -733,7 +764,10 @@ mod tests {
     fn vec3_changed_negative_direction() {
         let a = Vec3::new(1.0, 0.0, 0.0);
         let b = Vec3::new(1.0 - 0.02, 0.0, 0.0);
-        assert!(vec3_changed(a, b), "negative movement above threshold should be changed");
+        assert!(
+            vec3_changed(a, b),
+            "negative movement above threshold should be changed"
+        );
     }
 
     // -- Velocity diagonal detection (uses same vec3_changed) --
@@ -804,7 +838,7 @@ mod tests {
 
         let mut current = entities.clone();
         current[0].position = Vec3::new(0.005, 0.0, 0.0); // below threshold
-        current[0].velocity = Vec3::new(0.02, 0.0, 0.0);  // above threshold
+        current[0].velocity = Vec3::new(0.02, 0.0, 0.0); // above threshold
 
         let delta = compute_delta(&current, &baseline);
         assert_eq!(
@@ -819,16 +853,22 @@ mod tests {
     #[test]
     fn change_ratio_empty_current() {
         let baseline = build_baseline(&[make_npc(Vec3::ZERO, 1)]);
-        assert_eq!(change_ratio(&[], &baseline), 0.0,
-            "empty current should return 0.0 regardless of baseline");
+        assert_eq!(
+            change_ratio(&[], &baseline),
+            0.0,
+            "empty current should return 0.0 regardless of baseline"
+        );
     }
 
     #[test]
     fn change_ratio_empty_baseline_all_new() {
         let current = vec![make_npc(Vec3::ZERO, 1), make_npc(Vec3::X, 2)];
         let baseline = HashMap::new();
-        assert_eq!(change_ratio(&current, &baseline), 1.0,
-            "all entities new (empty baseline) should return 1.0");
+        assert_eq!(
+            change_ratio(&current, &baseline),
+            1.0,
+            "all entities new (empty baseline) should return 1.0"
+        );
     }
 
     #[test]
@@ -838,8 +878,11 @@ mod tests {
             make_npc(Vec3::new(3.0, 0.0, 4.0), 2),
         ];
         let baseline = build_baseline(&entities);
-        assert_eq!(change_ratio(&entities, &baseline), 0.0,
-            "identical entities should return 0.0");
+        assert_eq!(
+            change_ratio(&entities, &baseline),
+            0.0,
+            "identical entities should return 0.0"
+        );
     }
 
     #[test]
@@ -853,8 +896,11 @@ mod tests {
         for e in &mut current {
             e.position.x += 100.0;
         }
-        assert_eq!(change_ratio(&current, &baseline), 1.0,
-            "all entities moved should return 1.0");
+        assert_eq!(
+            change_ratio(&current, &baseline),
+            1.0,
+            "all entities moved should return 1.0"
+        );
     }
 
     #[test]
@@ -870,8 +916,11 @@ mod tests {
             current[i].position.x += 100.0;
         }
         let ratio = change_ratio(&current, &baseline);
-        assert!((ratio - 0.7).abs() < 0.001,
-            "7/10 changed should return ~0.7, got {}", ratio);
+        assert!(
+            (ratio - 0.7).abs() < 0.001,
+            "7/10 changed should return ~0.7, got {}",
+            ratio
+        );
     }
 
     #[test]
@@ -892,7 +941,11 @@ mod tests {
         let ratio = change_ratio(&current, &baseline);
         let delta = compute_delta(&current, &baseline);
         let delta_ratio = delta.updates.len() as f32 / current.len() as f32;
-        assert!((ratio - delta_ratio).abs() < 0.001,
-            "change_ratio ({}) should agree with compute_delta ratio ({})", ratio, delta_ratio);
+        assert!(
+            (ratio - delta_ratio).abs() < 0.001,
+            "change_ratio ({}) should agree with compute_delta ratio ({})",
+            ratio,
+            delta_ratio
+        );
     }
 }
