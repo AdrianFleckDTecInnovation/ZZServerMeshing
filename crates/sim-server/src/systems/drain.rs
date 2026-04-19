@@ -21,10 +21,10 @@ pub fn process_drain(world: &mut World) {
     let tick = world.resource::<TickCounter>().0;
     let session_id = world.resource::<SessionId>().0;
 
-    // Record drain start tick if not yet set (started_tick == 0 means just activated)
-    if started_tick == 0 {
+    // Record drain start tick if not yet set (WI-190: None means just activated)
+    if started_tick.is_none() {
         if let Some(info) = &mut world.resource_mut::<DrainState>().0 {
-            info.started_tick = tick;
+            info.started_tick = Some(tick);
         }
     }
 
@@ -105,17 +105,20 @@ pub fn process_drain(world: &mut World) {
         return;
     }
 
-    // Drain timeout: if drain has been active too long, force shutdown
+    // Drain timeout: if drain has been active too long, force shutdown.
+    // WI-190: started_tick is Some(tick) after the stamp block above runs.
+    // If None somehow (shouldn't be possible on this code path), skip the check.
     if let Some(info) = &world.resource::<DrainState>().0 {
-        let started = info.started_tick;
-        if started > 0 && tick.saturating_sub(started) > DRAIN_TIMEOUT_TICKS {
-            tracing::error!(
-                remaining,
-                pending_transfers,
-                "Drain timeout after {} ticks, forcing shutdown",
-                tick.saturating_sub(started),
-            );
-            world.resource_mut::<ShutdownRequested>().0 = true;
+        if let Some(started) = info.started_tick {
+            if tick.saturating_sub(started) > DRAIN_TIMEOUT_TICKS {
+                tracing::error!(
+                    remaining,
+                    pending_transfers,
+                    "Drain timeout after {} ticks, forcing shutdown",
+                    tick.saturating_sub(started),
+                );
+                world.resource_mut::<ShutdownRequested>().0 = true;
+            }
         }
     }
 }
@@ -172,7 +175,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -222,7 +225,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2), ServerId(3)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -260,7 +263,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![],
-            started_tick: 0,
+            started_tick: None,
         });
 
         process_drain(&mut world);
@@ -311,7 +314,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -341,7 +344,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -367,7 +370,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -420,7 +423,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -458,7 +461,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -479,7 +482,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -506,7 +509,7 @@ mod tests {
         // No entities
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -530,7 +533,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 10;
 
@@ -555,7 +558,7 @@ mod tests {
 
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![ServerId(2)],
-            started_tick: 0,
+            started_tick: None,
         });
         world.resource_mut::<TickCounter>().0 = 42;
 
@@ -568,7 +571,80 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .started_tick,
-            42
+            Some(42)
+        );
+    }
+
+    // -- WI-190: Option<u64> semantics regression tests --
+
+    #[test]
+    fn drain_starts_at_tick_zero_stamps_correctly() {
+        // Regression for finding 088: ensure started_tick=None gets stamped
+        // to Some(0) when drain activates on tick 0, NOT treated as
+        // "not yet stamped". The old sentinel design (0 = unset) could not
+        // distinguish "stamp happened on tick 0" from "never stamped".
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: None,
+        });
+        world.resource_mut::<TickCounter>().0 = 0;
+
+        process_drain(&mut world);
+
+        assert_eq!(
+            world
+                .resource::<DrainState>()
+                .0
+                .as_ref()
+                .unwrap()
+                .started_tick,
+            Some(0),
+            "tick 0 must stamp as Some(0), not be treated as 'not yet stamped'"
+        );
+    }
+
+    #[test]
+    fn drain_timeout_does_not_fire_before_stamp() {
+        // Regression: even if the current tick is well past the drain
+        // timeout ceiling, the timeout check must not fire on the same
+        // tick the stamp happens — tick.saturating_sub(just-stamped) = 0
+        // which is <= DRAIN_TIMEOUT_TICKS, so shutdown should NOT be set.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        spawn_auth_npc(&mut world, Vec3::ZERO, 1);
+
+        world.resource_mut::<DrainState>().0 = Some(DrainInfo {
+            targets: vec![ServerId(2)],
+            started_tick: None,
+        });
+        // Far past the timeout ceiling (DRAIN_TIMEOUT_TICKS = 600)
+        world.resource_mut::<TickCounter>().0 = 700;
+
+        process_drain(&mut world);
+
+        assert!(
+            !world.resource::<ShutdownRequested>().0,
+            "timeout must not fire on the same tick the stamp happens"
+        );
+        // And the drain IS active, so started_tick is now stamped to 700.
+        assert_eq!(
+            world
+                .resource::<DrainState>()
+                .0
+                .as_ref()
+                .unwrap()
+                .started_tick,
+            Some(700)
         );
     }
 }

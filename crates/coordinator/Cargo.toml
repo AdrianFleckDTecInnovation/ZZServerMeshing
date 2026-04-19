@@ -16,3 +16,8 @@ clap = { version = "4", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
+# socket2 is used to configure TCP keepalive on the sim-server accept path so
+# the kernel surfaces half-open TCP connections (kill -9, power-off) within
+# seconds rather than minutes-to-hours. See design 016 Batch 1 / finding 076.
+# The `all` feature unlocks `TcpKeepalive::with_retries` (TCP_KEEPCNT) on linux.
+socket2 = { version = "0.5", features = ["all"] }

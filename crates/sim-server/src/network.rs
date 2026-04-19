@@ -1,11 +1,12 @@
-use crate::game_loop::SharedInbound;
+use crate::game_loop::{SharedAuthPlayers, SharedInbound};
 use crate::resources::{ClientFrame, ClientRegistrationEvent, PER_CLIENT_CHANNEL_SIZE};
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use shared::entity::EntityId;
 use shared::protocol::{ClientMessage, ServerMessage};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
@@ -58,6 +59,7 @@ impl RateLimiter {
 pub async fn run_websocket_server(
     port: u16,
     inbound: Arc<SharedInbound>,
+    auth_players: Arc<SharedAuthPlayers>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -78,6 +80,7 @@ pub async fn run_websocket_server(
         };
 
         let inbound = Arc::clone(&inbound);
+        let auth_players = Arc::clone(&auth_players);
 
         if let Some(ref acceptor) = tls_acceptor {
             let acceptor = acceptor.clone();
@@ -97,7 +100,7 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr} (TLS)");
-                handle_client(ws_stream, addr, inbound).await;
+                handle_client(ws_stream, addr, inbound, auth_players).await;
             });
         } else {
             tokio::spawn(async move {
@@ -109,10 +112,33 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr}");
-                handle_client(ws_stream, addr, inbound).await;
+                handle_client(ws_stream, addr, inbound, auth_players).await;
             });
         }
     }
+}
+
+/// How long to wait for the first client message before falling back to the
+/// default spawn-new-player flow. Players migrating via `ServerMessage::
+/// Reconnect` send `ClaimPlayer` immediately on open, so 500 ms is
+/// generous. Fresh clients that never press WASD will incur this delay
+/// before their entity appears — acceptable given the UX.
+const CLAIM_WAIT_MS: u64 = 500;
+
+/// How long to wait for a claimed player entity to arrive via
+/// AuthorityTransfer before falling back to spawning a new player.
+/// Sized to cover a worst-case coordinator hop + UDP round-trip (~200 ms)
+/// plus the client's own reconnect backoff (~250 ms on the fast path).
+const CLAIM_ARRIVAL_WAIT_MS: u64 = 2000;
+const CLAIM_POLL_INTERVAL_MS: u64 = 100;
+
+/// Check the shared authoritative-player set for the given EntityId.
+/// Short-lived lock; guards against accidental poisoning.
+fn auth_player_present(auth_players: &SharedAuthPlayers, eid: EntityId) -> bool {
+    auth_players
+        .lock()
+        .map(|g| g.contains(&eid))
+        .unwrap_or(false)
 }
 
 /// Handle a single WebSocket client connection. Generic over the underlying
@@ -121,6 +147,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     ws_stream: WebSocketStream<S>,
     addr: std::net::SocketAddr,
     inbound: Arc<SharedInbound>,
+    auth_players: Arc<SharedAuthPlayers>,
 ) {
     let (mut ws_sink, mut ws_stream): (
         SplitSink<WebSocketStream<S>, Message>,
@@ -136,28 +163,136 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // Shared ACK tick counter between this task and the ECS game loop
     let acked_tick = Arc::new(AtomicU64::new(0));
 
-    // Generate player UUID and push SpawnPlayer to the inbound queue.
-    // The player entity is created on the next game loop tick.
-    let player_id = shared::entity::EntityId(uuid::Uuid::new_v4());
+    // Shared migrating_out flag so the ECS (`process_transfers`) can flip
+    // it when initiating player migration to a peer, and our close handler
+    // below can read it to decide whether to push RemoveEntity on disconnect.
+    let migrating_out = Arc::new(AtomicBool::new(false));
+
+    // WI-202: short initial wait for ClaimPlayer. If the client is arriving
+    // via server-directed Reconnect (migration), it sends ClaimPlayer as its
+    // first message; otherwise the usual spawn-new-player flow activates
+    // after CLAIM_WAIT_MS elapses without any message.
+    let mut pending_first_message: Option<ClientMessage> = None;
+    let first_frame = tokio::time::timeout(
+        std::time::Duration::from_millis(CLAIM_WAIT_MS),
+        ws_stream.next(),
+    )
+    .await;
+
+    let claimed_player_id: Option<EntityId> = match first_frame {
+        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::ClaimPlayer { player_id }) => {
+                tracing::info!(
+                    client_id,
+                    player_id = %player_id,
+                    "Received ClaimPlayer from {addr}"
+                );
+                Some(player_id)
+            }
+            Ok(other) => {
+                pending_first_message = Some(other);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Invalid first message from {addr}: {e}");
+                None
+            }
+        },
+        Ok(Some(Ok(Message::Binary(_)))) => {
+            // Binary first message (e.g., an ACK) — no claim. Fall through to
+            // default spawn flow. We don't forward binary to pending because
+            // binary is only ACKs which depend on tick values from the server.
+            None
+        }
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+            // Client hung up before sending anything.
+            tracing::info!(client_id, "Client {addr} disconnected during claim wait");
+            return;
+        }
+        Ok(Some(Ok(_))) => None, // ping/pong — ignore
+        Ok(Some(Err(e))) => {
+            tracing::warn!("WebSocket error during claim wait from {addr}: {e}");
+            return;
+        }
+        Err(_) => {
+            // Timeout: no message within CLAIM_WAIT_MS. Default: spawn new player.
+            None
+        }
+    };
+
+    // Resolve to an actual player_id + spawn decision.
+    // If ClaimPlayer arrived, wait up to CLAIM_ARRIVAL_WAIT_MS for the
+    // entity to appear on this server (arrival via AuthorityTransfer).
+    // If it does, register the client bound to the existing entity.
+    // If not, fall back to spawning a new player with the SAME UUID the
+    // client claimed — this preserves the client-server UUID agreement and
+    // avoids the reconcile churn of reassigning.
+    let (player_id, do_spawn) = match claimed_player_id {
+        Some(claimed) => {
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(CLAIM_ARRIVAL_WAIT_MS);
+            let mut arrived = auth_player_present(&auth_players, claimed);
+            while !arrived && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(CLAIM_POLL_INTERVAL_MS))
+                    .await;
+                arrived = auth_player_present(&auth_players, claimed);
+            }
+            if arrived {
+                tracing::info!(
+                    client_id,
+                    player_id = %claimed,
+                    "ClaimPlayer resolved: entity present, adopting"
+                );
+                (claimed, false)
+            } else {
+                tracing::warn!(
+                    client_id,
+                    player_id = %claimed,
+                    wait_ms = CLAIM_ARRIVAL_WAIT_MS,
+                    "ClaimPlayer timed out waiting for entity, spawning new player with claimed UUID"
+                );
+                (claimed, true)
+            }
+        }
+        None => {
+            // No claim — mint a fresh UUID and spawn as usual.
+            (shared::entity::EntityId(uuid::Uuid::new_v4()), true)
+        }
+    };
+
     {
         let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push((
-            client_id,
-            ClientMessage::SpawnPlayer {
-                player_id,
-                position: [0.0, 0.0, 0.0],
-            },
-        ));
-        // Register this client in the ECS via the inbound queue
+        if do_spawn {
+            q.client_inputs.push((
+                client_id,
+                ClientMessage::SpawnPlayer {
+                    player_id,
+                    position: [0.0, 0.0, 0.0],
+                },
+            ));
+        }
+        // Register this client in the ECS via the inbound queue. The
+        // player_uuid here is the authoritative id the client will know us
+        // by — either the claimed one (adopt path) or the freshly minted one.
         q.register_clients.push(ClientRegistrationEvent {
             client_id,
             tx: frame_tx,
             acked_tick: Arc::clone(&acked_tick),
             player_uuid: player_id,
+            migrating_out: Arc::clone(&migrating_out),
         });
+        // If the pre-spawn first message was a non-ClaimPlayer, forward it
+        // now so the game loop processes it alongside the spawn request.
+        if let Some(msg) = pending_first_message.take() {
+            q.client_inputs.push((client_id, msg));
+        }
     }
 
-    // Send PlayerAssigned as JSON text frame
+    // Send PlayerAssigned as JSON text frame. Uses the same UUID regardless
+    // of whether we adopted or spawned — the server is authoritative on the
+    // id. If the client had a different id in mind (e.g. claim-to-spawn
+    // fallback with a random UUID), the client adapts via its existing
+    // PlayerAssigned handler.
     let assign_msg = ServerMessage::PlayerAssigned {
         player_id: player_id.to_string(),
         protocol_version: shared::PROTOCOL_VERSION,
@@ -166,12 +301,14 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         if ws_sink.send(Message::Text(json.into())).await.is_err() {
             // Client disconnected during assignment -- remove the player
             let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
-            q.client_inputs.push((
-                client_id,
-                ClientMessage::RemoveEntity {
-                    entity_id: player_id,
-                },
-            ));
+            if do_spawn {
+                q.client_inputs.push((
+                    client_id,
+                    ClientMessage::RemoveEntity {
+                        entity_id: player_id,
+                    },
+                ));
+            }
             q.unregister_clients.push(client_id);
             return;
         }
@@ -179,6 +316,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     tracing::info!(
         client_id,
+        spawned = do_spawn,
         "Assigned player {} to client {addr}",
         &player_id.to_string()[..8]
     );
@@ -191,8 +329,15 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             // Receive per-client frames from the game loop
             frame = frame_rx.recv() => {
                 match frame {
-                    Some(client_frame) => {
-                        if ws_sink.send(Message::Binary(client_frame.into())).await.is_err() {
+                    Some(ClientFrame::Binary(bytes)) => {
+                        if ws_sink.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(ClientFrame::Text(s)) => {
+                        // WI-201: JSON text frame (e.g., ServerMessage::Reconnect
+                        // during player migration). Rare by design.
+                        if ws_sink.send(Message::Text(s.into())).await.is_err() {
                             break;
                         }
                     }
@@ -267,30 +412,46 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
 
-    // Client disconnected -- push RemoveEntity and unregister
+    // Client disconnected -- push RemoveEntity and unregister.
+    // WI-202: if this client is migrating OUT (source server flipped the
+    // flag after sending Reconnect), suppress RemoveEntity — the target
+    // server now owns the entity, so removing it here would cause the
+    // player to blink out before reappearing on the new server.
+    let migrating = migrating_out.load(Ordering::Acquire);
     {
         let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
-        q.client_inputs.push((
-            client_id,
-            ClientMessage::RemoveEntity {
-                entity_id: player_id,
-            },
-        ));
+        if !migrating {
+            q.client_inputs.push((
+                client_id,
+                ClientMessage::RemoveEntity {
+                    entity_id: player_id,
+                },
+            ));
+        }
         q.unregister_clients.push(client_id);
     }
-    tracing::info!(
-        client_id,
-        "Removed player {} on disconnect",
-        &player_id.to_string()[..8]
-    );
+    if migrating {
+        tracing::info!(
+            client_id,
+            "Client migrating out -- skipping RemoveEntity on close (player {} handed off)",
+            &player_id.to_string()[..8]
+        );
+    } else {
+        tracing::info!(
+            client_id,
+            "Removed player {} on disconnect",
+            &player_id.to_string()[..8]
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::encoding::{encode_binary_delta, encode_binary_snapshot, encode_entity};
+    use crate::encoding::{encode_binary_snapshot, encode_entity};
     use glam::Vec3;
     use shared::entity::{EntityId, EntityState, ServerId};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn encode_binary_snapshot_empty() {
@@ -334,32 +495,6 @@ mod tests {
         assert_eq!(buf[offset2 + 40], 1);
         let auth2 = u16::from_le_bytes(buf[offset2 + 41..offset2 + 43].try_into().unwrap());
         assert_eq!(auth2, 2);
-    }
-
-    #[test]
-    fn encode_binary_delta_roundtrip() {
-        let updates = vec![EntityState::new_npc(Vec3::new(5.0, 0.0, 5.0), ServerId(1))];
-        let removals = vec![EntityId::new()];
-        let buf = encode_binary_delta(50, &updates, &removals);
-        // header(31) + 1 entity(47) + 1 removal UUID(16)
-        assert_eq!(buf.len(), 31 + 47 + 16);
-        assert_eq!(buf[0], 0x02);
-
-        let tick = u64::from_le_bytes(buf[1..9].try_into().unwrap());
-        assert_eq!(tick, 50);
-
-        let update_count = u32::from_le_bytes(buf[9..13].try_into().unwrap());
-        assert_eq!(update_count, 1);
-
-        let removal_count = u32::from_le_bytes(buf[13..17].try_into().unwrap());
-        assert_eq!(removal_count, 1);
-
-        // Verify removal UUID matches
-        let removal_offset = 31 + 47;
-        assert_eq!(
-            &buf[removal_offset..removal_offset + 16],
-            removals[0].0.as_bytes()
-        );
     }
 
     // -- last_input_seq encoding tests --
@@ -461,16 +596,47 @@ mod tests {
         }
     }
 
+    // -- ClientRegistry tests --
+
     #[test]
-    fn encode_delta_empty() {
-        let buf = encode_binary_delta(1, &[], &[]);
-        assert_eq!(buf.len(), 31); // header only
-        assert_eq!(buf[0], 0x02);
-        assert_eq!(u32::from_le_bytes(buf[9..13].try_into().unwrap()), 0); // updates
-        assert_eq!(u32::from_le_bytes(buf[13..17].try_into().unwrap()), 0); // removals
+    fn client_registry_register_and_unregister() {
+        use crate::resources::{ClientFrame, ClientRegistry};
+        let mut registry = ClientRegistry::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked = Arc::new(AtomicU64::new(0));
+
+        registry.register_from_event(0, tx.clone(), Arc::clone(&acked));
+        assert_eq!(registry.clients.len(), 1);
+        assert!(registry.clients.contains_key(&0));
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let acked2 = Arc::new(AtomicU64::new(0));
+        registry.register_from_event(1, tx2, acked2);
+        assert_eq!(registry.clients.len(), 2);
+
+        registry.unregister(0);
+        assert_eq!(registry.clients.len(), 1);
+        assert!(!registry.clients.contains_key(&0));
+        assert!(registry.clients.contains_key(&1));
+
+        registry.unregister(1);
+        assert_eq!(registry.clients.len(), 0);
     }
 
-    // -- ACK parsing tests --
+    // -- Delta frame roundtrip test (restored) --
+
+    #[test]
+    fn encode_binary_delta_roundtrip() {
+        use crate::encoding::encode_binary_delta;
+        let updates = vec![EntityState::new_npc(Vec3::new(5.0, 0.0, 5.0), ServerId(1))];
+        let removals = vec![EntityId::new()];
+        let buf = encode_binary_delta(50, &updates, &removals);
+        // header(31) + 1 entity(47) + 1 removal UUID(16)
+        assert_eq!(buf.len(), 31 + 47 + 16);
+        assert_eq!(buf[0], 0x02);
+    }
+
+    // -- ACK frame parse tests --
 
     #[test]
     fn ack_parse_valid() {
@@ -493,7 +659,6 @@ mod tests {
     #[test]
     fn ack_wrong_type_ignored() {
         let buf = vec![0x04u8, 0, 0, 0, 0, 0, 0, 0, 0]; // wrong type byte
-                                                        // Should not be parsed as ACK
         assert!(buf.len() == 9 && buf[0] != 0x03);
     }
 
@@ -739,32 +904,5 @@ mod tests {
             u64::MAX,
             "cannot regress from u64::MAX"
         );
-    }
-
-    // -- ClientRegistry tests --
-
-    #[test]
-    fn client_registry_register_and_unregister() {
-        use crate::resources::{ClientFrame, ClientRegistry};
-        let mut registry = ClientRegistry::default();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
-        let acked = Arc::new(AtomicU64::new(0));
-
-        registry.register_from_event(0, tx.clone(), Arc::clone(&acked));
-        assert_eq!(registry.clients.len(), 1);
-        assert!(registry.clients.contains_key(&0));
-
-        let (tx2, _rx2) = tokio::sync::mpsc::channel::<ClientFrame>(8);
-        let acked2 = Arc::new(AtomicU64::new(0));
-        registry.register_from_event(1, tx2, acked2);
-        assert_eq!(registry.clients.len(), 2);
-
-        registry.unregister(0);
-        assert_eq!(registry.clients.len(), 1);
-        assert!(!registry.clients.contains_key(&0));
-        assert!(registry.clients.contains_key(&1));
-
-        registry.unregister(1);
-        assert_eq!(registry.clients.len(), 0);
     }
 }

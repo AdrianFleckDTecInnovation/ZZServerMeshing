@@ -9,6 +9,14 @@ pub struct TickSchedule;
 pub fn build_schedule() -> Schedule {
     let mut schedule = Schedule::new(TickSchedule);
 
+    // WI-222 (design 016, Batch 6): flip `shadow_cleanup` to run BEFORE
+    // `prepare_client_snapshot` so stale shadows no longer appear in the
+    // per-client snapshot on the tick they expire. Previously, a shadow that
+    // crossed `SHADOW_STALE_TICKS` was rendered for one extra tick before
+    // despawn — a visible "dead but still drawn" blip during crash churn.
+    // `shadow_cleanup` depends only on `prepare_replication` (both read
+    // Shadow components; replication must see them before cleanup removes
+    // them), so moving it here preserves correctness.
     schedule.add_systems((
         systems::drain_inbound_events,
         systems::process_transfer_acks.after(systems::drain_inbound_events),
@@ -24,9 +32,9 @@ pub fn build_schedule() -> Schedule {
         systems::process_transfers.after(systems::clamp_positions),
         systems::process_drain.after(systems::process_transfers),
         systems::prepare_replication.after(systems::process_drain),
-        systems::prepare_client_snapshot.after(systems::prepare_replication),
-        systems::shadow_cleanup.after(systems::prepare_client_snapshot),
-        systems::record_metrics.after(systems::shadow_cleanup),
+        systems::shadow_cleanup.after(systems::prepare_replication),
+        systems::prepare_client_snapshot.after(systems::shadow_cleanup),
+        systems::record_metrics.after(systems::prepare_client_snapshot),
     ));
 
     schedule
@@ -302,10 +310,15 @@ mod tests {
         }
     }
 
-    // -- Schedule integration: shadow cleanup runs after snapshot --
+    // -- WI-222: shadow_cleanup runs BEFORE prepare_client_snapshot --
 
     #[test]
-    fn stale_shadow_included_in_snapshot_then_cleaned() {
+    fn stale_shadow_cleaned_before_snapshot_built() {
+        // WI-222 (design 016, Batch 6): a shadow that has crossed the
+        // staleness threshold must be cleaned up BEFORE the per-client
+        // snapshot is built, so clients never see a "dead but still rendered"
+        // entity for one extra tick. This test locks in the new ordering:
+        //   prepare_replication → shadow_cleanup → prepare_client_snapshot
         let mut world = setup_world(1);
 
         // Shadow entity that will be cleaned up this tick
@@ -326,13 +339,16 @@ mod tests {
         let mut schedule = build_schedule();
         schedule.run(&mut world);
 
-        // Shadow should have been included in client snapshot BEFORE cleanup
+        // Post-WI-222: shadow is cleaned up BEFORE the snapshot is built,
+        // so the snapshot contains zero entities (no 1-tick blip).
         let frame = rx.try_recv().unwrap();
         let entity_count = u32::from_le_bytes(frame[9..13].try_into().unwrap());
-        // The snapshot was prepared before shadow_cleanup ran, so the shadow was included
-        assert_eq!(entity_count, 1);
+        assert_eq!(
+            entity_count, 0,
+            "stale shadow must not appear in snapshot on the tick it expires"
+        );
 
-        // But after the full schedule run, the shadow should be gone
+        // Shadow is also gone from the world after the full schedule run.
         assert!(!world.resource::<EntityLookup>().0.contains_key(&shadow_eid));
     }
 
@@ -480,6 +496,7 @@ mod tests {
                 tx,
                 acked_tick: acked,
                 player_uuid: shared::entity::EntityId::new(),
+                migrating_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
 

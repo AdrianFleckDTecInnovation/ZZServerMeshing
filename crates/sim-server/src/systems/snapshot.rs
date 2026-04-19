@@ -168,7 +168,7 @@ pub fn prepare_client_snapshot(
             }
             // Full snapshot path: per-client AoI-filtered encoding.
             let frame = encode_binary_snapshot(tick.0, &client_entities);
-            match handle.tx.try_send(frame) {
+            match handle.tx.try_send(ClientFrame::Binary(frame)) {
                 Ok(()) => {
                     // Success: update baseline to match what we just sent
                     handle.baseline = Some(build_baseline(&client_entities));
@@ -204,7 +204,7 @@ pub fn prepare_client_snapshot(
             if change_ratio > DELTA_FALLBACK_THRESHOLD {
                 // Too many changes -- send full snapshot instead of delta
                 let frame = encode_binary_snapshot(tick.0, &client_entities);
-                match handle.tx.try_send(frame) {
+                match handle.tx.try_send(ClientFrame::Binary(frame)) {
                     Ok(()) => {
                         handle.baseline = Some(build_baseline(&client_entities));
                         handle.ticks_since_full = 1;
@@ -224,7 +224,7 @@ pub fn prepare_client_snapshot(
                 let removal_ids: Vec<EntityId> = delta.removals.clone();
                 let frame = encode_binary_delta(tick.0, &delta.updates, &removal_ids);
 
-                match handle.tx.try_send(frame) {
+                match handle.tx.try_send(ClientFrame::Binary(frame)) {
                     Ok(()) => {
                         // Success: advance baseline to match the delta we just sent
                         update_baseline(handle.baseline.as_mut().unwrap(), &delta);

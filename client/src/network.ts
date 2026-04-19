@@ -83,21 +83,76 @@ function installDiagReport(diag: ClientDiag): void {
 
 export class NetworkClient {
   private ws: WebSocket | null = null;
-  private url: string;
+  private url: string = '';
+  private coordinatorUrl: string;
   private worldView: WorldView;
   private reconnectDelay: number = NETCODE.RECONNECT_DELAY_MS;
   private connected = false;
+  /** If set, the next scheduleReconnect uses this URL and skips /assign.
+   *  Populated by the server-directed `Reconnect { url }` handler; consumed
+   *  exactly once by scheduleReconnect. Ensures Batch 4 player migrations
+   *  override the coordinator's /assign choice for one reconnect cycle. */
+  private serverDirectedUrl: string | null = null;
+  /** WI-204: if set, sent as the first message on the next successful
+   *  WebSocket open. Populated by the Reconnect handler alongside
+   *  serverDirectedUrl so the target sim-server can adopt the pre-existing
+   *  player entity instead of spawning a new one. Cleared on send. */
+  private pendingClaim: string | null = null;
   playerId: string | null = null;
   prediction: PredictionManager;
 
-  constructor(url: string, worldView: WorldView) {
-    this.url = url;
+  constructor(coordinatorUrl: string, worldView: WorldView) {
+    this.coordinatorUrl = coordinatorUrl;
     this.worldView = worldView;
     this.prediction = new PredictionManager();
+    void this.init();
+  }
+
+  /** Initial bootstrap: fetch /assign, then connect. If /assign fails,
+   *  connect() is still called with an empty URL; the resulting WebSocket
+   *  error bounces through scheduleReconnect() which retries /assign on
+   *  exponential backoff. Don't hard-fail the page load on a blip. */
+  private async init(): Promise<void> {
+    const fresh = await this.fetchAssignment();
+    if (fresh) {
+      console.log(`Assigned to server: ${fresh}`);
+      this.url = fresh;
+    } else {
+      console.warn('Initial /assign failed; will retry via reconnect backoff');
+    }
     this.connect();
   }
 
+  /** Fetch a fresh server assignment from the coordinator. Returns null on
+   *  any failure (network error, non-2xx, missing field). Caller decides
+   *  whether to fall back to the last-known URL. */
+  private async fetchAssignment(): Promise<string | null> {
+    const assignUrl = this.coordinatorUrl
+      ? `${this.coordinatorUrl}/assign`
+      : '/assign';
+    try {
+      const resp = await fetch(assignUrl);
+      if (!resp.ok) {
+        console.warn(`/assign returned HTTP ${resp.status}`);
+        return null;
+      }
+      const data = await resp.json();
+      return data.ws_url ?? null;
+    } catch (e) {
+      console.warn(`/assign fetch failed: ${e}`);
+      return null;
+    }
+  }
+
   private connect(): void {
+    // Guard: if /assign failed on bootstrap and we have no URL, don't try
+    // to construct an empty-URL WebSocket (throws SyntaxError). Just
+    // schedule another reconnect to retry /assign on backoff.
+    if (!this.url) {
+      console.warn('No server URL available; scheduling reconnect to retry /assign');
+      this.scheduleReconnect();
+      return;
+    }
     console.log(`Connecting to ${this.url}...`);
     this.ws = new WebSocket(this.url);
     const diag = initDiag();
@@ -109,6 +164,19 @@ export class NetworkClient {
       console.log('Connected to server');
       this.connected = true;
       this.reconnectDelay = NETCODE.RECONNECT_DELAY_MS;
+      // WI-204: if this connection is the target-side of a server-directed
+      // Reconnect, send ClaimPlayer as the FIRST message so the server
+      // adopts our existing entity by UUID instead of spawning a new one.
+      // Server's PredictionManager state (input seq counter, pending
+      // inputs) is preserved across migration — the target server's
+      // AuthorityTransfer.full_state carries over last_input_seq so
+      // reconcile keeps working without reset.
+      if (this.pendingClaim) {
+        const pid = this.pendingClaim;
+        console.log(`Claiming player ${pid.substring(0, 8)}...`);
+        this.send({ type: 'ClaimPlayer', player_id: pid });
+        this.pendingClaim = null;
+      }
     };
 
     this.ws.binaryType = 'arraybuffer';
@@ -271,6 +339,17 @@ export class NetworkClient {
             console.log('Assigned player:', msg.player_id);
           } else if (msg.type === 'Reconnect') {
             console.log('Server requesting reconnection to:', msg.url);
+            // Mark this as a server-directed URL so scheduleReconnect will
+            // honour it instead of refetching /assign (which would steer
+            // the client away from the rebalance target — Batch 4).
+            this.serverDirectedUrl = msg.url;
+            // WI-204: snapshot the current player_id BEFORE close (the
+            // onclose handler nulls it out). Sent as ClaimPlayer on the
+            // next WS open so the target server adopts this exact entity
+            // rather than spawning a new one.
+            if (this.playerId) {
+              this.pendingClaim = this.playerId;
+            }
             this.url = msg.url;
             if (this.ws) {
               this.ws.close(); // triggers reconnect to new URL via onclose
@@ -298,8 +377,29 @@ export class NetworkClient {
 
   private scheduleReconnect(): void {
     console.log(`Reconnecting in ${this.reconnectDelay}ms...`);
-    setTimeout(() => {
+    setTimeout(async () => {
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, NETCODE.RECONNECT_MAX_DELAY_MS);
+
+      if (this.serverDirectedUrl) {
+        // Server-directed URL takes precedence over /assign for exactly one
+        // reconnect cycle. Used by Batch 4 player migration.
+        const directed = this.serverDirectedUrl;
+        this.serverDirectedUrl = null;
+        this.url = directed;
+        console.log(`Reconnecting to server-directed URL: ${directed}`);
+      } else {
+        const fresh = await this.fetchAssignment();
+        if (fresh && fresh !== this.url) {
+          console.log(`/assign returned new URL: ${fresh} (was ${this.url})`);
+          this.url = fresh;
+        } else if (fresh) {
+          // /assign returned the same URL as last time — coordinator thinks
+          // this server is still healthy. Retry it.
+          console.log(`/assign returned same URL: ${fresh}`);
+        } else {
+          console.warn(`/assign unavailable, retrying last-known URL ${this.url}`);
+        }
+      }
       this.connect();
     }, this.reconnectDelay);
   }

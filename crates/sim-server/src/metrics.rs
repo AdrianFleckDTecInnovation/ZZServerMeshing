@@ -52,10 +52,16 @@ pub struct MetricsCollector {
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerHealthSnapshot {
     /// Latest tick received from this peer.
+    ///
+    /// WI-212: this value is continuous across peer restarts — it is a
+    /// high-water mark that is not reset when the peer's session changes.
     pub latest_tick: u64,
     /// How many ticks behind our current tick this peer's latest data is.
     pub staleness_ticks: u64,
     /// Packets received from this peer in the current reporting window (~5s).
+    ///
+    /// WI-212: preserved across session changes. The 5s reset (in the game
+    /// loop) is a periodic rollup, not a restart-triggered reset.
     pub packets_received: u32,
     /// Incomplete chunk reassemblies evicted for this peer in the current reporting window.
     pub chunk_evictions: u32,
@@ -63,6 +69,17 @@ pub struct PeerHealthSnapshot {
     /// a decimal u64 in JSON (consumers can render as hex; the sim-server
     /// startup log line is already hex-formatted for human eyes).
     pub session_id: u64,
+    /// WI-211: count of straggler UDP packets dropped for this peer because
+    /// their `session_id` was in the LRU of fully-superseded sessions.
+    /// Non-zero values indicate WiFi reorder / rolling-deploy churn rather
+    /// than correctness bugs.
+    pub stragglers_dropped: u64,
+    /// WI-212: local tick at which the most recent session change was
+    /// observed for this peer. `0` means "no session change has been
+    /// observed yet since this sim-server started" (the peer is on its
+    /// first session since our boot). Subsequent values advance on each
+    /// detected peer restart.
+    pub session_changed_at_tick: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +473,8 @@ mod tests {
                 packets_received: 19,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -493,6 +512,8 @@ mod tests {
                 packets_received: 20,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.peer_health.insert(
@@ -503,6 +524,8 @@ mod tests {
                 packets_received: 14,
                 chunk_evictions: 2,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -549,6 +572,8 @@ mod tests {
                 packets_received: 0,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -577,6 +602,8 @@ mod tests {
                 packets_received: 100,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -599,6 +626,8 @@ mod tests {
                 packets_received: 3,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -623,6 +652,8 @@ mod tests {
                 packets_received: 5,
                 chunk_evictions: 1,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         // Simulate next reporting window
@@ -634,6 +665,8 @@ mod tests {
                 packets_received: 20,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -658,6 +691,8 @@ mod tests {
                 packets_received: 8,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.peer_health.insert(
@@ -668,6 +703,8 @@ mod tests {
                 packets_received: 6,
                 chunk_evictions: 1,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -712,6 +749,8 @@ mod tests {
                 packets_received: 50,
                 chunk_evictions: 2,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -754,6 +793,8 @@ mod tests {
                 packets_received: 40,
                 chunk_evictions: 0,
                 session_id: 0,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -821,6 +862,8 @@ mod tests {
                 packets_received: 10,
                 chunk_evictions: 0,
                 session_id: 0xAAAA_AAAA_AAAA_AAAA,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.peer_health.insert(
@@ -831,6 +874,8 @@ mod tests {
                 packets_received: 8,
                 chunk_evictions: 0,
                 session_id: 0xBBBB_BBBB_BBBB_BBBB,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         c.record(timing(5));
@@ -879,6 +924,8 @@ mod tests {
                 packets_received: 1,
                 chunk_evictions: 0,
                 session_id: 0xFFFF_0000_FFFF_0000,
+                stragglers_dropped: 0,
+                session_changed_at_tick: 0,
             },
         );
         let json = serde_json::to_string(&c.snapshot()).unwrap();

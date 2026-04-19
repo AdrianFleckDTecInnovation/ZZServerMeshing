@@ -267,7 +267,12 @@ pub fn drain_client_events(
     // Register new clients
     let registrations = std::mem::take(&mut inbound.register_clients);
     for event in registrations {
-        registry.register_from_event(event.client_id, event.tx, event.acked_tick);
+        registry.register_from_event_with_migrating(
+            event.client_id,
+            event.tx,
+            event.acked_tick,
+            event.migrating_out,
+        );
         // Also push client_player_assignment so the player_id can be set
         // once SpawnPlayer is processed (matched by player_uuid).
         inbound
@@ -291,7 +296,7 @@ pub fn drain_client_events(
         }
     }
 
-    // Handle forced full snapshot requests
+    // Apply forced full snapshots (RequestSnapshot)
     let force_fulls = std::mem::take(&mut inbound.force_full_snapshot_clients);
     for client_id in force_fulls {
         if let Some(handle) = registry.clients.get_mut(&client_id) {
@@ -372,8 +377,9 @@ mod tests {
         client_id: u64,
     ) -> tokio::sync::mpsc::Receiver<ClientFrame> {
         use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientFrame>(16);
-        let acked = std::sync::Arc::new(AtomicU64::new(0));
+        let acked = Arc::new(AtomicU64::new(0));
         world
             .resource_mut::<ClientRegistry>()
             .register_from_event(client_id, tx, acked);
@@ -1121,9 +1127,9 @@ mod tests {
 
     #[test]
     fn drain_client_events_registers_client() {
+        use std::sync::atomic::AtomicU64;
         let mut world = setup_world(1);
         let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
-        let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         world
             .resource_mut::<InboundQueue>()
@@ -1131,8 +1137,9 @@ mod tests {
             .push(ClientRegistrationEvent {
                 client_id: 42,
                 tx,
-                acked_tick: acked,
+                acked_tick: std::sync::Arc::new(AtomicU64::new(0)),
                 player_uuid: shared::entity::EntityId::new(),
+                migrating_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
 
         let mut schedule = Schedule::default();
@@ -1140,23 +1147,6 @@ mod tests {
         schedule.run(&mut world);
 
         assert!(world.resource::<ClientRegistry>().clients.contains_key(&42));
-    }
-
-    #[test]
-    fn drain_client_events_unregisters_client() {
-        let mut world = setup_world(1);
-        let _rx = register_test_client(&mut world, 42);
-
-        world
-            .resource_mut::<InboundQueue>()
-            .unregister_clients
-            .push(42);
-
-        let mut schedule = Schedule::default();
-        schedule.add_systems(drain_client_events);
-        schedule.run(&mut world);
-
-        assert!(!world.resource::<ClientRegistry>().clients.contains_key(&42));
     }
 
     #[test]
@@ -1207,6 +1197,122 @@ mod tests {
                 .ticks_since_full,
             0
         );
+    }
+
+    // -- WI-202: ClaimPlayer unit-level coverage --
+    //
+    // The full async ClaimPlayer flow (wait-for-message → poll auth_players
+    // → adopt or fallback-spawn) lives in `network.rs::handle_client` and is
+    // integration-tested via the WI-206 browser scenarios. These unit tests
+    // cover the ECS-level pieces it composes: (a) registering a client with
+    // a claimed player_uuid and NOT emitting SpawnPlayer binds the client to
+    // the pre-existing entity, and (b) the `migrating_out` atomic is shared
+    // end-to-end (ECS <-> async close handler).
+
+    #[test]
+    fn claim_player_adopts_existing_entity() {
+        // Simulate the target-side adopt path: an auth-transferred Player
+        // entity exists on this server, and a client registers with the
+        // matching player_uuid. No SpawnPlayer is pushed — the client should
+        // be bound to the pre-existing entity.
+        let mut world = setup_world(1);
+        // Spawn the Player entity first (simulating prior AuthorityTransfer).
+        let (_, pid) = spawn_auth_player(&mut world, Vec3::new(10.0, 0.0, 20.0), 1);
+        let pre_count = world
+            .query_filtered::<(), With<Authoritative>>()
+            .iter(&world)
+            .count();
+        assert_eq!(pre_count, 1, "setup sanity");
+
+        // Register the claiming client (simulating handle_client's post-
+        // claim ECS push: register_clients only, NO SpawnPlayer).
+        use std::sync::atomic::AtomicU64;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        world
+            .resource_mut::<InboundQueue>()
+            .register_clients
+            .push(ClientRegistrationEvent {
+                client_id: 7,
+                tx,
+                acked_tick: std::sync::Arc::new(AtomicU64::new(0)),
+                player_uuid: pid,
+                migrating_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.run(&mut world);
+
+        // Client registered with the claimed player_id set.
+        let reg = world.resource::<ClientRegistry>();
+        let handle = reg.clients.get(&7).expect("client registered");
+        assert_eq!(handle.player_id, Some(pid), "client adopted the claimed id");
+
+        // Auth entity count unchanged: we did NOT spawn a second player.
+        let post_count = world
+            .query_filtered::<(), With<Authoritative>>()
+            .iter(&world)
+            .count();
+        assert_eq!(
+            post_count, 1,
+            "ClaimPlayer adopt path must not produce a second player entity"
+        );
+    }
+
+    #[test]
+    fn claim_player_migrating_flag_is_shared_with_client_handle() {
+        // The `migrating_out` Arc<AtomicBool> passed in via the registration
+        // event must be the SAME one stored on the ClientHandle. Otherwise,
+        // flipping it from `process_transfers` (ECS side) wouldn't be
+        // observable from the network close handler (async side).
+        use std::sync::atomic::AtomicU64;
+        let mut world = setup_world(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ClientFrame>(8);
+        let migrating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        world
+            .resource_mut::<InboundQueue>()
+            .register_clients
+            .push(ClientRegistrationEvent {
+                client_id: 9,
+                tx,
+                acked_tick: std::sync::Arc::new(AtomicU64::new(0)),
+                player_uuid: EntityId::new(),
+                migrating_out: std::sync::Arc::clone(&migrating),
+            });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.run(&mut world);
+
+        // Flip via the external handle (ECS-side path).
+        migrating.store(true, std::sync::atomic::Ordering::Release);
+
+        // ClientHandle must observe the flip via Arc sharing.
+        let handle = world.resource::<ClientRegistry>().clients.get(&9).unwrap();
+        assert!(
+            handle
+                .migrating_out
+                .load(std::sync::atomic::Ordering::Acquire),
+            "ClientHandle.migrating_out must point at the same atomic as the external handle"
+        );
+    }
+
+    #[test]
+    fn drain_client_events_unregisters_client() {
+        let mut world = setup_world(1);
+        let _rx = register_test_client(&mut world, 42);
+
+        world
+            .resource_mut::<InboundQueue>()
+            .unregister_clients
+            .push(42);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drain_client_events);
+        schedule.run(&mut world);
+
+        assert!(!world.resource::<ClientRegistry>().clients.contains_key(&42));
     }
 
     // =========================================================================

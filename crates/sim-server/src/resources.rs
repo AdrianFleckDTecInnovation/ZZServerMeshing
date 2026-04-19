@@ -3,12 +3,66 @@ use shared::entity::{EntityId, EntityState, ServerId};
 use shared::protocol::PeerInfo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
-/// Frame sent through per-client channels. Each frame is a binary-encoded
-/// snapshot or delta, sent as `Vec<u8>` through the per-client mpsc channel.
-pub type ClientFrame = Vec<u8>;
+/// Frame sent through per-client channels. A frame is either a binary-encoded
+/// snapshot/delta (every tick) or a JSON text payload (rare: currently only
+/// `ServerMessage::Reconnect` during player migration — see WI-201 + WI-203).
+///
+/// WI-201 (design 016, Batch 4): before this change, ClientFrame was a plain
+/// `Vec<u8>` that always produced `Message::Binary` on the wire. Player
+/// migration needs to interleave a single JSON text frame mid-session. Keeping
+/// the producer ECS-system-local (no async) means the ECS pushes a typed frame
+/// and the async task in `network.rs` dispatches to the correct WebSocket
+/// message type.
+#[derive(Debug, Clone)]
+pub enum ClientFrame {
+    /// Binary snapshot or delta. The every-tick hot path.
+    Binary(Vec<u8>),
+    /// JSON text frame. Used for mid-session server→client control messages
+    /// like `ServerMessage::Reconnect { url }`.
+    Text(String),
+}
+
+impl ClientFrame {
+    /// View the binary payload. Panics if this is a Text frame.
+    /// Primarily a test helper — production code matches on the enum.
+    #[cfg(test)]
+    pub fn as_binary(&self) -> &[u8] {
+        match self {
+            ClientFrame::Binary(b) => b.as_slice(),
+            ClientFrame::Text(s) => panic!(
+                "expected ClientFrame::Binary, got ClientFrame::Text({})",
+                s
+            ),
+        }
+    }
+
+    /// Consume and return the binary bytes. Panics on Text (tests only).
+    #[cfg(test)]
+    pub fn into_binary(self) -> Vec<u8> {
+        match self {
+            ClientFrame::Binary(b) => b,
+            ClientFrame::Text(s) => panic!(
+                "expected ClientFrame::Binary, got ClientFrame::Text({})",
+                s
+            ),
+        }
+    }
+}
+
+/// WI-201: Deref into the binary payload only in test builds. Lets existing
+/// test code that indexes `frame[..]` or calls `frame.len()` keep compiling
+/// after the Binary/Text split. Production code matches on the enum and never
+/// relies on Deref.
+#[cfg(test)]
+impl std::ops::Deref for ClientFrame {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.as_binary()
+    }
+}
 
 /// Server identity and configuration.
 #[derive(Resource)]
@@ -30,6 +84,29 @@ pub struct TickCounter(pub u64);
 /// UDP addresses of peer servers.
 #[derive(Resource, Default)]
 pub struct PeerAddresses(pub HashMap<u16, SocketAddr>);
+
+/// Full WebSocket URLs of peer servers, keyed by server_id.
+/// Populated from `PeerList` updates using the `PeerInfo.tls` flag to
+/// choose `ws://` vs `wss://`. Source servers use this to construct the
+/// target URL when sending `ServerMessage::Reconnect { url }` during
+/// player migration (design 016, Batch 4, WI-202 + WI-203).
+#[derive(Resource, Default)]
+pub struct PeerWsAddresses(pub HashMap<u16, String>);
+
+/// WI-213 (design 016, Batch 5): shared set of currently-active peer
+/// `server_id` values. The ECS writes this from `process_coord_events`
+/// on each `PeerList` broadcast. The UDP receiver reads it during the
+/// periodic sweep (`GLOBAL_SWEEP_INTERVAL`) to prune state for peers
+/// that have departed the mesh, keeping `session_of_peer`,
+/// `session_history`, and `latest_tick` bounded by the active peer
+/// count rather than lifetime restart count.
+///
+/// `Arc<RwLock<...>>` over `Mutex`: writes are rare (once per PeerList
+/// event, typically seconds apart) and reads are on the receiver's
+/// sweep interval. The `RwLock` lets reads stay cheap without
+/// contention with the tick loop.
+#[derive(Resource, Default, Clone)]
+pub struct ActivePeers(pub Arc<std::sync::RwLock<std::collections::HashSet<u16>>>);
 
 /// Reverse lookup: NetworkId (EntityId) -> Bevy Entity handle.
 #[derive(Resource, Default)]
@@ -82,8 +159,13 @@ pub struct PeerSessionReset {
 pub struct ClientRegistrationEvent {
     pub client_id: u64,
     pub tx: tokio::sync::mpsc::Sender<ClientFrame>,
+    /// Last tick ACK'd by this client (delta compression, WI-220 restore).
     pub acked_tick: Arc<AtomicU64>,
     pub player_uuid: EntityId,
+    /// Shared flag the source server flips when it sends `Reconnect` so the
+    /// close handler can suppress `RemoveEntity` on the migrating client's
+    /// disconnect (see WI-202 + WI-203). Defaults to `false`.
+    pub migrating_out: Arc<AtomicBool>,
 }
 
 /// Coordinator events received between ticks.
@@ -137,9 +219,14 @@ pub struct OutboundForwards {
 }
 
 /// Info about an active drain operation.
+///
+/// `started_tick` is `None` until the first `process_drain` run stamps it
+/// (WI-190). Using `Option<u64>` instead of a `0` sentinel avoids a latent
+/// bug where a SIGINT on tick 0 would re-stamp the drain start every tick
+/// and the timeout would never fire.
 pub struct DrainInfo {
     pub targets: Vec<ServerId>,
-    pub started_tick: u64,
+    pub started_tick: Option<u64>,
 }
 
 /// Graceful drain state.
@@ -182,6 +269,10 @@ pub struct ClientRegistry {
 
 impl ClientRegistry {
     /// Register a new client from a pre-built event. Returns the assigned client ID.
+    /// Test-only: production uses `register_from_event_with_migrating` so the
+    /// `migrating_out` flag is shared with the network task. Tests that don't
+    /// care about migration use this for brevity.
+    #[cfg(test)]
     pub fn register_from_event(
         &mut self,
         client_id: u64,
@@ -197,6 +288,31 @@ impl ClientRegistry {
                 baseline: None,
                 ticks_since_full: 0,
                 last_sent_tick: 0,
+                migrating_out: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    /// Register a new client with an externally-owned `migrating_out` flag.
+    /// Used by the network task so the shared flag can be flipped from either
+    /// side (ECS sets it in `process_transfers`; close handler reads it).
+    pub fn register_from_event_with_migrating(
+        &mut self,
+        client_id: u64,
+        tx: tokio::sync::mpsc::Sender<ClientFrame>,
+        acked_tick: Arc<AtomicU64>,
+        migrating_out: Arc<AtomicBool>,
+    ) {
+        self.clients.insert(
+            client_id,
+            ClientHandle {
+                tx,
+                player_id: None,
+                acked_tick,
+                baseline: None,
+                ticks_since_full: 0,
+                last_sent_tick: 0,
+                migrating_out,
             },
         );
     }
@@ -221,6 +337,15 @@ pub struct ClientHandle {
     pub ticks_since_full: u32,
     /// Tick of the most recently sent frame. Used with acked_tick for stale-ACK detection.
     pub last_sent_tick: u64,
+    /// Set to `true` by the source server when it sends `ServerMessage::Reconnect`
+    /// to this client (player migration). Read by the async close handler in
+    /// `network.rs` so it can suppress `RemoveEntity` when the client
+    /// subsequently disconnects — the target server now owns the entity, so
+    /// the source removing it would cause a visible gap.
+    /// Wrapped in `Arc<AtomicBool>` so the ECS system (`process_transfers`)
+    /// and the async task can share the flag without a channel.
+    /// See WI-202 + WI-203.
+    pub migrating_out: Arc<AtomicBool>,
 }
 
 // -- Inbound event types --

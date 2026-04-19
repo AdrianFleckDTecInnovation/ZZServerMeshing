@@ -6,7 +6,12 @@ edition = "2021"
 [dependencies]
 shared = { path = "../shared" }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+# WI-223: `__rustls-tls` gives us `Connector::Rustls` + `connect_async_tls_with_config`
+# so the coordinator client can opt into wss:// with a custom trust anchor (our
+# self-signed cert from --tls-cert). Pulled in via rustls-tls-webpki-roots for
+# platform-independent build; the actual client config we build ignores webpki
+# roots and trusts only the explicit cert file.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,3 +26,4 @@ bevy_ecs = "0.18"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
+rustls-pki-types = "1"

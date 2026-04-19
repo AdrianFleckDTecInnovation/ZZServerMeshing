@@ -30,10 +30,16 @@ for i in $(seq 1 "$NUM_SERVERS"); do
   NPC_COUNT=$((DEFAULT_TOTAL_NPCS / NUM_SERVERS + (i == 1 ? DEFAULT_TOTAL_NPCS % NUM_SERVERS : 0)))
 
   echo "  S${i}: ws=$WS_PORT udp=$UDP_PORT metrics=$METRICS_PORT npcs=$NPC_COUNT"
+  # WI-215: --cold-start is passed here because start.sh is the cluster
+  # bootstrap entry point. Service-restart paths (systemd, board-dash Start
+  # button) MUST NOT pass --cold-start — survivors already hold the
+  # restarted server's entities and re-spawning initial_npcs would
+  # duplicate them on every restart cycle.
   cargo run --manifest-path "$DIR/Cargo.toml" -p sim-server -- \
     --server-id "$i" --port "$WS_PORT" --udp-port "$UDP_PORT" \
     --metrics-port "$METRICS_PORT" \
     --coordinator "127.0.0.1:$COORD_WS_PORT" --advertise-host "127.0.0.1" --initial-npcs "$NPC_COUNT" \
+    --cold-start \
     > "$DIR/.sim-server-${i}.log" 2>&1 &
   echo "$!" >> "$PIDFILE"
 done

@@ -143,6 +143,9 @@ async function restartBoard(serverId: number): Promise<boolean> {
     `--port ${wsPort}`, `--udp-port ${udpPort}`, `--metrics-port ${metricsPort}`,
     `--coordinator ${coordIp}:7870`, `--advertise-host ${boardIp}`,
     '--initial-npcs 0',
+    // WI-223: coordinator binds WSS on :7870 on the boards, so outbound
+    // coordinator connections must opt into TLS with the pinned cert.
+    '--coordinator-tls',
     '--tls-cert /home/arduino/mesh/certs/mesh-coordinator.crt',
     '--tls-key /home/arduino/mesh/certs/mesh-coordinator.key',
     `> ~/mesh/sim${serverId}.log 2>&1 &`,

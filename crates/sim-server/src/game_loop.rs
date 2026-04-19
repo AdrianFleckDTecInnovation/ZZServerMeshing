@@ -112,6 +112,14 @@ pub type SharedInbound = std::sync::Mutex<InboundQueue>;
 /// Shared coordinator event buffer.
 pub type SharedCoordEvents = std::sync::Mutex<CoordEventQueue>;
 
+/// Shared set of authoritative Player entity IDs currently present on this
+/// server. Updated at the end of each tick from the ECS. Read by the async
+/// WebSocket task (`network.rs::handle_client`) during the ClaimPlayer
+/// handshake so it can detect whether the claimed player entity has arrived
+/// via AuthorityTransfer. See WI-202.
+pub type SharedAuthPlayers =
+    std::sync::Mutex<std::collections::HashSet<shared::entity::EntityId>>;
+
 /// Shared outbound buffer for ECS -> coordinator messages (e.g., TransferResult).
 pub type SharedCoordOutbound = std::sync::Mutex<Vec<shared::protocol::CoordClientMsg>>;
 
@@ -119,16 +127,42 @@ pub type SharedCoordOutbound = std::sync::Mutex<Vec<shared::protocol::CoordClien
 /// Read and reset by the game loop for metrics reporting.
 pub struct PeerHealthAccumulator {
     /// Latest tick received from each peer.
+    ///
+    /// WI-212: RESET on session change (peer restart). A restarted peer
+    /// begins at tick 0, so the old high-water mark is not meaningful
+    /// after the boundary. Preserving it would make `staleness_ticks`
+    /// (= our tick − latest_tick) perpetually appear "way behind" after
+    /// a restart, confusing the operator-facing rate indicator.
+    /// Continuity information is carried by `session_changed_at_tick`
+    /// instead.
     pub latest_tick: std::collections::HashMap<u16, u64>,
     /// Packets received from each peer since last reset.
+    ///
+    /// WI-212: preserved across session changes. Operators need a
+    /// continuous counter so "peer silent" and "peer restarted" don't
+    /// both render as "counters reset".
     pub packets_received: std::collections::HashMap<u16, u32>,
     /// Chunk reassembly evictions per peer since last reset.
+    ///
+    /// WI-212: preserved across session changes (same rationale as
+    /// `packets_received`).
     pub chunk_evictions: std::collections::HashMap<u16, u32>,
     /// Most recently observed `session_id` for each peer (WI-136). Populated
     /// by the UDP receiver via `note_session`. Exposed on `/metrics` as
     /// `peer_health[<id>].session_id` so operators can see when a peer has
     /// restarted.
     pub peer_sessions: std::collections::HashMap<u16, u64>,
+    /// WI-211: per-peer count of straggler UDP packets dropped because their
+    /// `session_id` matches an entry in the receiver's LRU of fully-superseded
+    /// sessions. Exposed on `/metrics` as `peer_health[<id>].stragglers_dropped`
+    /// so operators can watch rolling-deploy churn telemetry.
+    pub stragglers_dropped: std::collections::HashMap<u16, u64>,
+    /// WI-212: local tick at which the most recent session change was
+    /// observed for each peer. Populated by the receiver's `note_session`
+    /// using `local_tick`. Emitted on `/metrics` as
+    /// `peer_health[<id>].session_changed_at_tick` so operators can see when
+    /// each peer restarted without inferring it from packet-count dips.
+    pub session_changed_at_tick: std::collections::HashMap<u16, u64>,
 }
 
 impl Default for PeerHealthAccumulator {
@@ -138,6 +172,8 @@ impl Default for PeerHealthAccumulator {
             packets_received: std::collections::HashMap::new(),
             chunk_evictions: std::collections::HashMap::new(),
             peer_sessions: std::collections::HashMap::new(),
+            stragglers_dropped: std::collections::HashMap::new(),
+            session_changed_at_tick: std::collections::HashMap::new(),
         }
     }
 }
@@ -147,10 +183,19 @@ impl Default for PeerHealthAccumulator {
 pub type SharedPeerHealth = std::sync::Mutex<PeerHealthAccumulator>;
 
 /// Run the new ECS-based game loop.
+///
+/// `drain_complete` (WI-191): a `Notify` that the game loop pokes when it
+/// detects `ShutdownRequested` and is about to exit. `main.rs` awaits this
+/// on ctrl_c/SIGTERM so the process doesn't terminate while the drain
+/// machinery is still working. `notify_one()` (not `notify_waiters`) is
+/// used so that if main hasn't called `.notified().await` yet when we
+/// fire, the permit is stored and the subsequent await returns instantly.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_game_loop_ecs(
     server_id: ServerId,
     session_id: u64,
     initial_npcs: u32,
+    cold_start: bool,
     inbound: Arc<SharedInbound>,
     coord_events: Arc<SharedCoordEvents>,
     udp_repl_tx: tokio::sync::mpsc::Sender<UdpOutbound>,
@@ -160,6 +205,20 @@ pub async fn run_game_loop_ecs(
     weighted_load_atomic: Arc<AtomicU32>,
     coord_outbound: Arc<SharedCoordOutbound>,
     peer_health: Arc<SharedPeerHealth>,
+    drain_complete: Arc<tokio::sync::Notify>,
+    // WI-202: per-tick snapshot of authoritative Player EntityIds, exposed
+    // to `network.rs::handle_client` so the ClaimPlayer handshake can detect
+    // whether the claimed entity has arrived via AuthorityTransfer yet.
+    auth_players: Arc<SharedAuthPlayers>,
+    // WI-212: shared atomic counter of the current local tick. The receiver
+    // reads this on session change to stamp the `session_changed_at_tick`
+    // field in /metrics. The game loop writes to it at the top of each tick.
+    local_tick_atomic: Arc<std::sync::atomic::AtomicU64>,
+    // WI-213: shared set of currently-active peer server_ids. Updated by
+    // `process_coord_events` on each `PeerList` broadcast. Read by the UDP
+    // receiver's periodic sweep to prune entries for departed peers so the
+    // per-peer maps don't grow unbounded over the server's lifetime.
+    active_peers: Arc<std::sync::RwLock<std::collections::HashSet<u16>>>,
 ) {
     // -- Create ECS World --
     let mut world = bevy_ecs::world::World::default();
@@ -169,6 +228,16 @@ pub async fn run_game_loop_ecs(
     world.insert_resource(SessionId(session_id));
     world.init_resource::<TickCounter>();
     world.init_resource::<PeerAddresses>();
+    // WI-202: per-peer WS URL resource, written by process_coord_events and
+    // read by process_transfers to construct `Reconnect { url }` for player
+    // migration.
+    world.init_resource::<PeerWsAddresses>();
+    // WI-213: insert the ActivePeers resource with the shared Arc so the
+    // receiver task (which holds its own clone) sees updates written by
+    // `process_coord_events` when PeerList broadcasts arrive. Inserting by
+    // value (not init_resource) binds the ECS to the exact Arc the caller
+    // passed in.
+    world.insert_resource(crate::resources::ActivePeers(active_peers.clone()));
     world.init_resource::<EntityLookup>();
     world.init_resource::<InboundQueue>();
     world.init_resource::<CoordEventQueue>();
@@ -185,7 +254,14 @@ pub async fn run_game_loop_ecs(
     // Spawn initial NPCs. Use a capped range (±800) so NPCs cluster near the
     // origin where players spawn. With AoI filtering (500 unit radius), spreading
     // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
-    {
+    //
+    // WI-215 (finding 085): gate on `cold_start`. On a restart-after-crash or
+    // rolling redeploy, survivors have already adopted the entities this
+    // server previously owned (via shadow promotion or authority transfer).
+    // Re-spawning the default `initial_npcs` would duplicate them on every
+    // cycle. Only spawn when the operator explicitly asked for a fresh
+    // cluster bootstrap via `--cold-start`.
+    if cold_start {
         let mut rng = rand::rng();
         let spawn_range = 400.0_f32;
         for _ in 0..initial_npcs {
@@ -197,8 +273,13 @@ pub async fn run_game_loop_ecs(
             let state = EntityState::new_npc(pos, server_id);
             spawn_from_entity_state_direct(&mut world, &state, true, None);
         }
+        tracing::info!("ECS World initialized with {} NPCs (cold start)", initial_npcs);
+    } else {
+        tracing::info!(
+            "ECS World initialized with 0 NPCs (cold_start=false; initial_npcs={} ignored — expected on restart)",
+            initial_npcs
+        );
     }
-    tracing::info!("ECS World initialized with {} NPCs", initial_npcs);
 
     // Wire the local session id into the metrics collector so /metrics can
     // expose it (WI-136). We do this once, right after resource insertion —
@@ -232,6 +313,11 @@ pub async fn run_game_loop_ecs(
         // Scope is limited to the synchronous ECS phases (before any await points)
         // because entered spans are not Send across await boundaries.
         let current_tick = world.resource::<TickCounter>().0;
+        // WI-212: publish the current tick to the shared atomic so the UDP
+        // receiver can stamp `session_changed_at_tick` when it observes a
+        // peer restart. `Relaxed` is fine — the receiver doesn't need a
+        // causal ordering; it just wants a recent approximation.
+        local_tick_atomic.store(current_tick, Ordering::Relaxed);
         let tick_span = tracing::info_span!("tick", server = server_id.0, tick = current_tick);
         let _tick_guard = tick_span.enter();
 
@@ -569,6 +655,21 @@ pub async fn run_game_loop_ecs(
                             // from this peer is observed by the receiver; updates
                             // atomically on session change (peer restart).
                             session_id: ph.peer_sessions.get(&pid).copied().unwrap_or(0),
+                            // WI-211: stragglers dropped from superseded sessions.
+                            // Non-zero values indicate rolling-deploy churn.
+                            stragglers_dropped: ph
+                                .stragglers_dropped
+                                .get(&pid)
+                                .copied()
+                                .unwrap_or(0),
+                            // WI-212: local tick at which this peer's latest
+                            // session change was observed. 0 means "no session
+                            // change observed since our boot".
+                            session_changed_at_tick: ph
+                                .session_changed_at_tick
+                                .get(&pid)
+                                .copied()
+                                .unwrap_or(0),
                         },
                     );
                 }
@@ -584,9 +685,32 @@ pub async fn run_game_loop_ecs(
             });
         }
 
+        // WI-202: refresh the shared set of authoritative player entity IDs
+        // so the async ClaimPlayer handshake in `network.rs` can detect when
+        // an auth-transferred player entity has arrived on this server. Cheap
+        // — this is a small set (~1-10 players per server in practice).
+        {
+            use shared::entity::EntityType as ETP;
+            let mut current: std::collections::HashSet<shared::entity::EntityId> =
+                std::collections::HashSet::new();
+            let mut q = world
+                .query_filtered::<(&NetworkId, &EntityTypeComp), With<Authoritative>>();
+            for (nid, kind) in q.iter(&world) {
+                if kind.0 == ETP::Player {
+                    current.insert(nid.0);
+                }
+            }
+            let mut guard = auth_players.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = current;
+        }
+
         // -- Phase 7: Check shutdown --
         if world.resource::<ShutdownRequested>().0 {
             tracing::info!("Drain complete -- shutting down");
+            // WI-191: signal main's ctrl_c branch that the drain has
+            // completed so it can exit promptly instead of waiting the
+            // full 35s timeout.
+            drain_complete.notify_one();
             break;
         }
 
@@ -800,10 +924,14 @@ mod tests {
         let weighted_load = Arc::new(AtomicU32::new(0));
         let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
         let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
+        let drain_complete = Arc::new(tokio::sync::Notify::new());
+        let local_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let active_peers = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0xAB_u64,
-            0, // no initial NPCs -- drain will find zero entities
+            0,     // no initial NPCs -- drain will find zero entities
+            false, // cold_start
             inbound,
             coord_events,
             udp_repl_tx,
@@ -813,6 +941,10 @@ mod tests {
             weighted_load,
             coord_outbound,
             peer_health,
+            drain_complete,
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_tick,
+            active_peers,
         ));
 
         // The game loop should exit cleanly (break, not process::exit).
@@ -836,7 +968,7 @@ mod tests {
         // Activate drain with non-empty targets (process_drain returns early if targets empty)
         world.resource_mut::<DrainState>().0 = Some(DrainInfo {
             targets: vec![shared::entity::ServerId(2)],
-            started_tick: 1,
+            started_tick: Some(1),
         });
         world.resource_mut::<TickCounter>().0 = 2;
 
@@ -1169,10 +1301,14 @@ mod tests {
         let weighted_load = Arc::new(AtomicU32::new(0));
         let coord_outbound = Arc::new(std::sync::Mutex::new(Vec::new()));
         let peer_health = Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default()));
+        let drain_complete = Arc::new(tokio::sync::Notify::new());
+        let local_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let active_peers = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             0xCD_u64,
             0,
+            false, // cold_start
             Arc::clone(&inbound),
             coord_events,
             udp_repl_tx,
@@ -1182,6 +1318,10 @@ mod tests {
             weighted_load,
             coord_outbound,
             peer_health,
+            drain_complete,
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_tick,
+            active_peers,
         ));
 
         // The loop should complete (drain with 0 entities = immediate shutdown).
@@ -1222,6 +1362,7 @@ mod tests {
                 server_id: ServerId(2),
                 udp_addr: "127.0.0.1:9102".to_string(),
                 ws_addr: "127.0.0.1:7879".to_string(),
+                tls: false,
             }]);
         }
 
@@ -1237,11 +1378,15 @@ mod tests {
 
         const EXPECTED_SESSION: u64 = 0xBEEF_F00D_DEAD_BABE;
 
+        let drain_complete = Arc::new(tokio::sync::Notify::new());
+        let local_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let active_peers = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
         // Spawn 1 NPC initially so prepare_replication has something to send.
         let handle = tokio::spawn(run_game_loop_ecs(
             ServerId(1),
             EXPECTED_SESSION,
-            1, // initial_npcs
+            1,    // initial_npcs
+            true, // cold_start — this test needs the NPC spawn to emit replication
             Arc::clone(&inbound),
             coord_events,
             udp_repl_tx,
@@ -1251,6 +1396,10 @@ mod tests {
             weighted_load,
             coord_outbound,
             peer_health,
+            drain_complete,
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_tick,
+            active_peers,
         ));
 
         // Poll UDP outbound for an EntityStateUpdate, up to 2 seconds.
@@ -1327,6 +1476,181 @@ mod tests {
             seen_session_id,
             Some(EXPECTED_SESSION),
             "replication should carry the session_id inserted at game loop start"
+        );
+    }
+
+    // =========================================================================
+    // WI-215: cold_start gates initial NPC spawn
+    // =========================================================================
+
+    /// Build the minimal arg tuple for `run_game_loop_ecs` in cold_start
+    /// tests. Returns all Arcs the test needs to inspect after the game
+    /// loop has started/finished.
+    #[allow(clippy::type_complexity)]
+    fn cold_start_harness() -> (
+        Arc<std::sync::Mutex<InboundQueue>>,
+        Arc<std::sync::Mutex<CoordEventQueue>>,
+        Arc<std::sync::Mutex<crate::metrics::MetricsCollector>>,
+        Arc<AtomicU32>,
+        Arc<AtomicU32>,
+        Arc<SharedPeerHealth>,
+        Arc<tokio::sync::Notify>,
+        Arc<SharedCoordOutbound>,
+        Arc<SharedAuthPlayers>,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::RwLock<std::collections::HashSet<u16>>>,
+    ) {
+        (
+            Arc::new(std::sync::Mutex::new(InboundQueue::default())),
+            Arc::new(std::sync::Mutex::new(CoordEventQueue::default())),
+            Arc::new(std::sync::Mutex::new(
+                crate::metrics::MetricsCollector::new(1),
+            )),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(std::sync::Mutex::new(PeerHealthAccumulator::default())),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_start_false_skips_initial_npc_spawn() {
+        // WI-215: with cold_start=false and initial_npcs=5, the ECS should
+        // have ZERO auth NPCs after boot. The flag is the explicit gate on
+        // spawning; omitting it is the expected behavior on restart.
+        let (
+            inbound,
+            coord_events,
+            metrics,
+            entity_count,
+            weighted_load,
+            peer_health,
+            drain_complete,
+            coord_outbound,
+            auth_players,
+            local_tick,
+            active_peers,
+        ) = cold_start_harness();
+
+        // Pre-set a drain directive so the loop exits after the first tick.
+        {
+            let mut q = coord_events.lock().unwrap();
+            q.drain_directives.push(vec![ServerId(2)]);
+        }
+
+        let (udp_repl_tx, _udp_repl_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
+        let (udp_ctrl_tx, _udp_ctrl_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
+
+        let handle = tokio::spawn(run_game_loop_ecs(
+            ServerId(1),
+            0xDEAD_u64,
+            5,     // initial_npcs — must be IGNORED
+            false, // cold_start = false
+            Arc::clone(&inbound),
+            coord_events,
+            udp_repl_tx,
+            udp_ctrl_tx,
+            Arc::clone(&metrics),
+            entity_count,
+            weighted_load,
+            coord_outbound,
+            peer_health,
+            drain_complete,
+            auth_players,
+            local_tick,
+            active_peers,
+        ));
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        assert!(result.is_ok(), "game loop should complete within 5s");
+
+        // Verify entity_count atomic stayed at 0 (no NPCs spawned).
+        let m = metrics.lock().unwrap();
+        assert_eq!(
+            m.entity_count, 0,
+            "cold_start=false must skip initial NPC spawn (expected 0 auth entities, got {})",
+            m.entity_count
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_start_true_spawns_initial_npcs() {
+        // WI-215: with cold_start=true and initial_npcs=5, the ECS should
+        // have 5 auth NPCs before drain starts. The first tick records the
+        // auth count into metrics.entity_count.
+        let (
+            inbound,
+            coord_events,
+            metrics,
+            entity_count,
+            weighted_load,
+            peer_health,
+            drain_complete,
+            coord_outbound,
+            auth_players,
+            local_tick,
+            active_peers,
+        ) = cold_start_harness();
+
+        // NOTE: we intentionally do NOT pre-push a drain directive here.
+        // With 5 NPCs the drain path would loop until they are transferred,
+        // and we want to observe the fresh-spawn state before drain runs.
+        // Instead, drive the loop for a short window and abort.
+
+        let (udp_repl_tx, _udp_repl_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_REPLICATION_CHANNEL_SIZE);
+        let (udp_ctrl_tx, _udp_ctrl_rx) =
+            tokio::sync::mpsc::channel::<UdpOutbound>(UDP_CONTROL_CHANNEL_SIZE);
+
+        let handle = tokio::spawn(run_game_loop_ecs(
+            ServerId(1),
+            0xBEEF_u64,
+            5,    // initial_npcs
+            true, // cold_start = true
+            Arc::clone(&inbound),
+            coord_events,
+            udp_repl_tx,
+            udp_ctrl_tx,
+            Arc::clone(&metrics),
+            entity_count,
+            weighted_load,
+            coord_outbound,
+            peer_health,
+            drain_complete,
+            auth_players,
+            local_tick,
+            active_peers,
+        ));
+
+        // Wait up to 1 second for the first tick to record entity_count.
+        // At 20Hz the first tick lands in ~50 ms.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            {
+                let m = metrics.lock().unwrap();
+                if m.entity_count == 5 {
+                    break;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let auth = metrics.lock().unwrap().entity_count;
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            auth, 5,
+            "cold_start=true with initial_npcs=5 should spawn 5 auth NPCs (got {auth})"
         );
     }
 

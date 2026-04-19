@@ -40,6 +40,13 @@ pub enum ClientMessage {
     RemoveEntity {
         entity_id: EntityId,
     },
+    /// Sent by a migrating client as the first message after reconnecting to a
+    /// target server. Tells the target to associate this WebSocket connection
+    /// with the pre-existing Player entity (which arrived via AuthorityTransfer)
+    /// instead of spawning a new player. See design 016, Batch 4, WI-200.
+    ClaimPlayer {
+        player_id: EntityId,
+    },
     RequestSnapshot,
 }
 
@@ -186,6 +193,13 @@ pub struct PeerInfo {
     pub server_id: ServerId,
     pub udp_addr: String,
     pub ws_addr: String,
+    /// Whether this peer's WebSocket listener uses TLS (wss://).
+    /// Source servers use this to construct the full URL when sending a
+    /// `ServerMessage::Reconnect { url }` during player migration.
+    /// Defaults to `false` on old payloads for backward compatibility.
+    /// See design 016, Batch 4, WI-200.
+    #[serde(default)]
+    pub tls: bool,
 }
 
 #[cfg(test)]
@@ -426,18 +440,24 @@ mod tests {
                     server_id: ServerId(1),
                     udp_addr: "127.0.0.1:9101".into(),
                     ws_addr: "127.0.0.1:7878".into(),
+                    tls: false,
                 },
                 PeerInfo {
                     server_id: ServerId(2),
                     udp_addr: "127.0.0.1:9102".into(),
                     ws_addr: "127.0.0.1:7879".into(),
+                    tls: true,
                 },
             ],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: CoordServerMsg = serde_json::from_str(&json).unwrap();
         match decoded {
-            CoordServerMsg::PeerList { peers } => assert_eq!(peers.len(), 2),
+            CoordServerMsg::PeerList { peers } => {
+                assert_eq!(peers.len(), 2);
+                assert!(!peers[0].tls);
+                assert!(peers[1].tls);
+            }
             _ => panic!("wrong variant"),
         }
     }
@@ -1298,5 +1318,67 @@ mod tests {
                 "all-zero session_id should not contain 0xFFFF...FF run"
             );
         }
+    }
+
+    // -- WI-200: PeerInfo.tls field + ClaimPlayer variant tests --
+
+    #[test]
+    fn peer_info_tls_field_json_roundtrip() {
+        // tls=true and tls=false both survive JSON roundtrip.
+        for tls in [false, true] {
+            let p = PeerInfo {
+                server_id: ServerId(1),
+                udp_addr: "127.0.0.1:9101".into(),
+                ws_addr: "127.0.0.1:7878".into(),
+                tls,
+            };
+            let json = serde_json::to_string(&p).unwrap();
+            let decoded: PeerInfo = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.tls, tls);
+            assert_eq!(decoded.server_id, p.server_id);
+            assert_eq!(decoded.udp_addr, p.udp_addr);
+            assert_eq!(decoded.ws_addr, p.ws_addr);
+        }
+    }
+
+    #[test]
+    fn peer_info_tls_defaults_to_false_when_missing() {
+        // Old-format JSON without the `tls` field should deserialize with tls=false,
+        // ensuring a v3-aware coordinator can still parse v2-vintage payloads.
+        let json = r#"{"server_id":1,"udp_addr":"127.0.0.1:9101","ws_addr":"127.0.0.1:7878"}"#;
+        let decoded: PeerInfo = serde_json::from_str(json).unwrap();
+        assert!(!decoded.tls);
+    }
+
+    #[test]
+    fn client_message_claim_player_json_roundtrip() {
+        let player_id = crate::entity::EntityId::new();
+        let msg = ClientMessage::ClaimPlayer { player_id };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"ClaimPlayer\""));
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::ClaimPlayer {
+                player_id: decoded_id,
+            } => {
+                assert_eq!(decoded_id, player_id);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_claim_player_wire_format() {
+        // Lock in the exact wire format for reference by client code
+        // (see WI-204 — client/src/network.ts sends this JSON shape).
+        let player_id = crate::entity::EntityId(
+            uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        let msg = ClientMessage::ClaimPlayer { player_id };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ClaimPlayer","player_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
     }
 }

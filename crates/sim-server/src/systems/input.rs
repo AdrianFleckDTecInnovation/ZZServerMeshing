@@ -262,6 +262,19 @@ pub fn process_client_inputs(world: &mut World) {
                 }
             }
             ClientMessage::RequestSnapshot => {}
+            ClientMessage::ClaimPlayer { player_id } => {
+                // ClaimPlayer is handled at connect time by the network task
+                // (handle_client) which intercepts the first message before
+                // spawning a player entity. If it arrives here, the claim
+                // handshake already completed (or the client sent a duplicate
+                // or out-of-order claim). Log and ignore — the target's
+                // existing player_id assignment is authoritative.
+                tracing::debug!(
+                    client_id,
+                    player_id = %player_id,
+                    "Post-handshake ClaimPlayer received, ignoring"
+                );
+            }
         }
     }
 }

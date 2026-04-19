@@ -5,8 +5,9 @@ use crate::resources::{
 };
 use shared::entity::{EntityState, ServerId};
 use shared::protocol::PeerMessage;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::net::UdpSocket;
 
 /// Chunk reassembly state for [`PeerMessage::ChunkedEntityUpdate`].
@@ -24,34 +25,83 @@ const GLOBAL_STALE_TICKS: u64 = 40;
 /// Prevents unbounded memory growth from crashed peers that never complete chunks.
 const MAX_REASSEMBLY_ENTRIES: usize = 1000;
 
+/// WI-211: Capacity of the per-peer session history LRU. A straggler packet
+/// from any of the last `SESSION_HISTORY_CAPACITY` fully-superseded sessions
+/// is silently dropped instead of triggering a spurious reset-and-flip loop
+/// under WiFi reorder during a rolling deploy. Four entries is enough to
+/// cover N in-flight cross-version rolling-deploy windows; the per-peer map
+/// cost is tiny.
+const SESSION_HISTORY_CAPACITY: usize = 4;
+
 /// Observe the `(server_id, session_id)` pair on an incoming PeerMessage.
 ///
-/// If this is the first packet from `server_id` or the session matches the
-/// stored one, the call is a cheap insert/no-op. If the incoming `session_id`
-/// differs from the stored session for `server_id`, that indicates a peer
-/// restart: we drop all reassembly entries belonging to the old session,
-/// remove the old `(server_id, old_session_id)` entry from `latest_tick`,
-/// clear the per-server `peer_health` counters, and push a [`PeerSessionReset`]
-/// event onto the inbound queue so downstream ECS systems can react
-/// (WI-135 consumes this to reset shadow `last_peer_tick`; design 015).
+/// Return value:
+/// - `true`: proceed with packet processing.
+/// - `false`: this packet is a straggler from a fully-superseded session
+///   (WI-211). The caller MUST skip processing (no peer_updates push, no
+///   ACK, etc.). A straggler counter in `peer_health.stragglers_dropped`
+///   is incremented for observability.
 ///
-/// Note: we always trust the latest-arriving `session_id` as the new current
-/// session. Out-of-order stragglers from an older session arriving after a
-/// new-session packet will trigger a reset back to the old session; the next
-/// new-session packet (typically within one tick) will correct this. This is
-/// acceptable because we have no authoritative "newer" ordering for random
-/// session nonces.
+/// If this is the first packet from `server_id` or the session matches the
+/// stored one, the call is a cheap insert/no-op and returns `true`. If the
+/// incoming `session_id` differs from the stored session for `server_id`,
+/// that indicates a peer restart: we drop all reassembly entries belonging
+/// to the old session, remove the old `(server_id, old_session_id)` entry
+/// from `latest_tick`, record the session change time in
+/// `peer_health.session_changed_at_tick` (WI-212), and push a
+/// [`PeerSessionReset`] event onto the inbound queue so downstream ECS
+/// systems can react (WI-135 consumes this to reset shadow `last_peer_tick`;
+/// design 015).
+///
+/// WI-212 change: do NOT clear `packets_received`, `chunk_evictions`, or
+/// `latest_tick` in `peer_health` on session change. Operators need those
+/// counters to reflect a continuous series across a restart window rather
+/// than zeroing out. The `session_changed_at_tick` map provides the "when
+/// did this peer restart" signal to /metrics consumers.
+///
+/// WI-211 change: maintain a per-peer LRU of recently-seen sessions in
+/// `session_history`. If the incoming session_id is already in the history
+/// for this peer, it is a straggler from a superseded session — drop it
+/// without flipping `session_of_peer`. This prevents session thrash under
+/// WiFi reorder during a rolling deploy.
+#[allow(clippy::too_many_arguments)]
 fn note_session(
     server_id: u16,
     session_id: u64,
     session_of_peer: &mut HashMap<u16, u64>,
+    session_history: &mut HashMap<u16, VecDeque<u64>>,
     reassembly: &mut HashMap<(u16, u64, u64), ChunkReassembly>,
     latest_tick: &mut HashMap<(u16, u64), u64>,
     peer_health: &Arc<SharedPeerHealth>,
     inbound: &Arc<SharedInbound>,
-) {
+    local_tick: &AtomicU64,
+) -> bool {
     match session_of_peer.get(&server_id).copied() {
         Some(prev) if prev != session_id => {
+            // WI-211: check if the incoming session is already in this peer's
+            // history — that means a superseded session sent a straggler UDP
+            // packet after a restart boundary. Dropping the packet here avoids
+            // a spurious reset-and-flip loop that destroys freshly-established
+            // shadow state.
+            if let Some(history) = session_history.get(&server_id) {
+                if history.contains(&session_id) {
+                    // Straggler detected. Increment counter, log at debug
+                    // (very verbose under thrash), return false so callers
+                    // skip downstream processing.
+                    {
+                        let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
+                        *ph.stragglers_dropped.entry(server_id).or_insert(0) += 1;
+                    }
+                    tracing::debug!(
+                        server_id,
+                        stale_session_id = format_args!("0x{:016x}", session_id),
+                        current_session_id = format_args!("0x{:016x}", prev),
+                        "dropping straggler packet from superseded session"
+                    );
+                    return false;
+                }
+            }
+
             tracing::info!(
                 server_id,
                 old_session_id = format_args!("0x{:016x}", prev),
@@ -62,14 +112,34 @@ fn note_session(
             reassembly.retain(|&(sid, ssid, _), _| !(sid == server_id && ssid == prev));
             // Remove the old (server_id, old_session_id) latest_tick entry.
             latest_tick.remove(&(server_id, prev));
-            // Clear this server's peer_health counters and record the new
-            // session so /metrics reflects the restart immediately (WI-136).
+            // WI-212: preserve `packets_received`, `chunk_evictions`,
+            // `stragglers_dropped` across session changes — those are
+            // activity counters that operators want continuous across a
+            // restart window. `latest_tick` IS reset to 0 because it
+            // specifically tracks "highest tick seen from this peer" and
+            // a restarted peer begins at tick 0; preserving the old
+            // high-water mark would make `staleness_ticks` (= our tick -
+            // latest_tick) perpetually report "700 ticks behind" after a
+            // restart, confusing the operator-facing rate.
+            //
+            // `session_changed_at_tick` provides the "when did restart
+            // happen" signal separately so operators can still see the
+            // boundary.
             {
                 let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
-                ph.latest_tick.remove(&server_id);
-                ph.packets_received.remove(&server_id);
-                ph.chunk_evictions.remove(&server_id);
                 ph.peer_sessions.insert(server_id, session_id);
+                ph.session_changed_at_tick
+                    .insert(server_id, local_tick.load(Ordering::Relaxed));
+                ph.latest_tick.remove(&server_id);
+            }
+            // WI-211: push the OUTGOING (superseded) session onto the
+            // per-peer history ring. Trim to capacity from the back.
+            {
+                let history = session_history.entry(server_id).or_default();
+                history.push_front(prev);
+                while history.len() > SESSION_HISTORY_CAPACITY {
+                    history.pop_back();
+                }
             }
             // Push a PeerSessionReset event onto the inbound queue for the ECS
             // to consume (WI-135 will reset shadow last_peer_tick on receipt;
@@ -82,10 +152,12 @@ fn note_session(
                 });
             }
             session_of_peer.insert(server_id, session_id);
+            true
         }
         Some(_) => {
             // Same session as before — nothing to do. peer_sessions was
             // already populated by the first-sight path below.
+            true
         }
         None => {
             // First time we've seen this server — record the session in both
@@ -95,15 +167,29 @@ fn note_session(
             session_of_peer.insert(server_id, session_id);
             let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
             ph.peer_sessions.insert(server_id, session_id);
+            true
         }
     }
 }
 
 /// Listen for incoming UDP packets from peer servers and push events to the shared inbound queue.
+///
+/// WI-212: `local_tick` is a shared atomic that the game loop writes on every
+/// tick. The receiver reads it on session change to record "at what local tick
+/// did this peer restart" for `/metrics` continuity.
+///
+/// WI-213: `active_peers` is a shared set populated by the game loop on every
+/// `PeerList` update. The receiver reads it during its periodic sweep and
+/// prunes entries from `session_of_peer`, `session_history`, and `latest_tick`
+/// whose server_id has departed the mesh. Empty before the first PeerList;
+/// prune is gated on `active_peers.len() > 0` so a fresh sim-server doesn't
+/// wipe its receiver state on the first sweep.
 pub async fn run_udp_receiver(
     udp_socket: Arc<UdpSocket>,
     inbound: Arc<SharedInbound>,
     peer_health: Arc<SharedPeerHealth>,
+    local_tick: Arc<AtomicU64>,
+    active_peers: Arc<RwLock<HashSet<u16>>>,
 ) {
     let mut buf = vec![0u8; 65536];
 
@@ -117,6 +203,11 @@ pub async fn run_udp_receiver(
     // The currently-known session_id for each server_id. Used to detect
     // session changes (peer restart) — see `note_session`.
     let mut session_of_peer: HashMap<u16, u64> = HashMap::new();
+    // WI-211: per-peer LRU of recently-superseded session_ids. Packets
+    // arriving with a session_id in this history are silently dropped
+    // (they are stragglers after a restart boundary) rather than
+    // triggering a spurious reset-and-flip cycle under WiFi reorder.
+    let mut session_history: HashMap<u16, VecDeque<u64>> = HashMap::new();
 
     let mut loop_counter: u64 = 0;
 
@@ -156,6 +247,79 @@ pub async fn run_udp_receiver(
                 let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
                 for (sid, count) in sweep_evictions {
                     *ph.chunk_evictions.entry(sid).or_insert(0) += count;
+                }
+            }
+
+            // WI-213: prune receiver state for departed peers. The game loop
+            // publishes the set of currently-active peer server_ids into
+            // `active_peers` on every `PeerList` update. Any entry in the
+            // receiver's per-peer state whose server_id is no longer in that
+            // set has been superseded by a crash/departure and can be dropped.
+            //
+            // Gate: only prune when `active_peers` is non-empty. Before the
+            // first PeerList arrives, the set is empty and pruning would wipe
+            // everything on a fresh sim-server. This mirrors the "coordinator
+            // not yet reached" state of normal mesh bootstrap.
+            let active_snapshot: HashSet<u16> = {
+                let guard = active_peers.read().unwrap_or_else(|e| e.into_inner());
+                guard.clone()
+            };
+            if !active_snapshot.is_empty() {
+                let session_before = session_of_peer.len();
+                session_of_peer.retain(|sid, _| active_snapshot.contains(sid));
+                let session_pruned = session_before - session_of_peer.len();
+
+                let history_before = session_history.len();
+                session_history.retain(|sid, _| active_snapshot.contains(sid));
+                let history_pruned = history_before - session_history.len();
+
+                let latest_before = latest_tick.len();
+                latest_tick.retain(|(sid, _), _| active_snapshot.contains(sid));
+                let latest_pruned = latest_before - latest_tick.len();
+
+                // Also prune the shared peer_health maps so /metrics reflects
+                // departed peers cleanly. Leaving stale entries behind would
+                // make `latest_tick`, `session_id`, and the new WI-211/212
+                // fields appear as "peer 2 is 10 000 ticks behind" long after
+                // peer 2 has left the mesh.
+                let health_pruned = {
+                    let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
+                    let before = ph.latest_tick.len()
+                        + ph.packets_received.len()
+                        + ph.chunk_evictions.len()
+                        + ph.peer_sessions.len()
+                        + ph.stragglers_dropped.len()
+                        + ph.session_changed_at_tick.len();
+                    ph.latest_tick.retain(|sid, _| active_snapshot.contains(sid));
+                    ph.packets_received
+                        .retain(|sid, _| active_snapshot.contains(sid));
+                    ph.chunk_evictions
+                        .retain(|sid, _| active_snapshot.contains(sid));
+                    ph.peer_sessions
+                        .retain(|sid, _| active_snapshot.contains(sid));
+                    ph.stragglers_dropped
+                        .retain(|sid, _| active_snapshot.contains(sid));
+                    ph.session_changed_at_tick
+                        .retain(|sid, _| active_snapshot.contains(sid));
+                    let after = ph.latest_tick.len()
+                        + ph.packets_received.len()
+                        + ph.chunk_evictions.len()
+                        + ph.peer_sessions.len()
+                        + ph.stragglers_dropped.len()
+                        + ph.session_changed_at_tick.len();
+                    before - after
+                };
+
+                let total = session_pruned + history_pruned + latest_pruned + health_pruned;
+                if total > 0 {
+                    tracing::info!(
+                        session_of_peer_pruned = session_pruned,
+                        session_history_pruned = history_pruned,
+                        latest_tick_pruned = latest_pruned,
+                        peer_health_pruned = health_pruned,
+                        active_peers = active_snapshot.len(),
+                        "Pruned receiver state for departed peers"
+                    );
                 }
             }
         }
@@ -225,15 +389,20 @@ pub async fn run_udp_receiver(
                 session_id,
                 entities,
             } => {
-                note_session(
+                if !note_session(
                     server_id.0,
                     session_id,
                     &mut session_of_peer,
+                    &mut session_history,
                     &mut reassembly,
                     &mut latest_tick,
                     &peer_health,
                     &inbound,
-                );
+                    &local_tick,
+                ) {
+                    // WI-211: straggler from a superseded session. Drop entirely.
+                    continue;
+                }
                 // Per-peer health tracking (WI-103)
                 {
                     let mut ph = peer_health.lock().unwrap_or_else(|e| e.into_inner());
@@ -254,15 +423,20 @@ pub async fn run_udp_receiver(
                 to_server,
                 full_state,
             } => {
-                note_session(
+                if !note_session(
                     from_server.0,
                     session_id,
                     &mut session_of_peer,
+                    &mut session_history,
                     &mut reassembly,
                     &mut latest_tick,
                     &peer_health,
                     &inbound,
-                );
+                    &local_tick,
+                ) {
+                    // WI-211: straggler. Drop the transfer.
+                    continue;
+                }
                 let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
                 q.authority_transfers.push(InboundTransfer {
                     entity_id,
@@ -328,15 +502,22 @@ pub async fn run_udp_receiver(
                 total_chunks,
                 entities,
             } => {
-                note_session(
+                if !note_session(
                     server_id.0,
                     session_id,
                     &mut session_of_peer,
+                    &mut session_history,
                     &mut reassembly,
                     &mut latest_tick,
                     &peer_health,
                     &inbound,
-                );
+                    &local_tick,
+                ) {
+                    // WI-211: straggler chunk from a superseded session. Drop
+                    // without adding to the reassembly map so stale chunks
+                    // don't accumulate against eviction thresholds.
+                    continue;
+                }
 
                 let key = (server_id.0, session_id, tick);
 
@@ -410,29 +591,36 @@ mod tests {
     use std::sync::Mutex;
 
     type SessionOfPeer = HashMap<u16, u64>;
+    type SessionHistory = HashMap<u16, VecDeque<u64>>;
     type ReassemblyMap = HashMap<(u16, u64, u64), ChunkReassembly>;
     type LatestTickMap = HashMap<(u16, u64), u64>;
     type TestState = (
         SessionOfPeer,
+        SessionHistory,
         ReassemblyMap,
         LatestTickMap,
         Arc<SharedPeerHealth>,
         Arc<SharedInbound>,
+        AtomicU64,
     );
 
     fn test_state() -> TestState {
         let session_of_peer: HashMap<u16, u64> = HashMap::new();
+        let session_history: HashMap<u16, VecDeque<u64>> = HashMap::new();
         let reassembly: HashMap<(u16, u64, u64), ChunkReassembly> = HashMap::new();
         let latest_tick: HashMap<(u16, u64), u64> = HashMap::new();
         let peer_health: Arc<SharedPeerHealth> =
             Arc::new(Mutex::new(PeerHealthAccumulator::default()));
         let inbound: Arc<SharedInbound> = Arc::new(Mutex::new(InboundQueue::default()));
+        let local_tick = AtomicU64::new(0);
         (
             session_of_peer,
+            session_history,
             reassembly,
             latest_tick,
             peer_health,
             inbound,
+            local_tick,
         )
     }
 
@@ -457,23 +645,33 @@ mod tests {
         // Simulates the happy path: one peer, stable session_id, chunks arrive
         // for multiple ticks and each tick reassembles independently under the
         // new composite key.
-        let (mut session_of_peer, mut reassembly, mut latest_tick, peer_health, inbound) =
-            test_state();
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
         let server_id = 2u16;
         let session_a = 0xAAAA_AAAA_AAAA_AAAA_u64;
 
         // Tick 100: two chunks
         for tick in [100u64, 101] {
             for chunk_index in [0u16, 1u16] {
-                note_session(
+                let proceed = note_session(
                     server_id,
                     session_a,
                     &mut session_of_peer,
+                    &mut session_history,
                     &mut reassembly,
                     &mut latest_tick,
                     &peer_health,
                     &inbound,
+                    &local_tick,
                 );
+                assert!(proceed, "single-session packets must proceed");
                 let key = (server_id, session_a, tick);
                 let prev_latest = latest_tick.entry((server_id, session_a)).or_insert(0);
                 if tick > *prev_latest {
@@ -509,8 +707,15 @@ mod tests {
     fn old_session_reassembly_entries_are_dropped_on_new_session_packet() {
         // Seed partial reassembly entries under session A, then receive a
         // session B packet. note_session must drop the A entries.
-        let (mut session_of_peer, mut reassembly, mut latest_tick, peer_health, inbound) =
-            test_state();
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
         let server_id = 2u16;
         let session_a = 0xAAAA_AAAA_AAAA_AAAA_u64;
         let session_b = 0xBBBB_BBBB_BBBB_BBBB_u64;
@@ -528,15 +733,18 @@ mod tests {
         latest_tick.insert((3, 0xCCCC_CCCC_CCCC_CCCC), 50);
 
         // Now a new-session packet arrives for server 2.
-        note_session(
+        let proceed = note_session(
             server_id,
             session_b,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
+        assert!(proceed, "genuine session change must proceed");
 
         // All (server_id, session_a, *) entries must be gone.
         assert!(
@@ -560,8 +768,15 @@ mod tests {
     fn peer_session_reset_event_pushed_exactly_once_per_detected_change() {
         // After a detected session change, subsequent packets on the new
         // session must NOT push additional reset events.
-        let (mut session_of_peer, mut reassembly, mut latest_tick, peer_health, inbound) =
-            test_state();
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
         let server_id = 2u16;
         let session_a = 0x1111_1111_1111_1111_u64;
         let session_b = 0x2222_2222_2222_2222_u64;
@@ -571,10 +786,12 @@ mod tests {
             server_id,
             session_a,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
         assert!(
             inbound.lock().unwrap().peer_session_resets.is_empty(),
@@ -586,10 +803,12 @@ mod tests {
             server_id,
             session_a,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
         assert!(inbound.lock().unwrap().peer_session_resets.is_empty());
 
@@ -598,10 +817,12 @@ mod tests {
             server_id,
             session_b,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
         {
             let q = inbound.lock().unwrap();
@@ -621,10 +842,12 @@ mod tests {
                 server_id,
                 session_b,
                 &mut session_of_peer,
+                &mut session_history,
                 &mut reassembly,
                 &mut latest_tick,
                 &peer_health,
                 &inbound,
+                &local_tick,
             );
         }
         let q = inbound.lock().unwrap();
@@ -638,18 +861,27 @@ mod tests {
     #[test]
     fn first_packet_from_new_server_id_does_not_emit_reset() {
         // Distinct from the previous test: isolate the "unknown peer" case.
-        let (mut session_of_peer, mut reassembly, mut latest_tick, peer_health, inbound) =
-            test_state();
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
 
         // Arbitrary session_id on first sight of server 7.
         note_session(
             7,
             0xDEAD_BEEF_CAFE_BABE,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
         assert_eq!(session_of_peer.get(&7), Some(&0xDEAD_BEEF_CAFE_BABE));
         assert!(
@@ -661,12 +893,27 @@ mod tests {
         assert!(latest_tick.is_empty());
     }
 
+    // =========================================================================
+    // WI-212: peer_health counters must survive session changes
+    // =========================================================================
+
     #[test]
-    fn session_change_clears_peer_health_counters_for_that_server() {
-        // Seed peer_health counters for server 2 under session A, then
-        // simulate a session change and assert the counters were cleared.
-        let (mut session_of_peer, mut reassembly, mut latest_tick, peer_health, inbound) =
-            test_state();
+    fn session_change_does_not_zero_packets_received() {
+        // WI-212 regression: before this fix, a session change zeroed
+        // `packets_received` and `chunk_evictions` for the peer, making
+        // /metrics report "no data" on restart. Counters must now survive
+        // a session change. (`latest_tick` IS reset, because it's
+        // specifically the current-session high-water mark — a restarted
+        // peer begins at tick 0.)
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
         let server_id = 2u16;
         let session_a = 0xAA_u64;
         let session_b = 0xBB_u64;
@@ -674,8 +921,8 @@ mod tests {
         session_of_peer.insert(server_id, session_a);
         {
             let mut ph = peer_health.lock().unwrap();
-            ph.latest_tick.insert(server_id, 14000);
-            ph.packets_received.insert(server_id, 42);
+            ph.latest_tick.insert(server_id, 14_000);
+            ph.packets_received.insert(server_id, 100);
             ph.chunk_evictions.insert(server_id, 7);
             // Also seed server 3 to ensure isolation.
             ph.latest_tick.insert(3, 50);
@@ -686,19 +933,124 @@ mod tests {
             server_id,
             session_b,
             &mut session_of_peer,
+            &mut session_history,
             &mut reassembly,
             &mut latest_tick,
             &peer_health,
             &inbound,
+            &local_tick,
         );
 
         let ph = peer_health.lock().unwrap();
-        assert_eq!(ph.latest_tick.get(&server_id), None);
-        assert_eq!(ph.packets_received.get(&server_id), None);
-        assert_eq!(ph.chunk_evictions.get(&server_id), None);
-        // Server 3's counters are untouched.
+        // packets_received and chunk_evictions preserved (WI-212 goal).
+        assert_eq!(
+            ph.packets_received.get(&server_id),
+            Some(&100),
+            "packets_received must persist across session change (WI-212)"
+        );
+        assert_eq!(
+            ph.chunk_evictions.get(&server_id),
+            Some(&7),
+            "chunk_evictions must persist across session change (WI-212)"
+        );
+        // latest_tick is RESET — a restarted peer starts at tick 0 and the
+        // old high-water mark would make staleness_ticks misleading.
+        assert_eq!(
+            ph.latest_tick.get(&server_id),
+            None,
+            "latest_tick must be cleared on session change so staleness is meaningful"
+        );
+        // Server 3's counters untouched.
         assert_eq!(ph.latest_tick.get(&3), Some(&50));
         assert_eq!(ph.packets_received.get(&3), Some(&3));
+    }
+
+    #[test]
+    fn session_change_records_at_tick() {
+        // WI-212: local_tick value at the moment of session change is
+        // recorded in `peer_health.session_changed_at_tick[sid]`.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+        let session_a = 0xAA_u64;
+        let session_b = 0xBB_u64;
+
+        session_of_peer.insert(server_id, session_a);
+        local_tick.store(42, Ordering::Relaxed);
+
+        note_session(
+            server_id,
+            session_b,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+
+        let ph = peer_health.lock().unwrap();
+        assert_eq!(
+            ph.session_changed_at_tick.get(&server_id),
+            Some(&42),
+            "expected session_changed_at_tick to be stamped with local_tick=42"
+        );
+    }
+
+    #[test]
+    fn session_changed_at_tick_updates_on_each_change() {
+        // Multiple session changes advance the recorded tick.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+
+        session_of_peer.insert(server_id, 0xA);
+        local_tick.store(10, Ordering::Relaxed);
+        note_session(
+            server_id,
+            0xB,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        local_tick.store(20, Ordering::Relaxed);
+        note_session(
+            server_id,
+            0xC,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+
+        let ph = peer_health.lock().unwrap();
+        assert_eq!(
+            ph.session_changed_at_tick.get(&server_id),
+            Some(&20),
+            "second change should overwrite to tick=20"
+        );
     }
 
     #[test]
@@ -716,5 +1068,345 @@ mod tests {
 
         assert_eq!(latest_tick.get(&(server_id, session_a)), Some(&100));
         assert_eq!(latest_tick.get(&(server_id, session_b)), Some(&50));
+    }
+
+    // =========================================================================
+    // WI-211: Session straggler LRU
+    // =========================================================================
+
+    #[test]
+    fn session_straggler_in_history_is_dropped() {
+        // Seed history with session A (current), bump to session B (current
+        // now; A in history), then send a packet with session A. Assert no
+        // PeerSessionReset event is pushed and the current session stays B.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+        let session_a = 0xAA_u64;
+        let session_b = 0xBB_u64;
+
+        // Session A is current.
+        session_of_peer.insert(server_id, session_a);
+
+        // Move from A to B: pushes A into history.
+        let proceed_b = note_session(
+            server_id,
+            session_b,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        assert!(proceed_b, "genuine session change to B must proceed");
+
+        // Sanity: 1 reset event from the A->B change.
+        assert_eq!(inbound.lock().unwrap().peer_session_resets.len(), 1);
+        // Sanity: history contains A (the superseded session).
+        assert_eq!(session_history.get(&server_id).unwrap().len(), 1);
+        assert_eq!(session_history.get(&server_id).unwrap().front(), Some(&session_a));
+
+        // Now a straggler with session A arrives. It must NOT flip the session
+        // and must NOT push a new reset.
+        let proceed_a = note_session(
+            server_id,
+            session_a,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        assert!(!proceed_a, "straggler must return false so callers skip processing");
+
+        // Session is still B.
+        assert_eq!(session_of_peer.get(&server_id), Some(&session_b));
+        // Still only one reset event total.
+        assert_eq!(inbound.lock().unwrap().peer_session_resets.len(), 1);
+        // Straggler counter incremented.
+        let ph = peer_health.lock().unwrap();
+        assert_eq!(ph.stragglers_dropped.get(&server_id), Some(&1));
+    }
+
+    #[test]
+    fn session_new_change_overwrites_history() {
+        // Seed A, move to B, move to C. Assert history has [B, A] (newest
+        // in front).
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+
+        session_of_peer.insert(server_id, 0xA);
+        note_session(
+            server_id,
+            0xB,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        note_session(
+            server_id,
+            0xC,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+
+        let h = session_history.get(&server_id).unwrap();
+        // Newest superseded session at the front: [B, A]
+        let as_vec: Vec<u64> = h.iter().copied().collect();
+        assert_eq!(as_vec, vec![0xB, 0xA]);
+    }
+
+    #[test]
+    fn session_history_capacity_enforced() {
+        // Cycle 6 sessions; assert history has only SESSION_HISTORY_CAPACITY
+        // entries.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+
+        session_of_peer.insert(server_id, 0x1);
+        for next in [0x2u64, 0x3, 0x4, 0x5, 0x6, 0x7] {
+            note_session(
+                server_id,
+                next,
+                &mut session_of_peer,
+                &mut session_history,
+                &mut reassembly,
+                &mut latest_tick,
+                &peer_health,
+                &inbound,
+                &local_tick,
+            );
+        }
+
+        let h = session_history.get(&server_id).unwrap();
+        assert_eq!(
+            h.len(),
+            SESSION_HISTORY_CAPACITY,
+            "history size must be capped at capacity"
+        );
+        // The oldest session (0x1) was evicted; the freshest superseded
+        // sessions remain at the front.
+        let as_vec: Vec<u64> = h.iter().copied().collect();
+        assert_eq!(as_vec, vec![0x6, 0x5, 0x4, 0x3]);
+    }
+
+    #[test]
+    fn session_stragglers_counter_increments() {
+        // Each dropped straggler increments the counter.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+        let server_id = 2u16;
+
+        session_of_peer.insert(server_id, 0xA);
+        // Move to B.
+        note_session(
+            server_id,
+            0xB,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        // Fire three stragglers with session A.
+        for _ in 0..3 {
+            let proceed = note_session(
+                server_id,
+                0xA,
+                &mut session_of_peer,
+                &mut session_history,
+                &mut reassembly,
+                &mut latest_tick,
+                &peer_health,
+                &inbound,
+                &local_tick,
+            );
+            assert!(!proceed);
+        }
+
+        let ph = peer_health.lock().unwrap();
+        assert_eq!(ph.stragglers_dropped.get(&server_id), Some(&3));
+    }
+
+    #[test]
+    fn session_straggler_does_not_drop_other_peers_counters() {
+        // A straggler for server 2 must not zero or affect server 3's
+        // peer_health entries.
+        let (
+            mut session_of_peer,
+            mut session_history,
+            mut reassembly,
+            mut latest_tick,
+            peer_health,
+            inbound,
+            local_tick,
+        ) = test_state();
+
+        session_of_peer.insert(2, 0xA);
+        session_of_peer.insert(3, 0xC);
+        {
+            let mut ph = peer_health.lock().unwrap();
+            ph.packets_received.insert(3, 99);
+        }
+
+        note_session(
+            2,
+            0xB,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+        note_session(
+            2,
+            0xA, // straggler from superseded session
+            &mut session_of_peer,
+            &mut session_history,
+            &mut reassembly,
+            &mut latest_tick,
+            &peer_health,
+            &inbound,
+            &local_tick,
+        );
+
+        let ph = peer_health.lock().unwrap();
+        assert_eq!(ph.packets_received.get(&3), Some(&99));
+        assert_eq!(ph.stragglers_dropped.get(&2), Some(&1));
+    }
+
+    // =========================================================================
+    // WI-213: Receiver state pruning for departed peers
+    // =========================================================================
+
+    /// Shared helper that mirrors the prune logic inside the receiver's
+    /// `GLOBAL_SWEEP_INTERVAL` branch. Keeping this in a function lets unit
+    /// tests drive it without spinning up a real UDP socket.
+    fn prune_departed(
+        active_peers: &HashSet<u16>,
+        session_of_peer: &mut HashMap<u16, u64>,
+        session_history: &mut HashMap<u16, VecDeque<u64>>,
+        latest_tick: &mut HashMap<(u16, u64), u64>,
+    ) -> usize {
+        if active_peers.is_empty() {
+            return 0;
+        }
+        let before = session_of_peer.len() + session_history.len() + latest_tick.len();
+        session_of_peer.retain(|sid, _| active_peers.contains(sid));
+        session_history.retain(|sid, _| active_peers.contains(sid));
+        latest_tick.retain(|(sid, _), _| active_peers.contains(sid));
+        let after = session_of_peer.len() + session_history.len() + latest_tick.len();
+        before - after
+    }
+
+    #[test]
+    fn receiver_prunes_state_for_departed_peer() {
+        // Seed session_of_peer, session_history, and latest_tick with sids
+        // {1, 2, 3}. Set active_peers to {1, 2}. Sweep. Assert sid 3 gone
+        // from all three maps.
+        let mut session_of_peer: HashMap<u16, u64> = HashMap::new();
+        let mut session_history: HashMap<u16, VecDeque<u64>> = HashMap::new();
+        let mut latest_tick: HashMap<(u16, u64), u64> = HashMap::new();
+
+        session_of_peer.insert(1, 0xA);
+        session_of_peer.insert(2, 0xB);
+        session_of_peer.insert(3, 0xC);
+
+        session_history.insert(1, VecDeque::from([0x1]));
+        session_history.insert(2, VecDeque::from([0x2]));
+        session_history.insert(3, VecDeque::from([0x3]));
+
+        latest_tick.insert((1, 0xA), 100);
+        latest_tick.insert((2, 0xB), 200);
+        latest_tick.insert((3, 0xC), 300);
+
+        let active: HashSet<u16> = [1u16, 2].into_iter().collect();
+        let pruned = prune_departed(
+            &active,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut latest_tick,
+        );
+        assert!(pruned > 0, "expected at least one pruned entry");
+
+        assert!(!session_of_peer.contains_key(&3));
+        assert!(!session_history.contains_key(&3));
+        assert!(!latest_tick.contains_key(&(3, 0xC)));
+
+        assert!(session_of_peer.contains_key(&1));
+        assert!(session_of_peer.contains_key(&2));
+    }
+
+    #[test]
+    fn receiver_does_not_prune_before_first_peer_list() {
+        // Seed session_of_peer with {1, 2}, active_peers empty. Sweep. Assert
+        // maps unchanged (the "no peer list yet" bootstrap case).
+        let mut session_of_peer: HashMap<u16, u64> = HashMap::new();
+        let mut session_history: HashMap<u16, VecDeque<u64>> = HashMap::new();
+        let mut latest_tick: HashMap<(u16, u64), u64> = HashMap::new();
+
+        session_of_peer.insert(1, 0xA);
+        session_of_peer.insert(2, 0xB);
+        latest_tick.insert((1, 0xA), 100);
+        latest_tick.insert((2, 0xB), 200);
+
+        let active: HashSet<u16> = HashSet::new();
+        let pruned = prune_departed(
+            &active,
+            &mut session_of_peer,
+            &mut session_history,
+            &mut latest_tick,
+        );
+        assert_eq!(pruned, 0, "empty active_peers must not prune anything");
+
+        assert_eq!(session_of_peer.len(), 2);
+        assert_eq!(latest_tick.len(), 2);
     }
 }

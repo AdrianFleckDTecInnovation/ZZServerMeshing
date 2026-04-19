@@ -6,10 +6,11 @@ use registry::Registry;
 use shared::protocol::CoordClientMsg;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 #[derive(Parser, Debug)]
 #[command(name = "coordinator", about = "Server mesh coordinator")]
@@ -103,14 +104,21 @@ async fn main() {
         args.http_port,
         Arc::clone(&registry),
         args.static_dir,
-        tls_acceptor,
+        tls_acceptor.clone(),
     ));
 
-    // Accept sim-server WebSocket connections
+    // Accept sim-server WebSocket connections.
+    // WI-223 (design 016, Batch 6): when a TLS acceptor is configured, we
+    // wrap each accepted TCP stream with it before the WS handshake, so the
+    // 7870 port serves WSS. Previously it always bound plain WS; that left
+    // the coordinator control channel unencrypted even in the UNO Q TLS
+    // deployment. Mac-local dev is unchanged — no --tls-cert means no
+    // acceptor means plain WS as before.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
         .await
         .expect("Failed to bind coordinator port");
-    tracing::info!("Coordinator listening on port {}", args.port);
+    let ws_scheme = if tls_acceptor.is_some() { "wss" } else { "ws" };
+    tracing::info!("Coordinator listening on port {} ({ws_scheme})", args.port);
 
     loop {
         let (stream, addr) = match listener.accept().await {
@@ -121,22 +129,77 @@ async fn main() {
             }
         };
 
-        let ws = match tokio_tungstenite::accept_async(stream).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                tracing::error!("WS handshake error from {addr}: {e}");
-                continue;
+        // TCP keepalive — defense-in-depth for finding 076.
+        //
+        // Without this, a half-open TCP connection (peer power-off or kill -9
+        // with no FIN) can linger in the kernel for minutes to hours; the
+        // mpsc sink_task won't exit until ws_sink.send returns an error, which
+        // only happens when the kernel surfaces the dead connection. With
+        // keepalive set, worst-case dead-connection detection is
+        //   time + (retries * interval) = 10s + 3*5s = 25s
+        // on linux, well within the 15s heartbeat timeout semantics (the
+        // heartbeat timeout fires first; keepalive is the backstop when the
+        // sink_task never gets a chance to send).
+        //
+        // macOS only exposes `with_time`; interval and retries land on
+        // TCP_KEEPINTVL/TCP_KEEPCNT which the darwin socket2 build gates out.
+        // The Pi Zero W2 (armv7 linux-gnueabihf) and UNO Q (aarch64 linux) both
+        // support the full set, so the deployment target gets full coverage.
+        {
+            use socket2::{SockRef, TcpKeepalive};
+            let ka = TcpKeepalive::new().with_time(std::time::Duration::from_secs(10));
+            #[cfg(not(target_os = "macos"))]
+            let ka = ka
+                .with_interval(std::time::Duration::from_secs(5))
+                .with_retries(3);
+            let sock = SockRef::from(&stream);
+            if let Err(e) = sock.set_tcp_keepalive(&ka) {
+                tracing::warn!("set_tcp_keepalive failed for {addr}: {e}");
             }
-        };
+        }
 
-        tracing::info!("Sim-server connecting from {addr}");
         let event_tx = event_tx.clone();
-        tokio::spawn(handle_server_connection(ws, addr, event_tx));
+        if let Some(ref acceptor) = tls_acceptor {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("TLS handshake error from {addr}: {e}");
+                        return;
+                    }
+                };
+                let ws = match tokio_tungstenite::accept_async(tls_stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!("WS handshake error (TLS) from {addr}: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("Sim-server connecting from {addr} (TLS)");
+                handle_server_connection(ws, addr, event_tx).await;
+            });
+        } else {
+            tokio::spawn(async move {
+                let ws = match tokio_tungstenite::accept_async(stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!("WS handshake error from {addr}: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("Sim-server connecting from {addr}");
+                handle_server_connection(ws, addr, event_tx).await;
+            });
+        }
     }
 }
 
-async fn handle_server_connection(
-    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+/// Handle a single sim-server WebSocket connection. Generic over the
+/// transport so we can plug in either a plain `TcpStream` or a
+/// `tokio_rustls::server::TlsStream<TcpStream>` — WI-223 adds the TLS branch.
+async fn handle_server_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    ws: WebSocketStream<S>,
     addr: std::net::SocketAddr,
     event_tx: mpsc::UnboundedSender<RegistryEvent>,
 ) {

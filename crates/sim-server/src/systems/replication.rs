@@ -6,6 +6,31 @@ use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityState, EntityType};
 
+/// Build the outbound replication plan for the tick.
+///
+/// **WI-221 (design 016, Batch 6):** single-pass classifier. The old three-
+/// path implementation (no-shadows bootstrap, per-peer tiered loop, and a
+/// second bootstrap append for peers that got nothing) did three allocations
+/// per peer and encoded its phase filter in three places. This rewrite walks
+/// each authoritative entity exactly once, and for every `peer_addrs` peer
+/// decides on the spot whether the entity belongs in its outbound list. The
+/// classification is behavior-equivalent to the old logic:
+///
+/// - **Hot tier**: the peer has at least one Player shadow AND the entity is
+///   within `PEER_AOI_RADIUS` of any of them. Every tick (20Hz).
+/// - **Cold tier**: the entity's phase (UUID `% 4`) matches `tick % 4` AND
+///   the peer has a valid `PeerBounds` AND the entity lies within those
+///   bounds. 5Hz via phase spreading.
+/// - **Bootstrap tier**: the peer is in `peer_addrs` but we have no shadows
+///   from it AT ALL. Phase-matched entities are sent so a peer that just
+///   came online or lost all its shadows can recover. 5Hz via phase
+///   spreading.
+///
+/// The hot/cold and bootstrap paths are mutually exclusive per-peer: a peer
+/// either has shadows (hot/cold) or has none (bootstrap). A peer that has
+/// shadows but no valid `PeerBounds` (degenerate: collapsed cluster) gets
+/// nothing from the cold path — that matches the pre-refactor behavior where
+/// the main loop `continue`d on missing bounds.
 pub fn prepare_replication(
     tick: Res<TickCounter>,
     config: Res<ServerConfig>,
@@ -32,28 +57,30 @@ pub fn prepare_replication(
     outbound.tick = tick.0;
     outbound.hot_count = 0;
     outbound.cold_count = 0;
+    outbound.per_peer.clear();
+    outbound.full_snapshot = None;
 
     let no_peers = peer_addrs.0.is_empty();
 
+    // Fast path: no peers registered, or no entities to replicate.
     if no_peers || entities.is_empty() {
         outbound.full_snapshot = if entities.is_empty() {
             None
         } else {
             Some(entities)
         };
-        outbound.per_peer.clear();
         return;
     }
 
     // Cold phase: each entity is assigned a phase (0-3) based on its UUID.
-    // An entity is sent as cold when tick % 4 == its phase, achieving 5Hz.
+    // An entity is sent as cold when `tick % 4 == its phase`, achieving 5Hz.
     // This spreads cold entities evenly across ticks instead of bursting
     // all cold entities on every 4th tick (audit #066).
     let current_phase = tick.0 % 4;
 
-    // Build two maps from shadow entities:
-    // 1. peer_player_positions: Player shadow positions per peer (for hot/cold classification)
-    // 2. peer_all_positions: All shadow positions per peer (for PeerBounds fallback)
+    // Build two maps from shadow entities in one pass:
+    //   peer_player_positions — Player shadow positions per peer (hot check)
+    //   peer_all_positions    — all shadow positions per peer (bounds input)
     let mut peer_player_positions: std::collections::HashMap<u16, Vec<Vec3>> =
         std::collections::HashMap::new();
     let mut peer_all_positions: std::collections::HashMap<u16, Vec<Vec3>> =
@@ -70,8 +97,8 @@ pub fn prepare_replication(
         }
     }
 
-    // Build PeerBounds from ALL shadow positions for the fallback path
-    // (used when a peer has no Player shadows).
+    // PeerBounds covers ALL shadow positions (not just Players). A peer with
+    // shadows but no Players falls back to bounds-only cold replication.
     let peer_bounds: std::collections::HashMap<u16, PeerBounds> = peer_all_positions
         .iter()
         .filter_map(|(&sid, positions)| {
@@ -94,142 +121,85 @@ pub fn prepare_replication(
         }
     }
 
-    // If no shadows from any peer: send phase-matched cold entities to all
-    // registered peers to bootstrap shadow recovery. Each tick sends ~25% of
-    // entities, achieving 5Hz per entity without bursting (audit #059, #066).
-    if peer_all_positions.is_empty() {
-        if !entities.is_empty() {
-            let phase_entities: Vec<EntityState> = entities
-                .iter()
-                .filter(|e| (e.id.0.as_u128() % 4) as u64 == current_phase)
-                .cloned()
-                .collect();
-            if !phase_entities.is_empty() {
-                outbound.full_snapshot = None;
-                outbound.per_peer.clear();
-                for &peer_id in peer_addrs.0.keys() {
-                    outbound.cold_count += phase_entities.len();
-                    outbound.per_peer.insert(peer_id, phase_entities.clone());
-                }
-                return;
-            }
+    // Pre-seed an empty entity list for every peer that has shadows AND has
+    // valid bounds. This preserves the pre-WI-221 invariant that such peers
+    // always appear in `per_peer` even when no entities match the per-tick
+    // phase filter — downstream code relies on the key presence to signal
+    // "peer known, nothing to send this tick" (vs. "peer unknown").
+    //
+    // Peers with shadows but no bounds (degenerate: collapsed positions) are
+    // intentionally skipped, matching the pre-refactor `continue` on missing
+    // bounds. Shadowless peers get the bootstrap tier instead and only land
+    // in `per_peer` if at least one phase-matched entity is sent.
+    for &peer_id in peer_addrs.0.keys() {
+        let has_any_shadows = peer_all_positions
+            .get(&peer_id)
+            .is_some_and(|p| !p.is_empty());
+        if has_any_shadows && peer_bounds.contains_key(&peer_id) {
+            outbound.per_peer.entry(peer_id).or_default();
         }
-        outbound.per_peer.clear();
-        outbound.full_snapshot = None;
-        return;
     }
 
-    // Tiered replication: per-peer entity lists
-    outbound.full_snapshot = None;
-    outbound.per_peer.clear();
+    // Single pass over entities. For each entity, for each peer, decide
+    // hot / cold / bootstrap inclusion in one place. `peer_addrs.0.keys()` is
+    // authoritative — entities are replicated to ALL registered peers, not
+    // just the ones with shadows (shadowless peers get the bootstrap tier).
+    let peer_ids: Vec<u16> = peer_addrs.0.keys().copied().collect();
 
-    for (&peer_id, _all_positions) in &peer_all_positions {
-        let player_positions = peer_player_positions.get(&peer_id);
+    for entity in &entities {
+        let phase_match = (entity.id.0.as_u128() % 4) as u64 == current_phase;
 
-        let mut hot_this_peer: usize = 0;
-        let mut cold_this_peer: usize = 0;
+        for &peer_id in &peer_ids {
+            let has_any_shadows = peer_all_positions
+                .get(&peer_id)
+                .is_some_and(|p| !p.is_empty());
 
-        let relevant: Vec<EntityState> = match player_positions {
-            Some(players) if !players.is_empty() => {
-                // Tiered path: use player positions for hot/cold classification.
-                // Hot = within PEER_AOI_RADIUS (750) of any player shadow on
-                // this peer. Uses 750 instead of client AOI (500) to absorb
-                // 1-2 tick staleness in shadow positions — at 5 units/tick, the
-                // 250-unit margin gives 50 ticks of headroom (audit #065).
-                //
-                // Cold = NOT hot, but within PeerBounds of this peer's shadow
-                // positions, sent at 5Hz via phase-spreading (UUID % 4). This
-                // keeps crash-recovery shadows alive for spatially-relevant
-                // entities without replicating the entire world (design 010).
-                //
-                // Phase-spreading distributes cold bandwidth evenly across
-                // ticks instead of bursting on every 4th tick (audit #066).
-                let bounds_for_cold = peer_bounds.get(&peer_id);
-                entities
-                    .iter()
-                    .filter(|e| {
-                        // Hot check first — near a player, always include.
-                        let is_hot = players.iter().any(|pp| {
-                            let dx = e.position.x - pp.x;
-                            let dz = e.position.z - pp.z;
-                            (dx * dx + dz * dz) <= PEER_AOI_RADIUS_SQ
-                        });
-                        if is_hot {
-                            hot_this_peer += 1;
-                            return true;
-                        }
-                        // Cold: phase-matched AND within PeerBounds.
-                        let entity_phase = (e.id.0.as_u128() % 4) as u64;
-                        if entity_phase == current_phase {
-                            if let Some(bounds) = bounds_for_cold {
-                                if bounds.contains(e.position) {
-                                    cold_this_peer += 1;
-                                    return true;
-                                }
-                            }
-                        }
-                        false
-                    })
-                    .cloned()
-                    .collect()
-            }
-            _ => {
-                // Fallback: no Player shadows for this peer.
-                // Without player positions we cannot classify hot/cold, so send
-                // all entities within PeerBounds at 5Hz using phase spreading.
-                // This peer has no players so no client needs 20Hz (audit #064).
-                if let Some(bounds) = peer_bounds.get(&peer_id) {
-                    let filtered: Vec<EntityState> = entities
-                        .iter()
-                        .filter(|e| {
-                            let entity_phase = (e.id.0.as_u128() % 4) as u64;
-                            entity_phase == current_phase && bounds.contains(e.position)
-                        })
-                        .cloned()
-                        .collect();
-                    cold_this_peer = filtered.len();
-                    filtered
-                } else {
-                    continue; // no bounds at all, skip
+            if has_any_shadows {
+                // Shadowed peer: hot + cold classification.
+                let mut is_hot = false;
+                if let Some(players) = peer_player_positions.get(&peer_id) {
+                    is_hot = players.iter().any(|pp| {
+                        let dx = entity.position.x - pp.x;
+                        let dz = entity.position.z - pp.z;
+                        (dx * dx + dz * dz) <= PEER_AOI_RADIUS_SQ
+                    });
                 }
-            }
-        };
 
-        outbound.hot_count += hot_this_peer;
-        outbound.cold_count += cold_this_peer;
-        outbound.per_peer.insert(peer_id, relevant);
-    }
+                if is_hot {
+                    outbound
+                        .per_peer
+                        .entry(peer_id)
+                        .or_default()
+                        .push(entity.clone());
+                    outbound.hot_count += 1;
+                    continue;
+                }
 
-    // Bootstrap: send phase-matched entities to peers in PeerAddresses that
-    // have no shadows at all. Each tick sends ~25% of entities, achieving 5Hz
-    // per entity without bursting. Without this, a peer that lost all shadows
-    // can never recover (audit #059, #066).
-    let phase_entities: Option<Vec<EntityState>> = {
-        let mut needed = false;
-        for &peer_id in peer_addrs.0.keys() {
-            if !outbound.per_peer.contains_key(&peer_id) {
-                needed = true;
-                break;
-            }
-        }
-        if needed && !entities.is_empty() {
-            Some(
-                entities
-                    .iter()
-                    .filter(|e| (e.id.0.as_u128() % 4) as u64 == current_phase)
-                    .cloned()
-                    .collect(),
-            )
-        } else {
-            None
-        }
-    };
-    if let Some(pe) = phase_entities {
-        if !pe.is_empty() {
-            for &peer_id in peer_addrs.0.keys() {
-                if !outbound.per_peer.contains_key(&peer_id) {
-                    outbound.cold_count += pe.len();
-                    outbound.per_peer.insert(peer_id, pe.clone());
+                // Cold: phase-matched AND within peer bounds.
+                if phase_match {
+                    if let Some(bounds) = peer_bounds.get(&peer_id) {
+                        if bounds.contains(entity.position) {
+                            outbound
+                                .per_peer
+                                .entry(peer_id)
+                                .or_default()
+                                .push(entity.clone());
+                            outbound.cold_count += 1;
+                        }
+                    }
+                }
+            } else {
+                // Bootstrap: peer is registered but has no shadows from us.
+                // Send phase-matched entities so it can re-hydrate at 5Hz.
+                // Matches the pre-WI-221 "no shadows anywhere" and "some peers
+                // have no shadows on this server" bootstrap paths.
+                if phase_match {
+                    outbound
+                        .per_peer
+                        .entry(peer_id)
+                        .or_default()
+                        .push(entity.clone());
+                    outbound.cold_count += 1;
                 }
             }
         }

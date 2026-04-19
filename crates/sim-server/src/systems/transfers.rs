@@ -3,7 +3,7 @@ use crate::conversion::{despawn_and_remove, to_entity_state};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use shared::entity::{EntityId, EntityType, ServerId};
-use shared::protocol::{CoordClientMsg, PeerMessage};
+use shared::protocol::{CoordClientMsg, PeerMessage, ServerMessage};
 
 /// Ticks before a pending authority transfer is considered timed out.
 const TRANSFER_TIMEOUT_TICKS: u64 = 10; // 500ms at 20Hz
@@ -153,6 +153,15 @@ pub fn process_transfer_timeouts(world: &mut World) {
 }
 
 /// Process pending authority transfers from coordinator rebalance directives.
+///
+/// WI-203 (design 016, Batch 4): both NPC and Player entities are eligible.
+/// NPCs are preferred (no client handshake required) but Players can migrate
+/// when the load gap requires it or when only Players remain. Each Player
+/// migration sends a `ServerMessage::Reconnect { url }` to the owning client
+/// BEFORE the UDP `AuthorityTransfer` so the client has time to close the old
+/// WebSocket and re-assign via the new URL. The source server flips the
+/// client's `migrating_out` flag so its close handler suppresses
+/// `RemoveEntity` (the target now owns the entity).
 pub fn process_transfers(world: &mut World) {
     let transfer = world.resource_mut::<PendingTransfers>().transfers.take();
     let Some((_entity_ids, target_server)) = transfer else {
@@ -172,37 +181,128 @@ pub fn process_transfers(world: &mut World) {
         }
     };
 
-    // Collect NPC entities sorted by distance from origin (descending).
+    // Collect all authoritative entities as candidates (NPC + Player).
     // Skip entities already in transfer (TransferOutbound).
-    let mut npc_candidates: Vec<(Entity, EntityId, f32)> = Vec::new();
+    let mut candidates: Vec<(Entity, EntityId, EntityType, f32)> = Vec::new();
     let mut total_auth = 0usize;
 
     let mut query = world
         .query_filtered::<(Entity, &NetworkId, &Position, &EntityTypeComp), With<Authoritative>>();
     for (entity, nid, pos, kind) in query.iter(&world) {
         total_auth += 1;
-        if kind.0 == EntityType::Npc && world.get::<TransferOutbound>(entity).is_none() {
-            npc_candidates.push((entity, nid.0, pos.0.length_squared()));
+        if world.get::<TransferOutbound>(entity).is_none() {
+            candidates.push((entity, nid.0, kind.0, pos.0.length_squared()));
         }
     }
 
-    // Sort by distance from origin (descending) -- transfer peripheral entities first
-    npc_candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort: NPCs first, then Players (NPCs are cheaper to migrate — no client
+    // handshake). Within each class, sort by descending distance so peripheral
+    // entities move first (keeps players near origin on busy servers).
+    candidates.sort_by(|a, b| {
+        let a_is_player = matches!(a.2, EntityType::Player) as u8;
+        let b_is_player = matches!(b.2, EntityType::Player) as u8;
+        a_is_player
+            .cmp(&b_is_player)
+            .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+    });
 
-    // Transfer up to 10% of our entities
-    let transfer_count = (total_auth / 10).max(1).min(npc_candidates.len());
+    // Transfer up to 10% of our entities (at least one).
+    let transfer_count = (total_auth / 10).max(1).min(candidates.len());
 
     let mut transferred = 0;
-    for (entity, eid, _) in npc_candidates.iter().take(transfer_count) {
+    for (entity, eid, kind, _) in candidates.iter().take(transfer_count) {
+        // Player migrations require a Reconnect handshake first. If we can't
+        // look up the target's WS URL or can't find the owning client, skip
+        // the Player — rebalance falls through to the next candidate.
+        if matches!(kind, EntityType::Player) {
+            let target_url = match world.resource::<PeerWsAddresses>().0.get(&target_server.0) {
+                Some(u) => u.clone(),
+                None => {
+                    tracing::warn!(
+                        entity = %eid,
+                        target = target_server.0,
+                        "Skipping player migration: no ws url for target (PeerList may not have propagated)"
+                    );
+                    continue;
+                }
+            };
+
+            let reconnect_json = match serde_json::to_string(&ServerMessage::Reconnect {
+                url: target_url.clone(),
+            }) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(
+                        entity = %eid,
+                        error = %e,
+                        "Skipping player migration: failed to serialize Reconnect"
+                    );
+                    continue;
+                }
+            };
+
+            // Find the client handle that owns this player. If there is no
+            // client (e.g. the player entity was adopted via crash recovery
+            // and no one's connected to it), skip — migration is meaningless
+            // without someone to Reconnect.
+            let mut found_client = false;
+            {
+                let mut registry = world.resource_mut::<ClientRegistry>();
+                for (_cid, handle) in registry.clients.iter_mut() {
+                    if handle.player_id == Some(*eid) {
+                        // Enqueue Reconnect as a text frame BEFORE the UDP
+                        // AuthorityTransfer (same-tick ordering guarantees
+                        // the client receives this first).
+                        match handle.tx.try_send(ClientFrame::Text(reconnect_json.clone())) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    entity = %eid,
+                                    error = ?e,
+                                    "Failed to enqueue Reconnect for migrating client"
+                                );
+                                // Still proceed: the client channel may be full or
+                                // the client already disconnected. The
+                                // AuthorityTransfer below is still safe (target
+                                // adopts the entity; the old client re-assigns
+                                // via /assign). Mark migrating_out anyway so
+                                // the (eventual) close handler suppresses
+                                // RemoveEntity.
+                            }
+                        }
+                        handle
+                            .migrating_out
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        found_client = true;
+                        tracing::info!(
+                            entity = %eid,
+                            target = target_server.0,
+                            target_url = %target_url,
+                            "Sent Reconnect to migrating client"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            if !found_client {
+                tracing::warn!(
+                    entity = %eid,
+                    "Skipping player migration: no client owns this player entity"
+                );
+                continue;
+            }
+        }
+
         // Build EntityState from components
         let nid = world.get::<NetworkId>(*entity).unwrap();
         let pos = world.get::<Position>(*entity).unwrap();
         let vel = world.get::<Velocity>(*entity).unwrap();
-        let kind = world.get::<EntityTypeComp>(*entity).unwrap();
+        let kind_comp = world.get::<EntityTypeComp>(*entity).unwrap();
         let seq = world.get::<LastInputSeq>(*entity);
 
         let entity_state =
-            to_entity_state(nid, pos, vel, kind, &AuthorityServer(target_server), seq);
+            to_entity_state(nid, pos, vel, kind_comp, &AuthorityServer(target_server), seq);
 
         let msg = PeerMessage::AuthorityTransfer {
             tick,
@@ -268,6 +368,7 @@ mod tests {
         world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
+        world.init_resource::<PeerWsAddresses>();
         world.init_resource::<EntityLookup>();
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
@@ -293,7 +394,10 @@ mod tests {
     // -- process_transfers tests --
 
     #[test]
-    fn transfer_only_npcs_not_players() {
+    fn transfer_prefers_npcs_over_players_with_single_slot() {
+        // WI-203: With 3 NPCs + 1 Player and a transfer budget of 1
+        // ((total_auth/10).max(1) = 1), an NPC should migrate first
+        // because the sort prefers NPCs over Players.
         let mut world = setup_world(1);
         world
             .resource_mut::<PeerAddresses>()
@@ -312,8 +416,11 @@ mod tests {
 
         process_transfers(&mut world);
 
-        // Player should NOT have TransferOutbound
-        assert!(world.get::<TransferOutbound>(player_entity).is_none());
+        // Player should NOT have TransferOutbound: NPCs are taken first.
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_none(),
+            "Player must not migrate when an NPC candidate is available in the single slot"
+        );
     }
 
     #[test]
@@ -971,5 +1078,293 @@ mod tests {
             }
             _ => panic!("expected AuthorityTransfer, got {:?}", msg),
         }
+    }
+
+    // =========================================================================
+    // WI-203: Source-side player migration (process_transfers includes Players)
+    // =========================================================================
+
+    /// Register a test client owning the given player_id. Returns the frame
+    /// receiver (so the test can inspect Reconnect frames) and the shared
+    /// migrating_out flag (so the test can assert its state post-process).
+    fn register_test_client_for_player(
+        world: &mut World,
+        client_id: u64,
+        player_id: EntityId,
+    ) -> (
+        tokio::sync::mpsc::Receiver<crate::resources::ClientFrame>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::resources::ClientFrame>(8);
+        let migrating = Arc::new(AtomicBool::new(false));
+        let acked = Arc::new(AtomicU64::new(0));
+        world
+            .resource_mut::<ClientRegistry>()
+            .register_from_event_with_migrating(
+                client_id,
+                tx,
+                acked,
+                Arc::clone(&migrating),
+            );
+        if let Some(handle) = world
+            .resource_mut::<ClientRegistry>()
+            .clients
+            .get_mut(&client_id)
+        {
+            handle.player_id = Some(player_id);
+        }
+        (rx, migrating)
+    }
+
+    fn spawn_auth_player(world: &mut World, pos: Vec3, server_id: u16) -> (Entity, EntityId) {
+        let state = EntityState::new_player(pos, ServerId(server_id));
+        let eid = state.id;
+        let entity = spawn_from_entity_state_direct(world, &state, true, None);
+        (entity, eid)
+    }
+
+    #[test]
+    fn process_transfers_player_skipped_when_no_ws_url() {
+        // WI-203: if PeerWsAddresses has no url for the target, skip the
+        // player — Reconnect can't be constructed. NPCs still migrate as
+        // usual via the same directive.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        // Intentionally NOT inserting into PeerWsAddresses.
+
+        let (player_entity, pid) = spawn_auth_player(&mut world, Vec3::new(50.0, 0.0, 50.0), 1);
+        let (_rx, _migrating) = register_test_client_for_player(&mut world, 42, pid);
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 5;
+
+        process_transfers(&mut world);
+
+        // Player must NOT have been migrated — the candidate was skipped.
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_none(),
+            "player must not migrate when no ws_url is available for target"
+        );
+    }
+
+    #[test]
+    fn process_transfers_player_sends_reconnect_and_flips_migrating() {
+        // WI-203: happy path. A player is the only candidate, target has a
+        // ws url, client is registered. Expect:
+        //   (a) ClientFrame::Text(Reconnect JSON) enqueued on the client's tx
+        //   (b) migrating_out atomic flipped to true
+        //   (c) TransferOutbound component set on the entity
+        //   (d) AuthorityTransfer UDP message queued
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerWsAddresses>()
+            .0
+            .insert(2, "ws://127.0.0.1:7879".to_string());
+
+        let (player_entity, pid) = spawn_auth_player(&mut world, Vec3::new(50.0, 0.0, 50.0), 1);
+        let (mut rx, migrating) = register_test_client_for_player(&mut world, 42, pid);
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 10;
+
+        process_transfers(&mut world);
+
+        // (a) Reconnect text frame enqueued.
+        let frame = rx.try_recv().expect("client should have received Reconnect");
+        match frame {
+            crate::resources::ClientFrame::Text(json) => {
+                assert!(
+                    json.contains("\"type\":\"Reconnect\""),
+                    "expected Reconnect json, got: {json}"
+                );
+                assert!(
+                    json.contains("ws://127.0.0.1:7879"),
+                    "expected target ws url in payload, got: {json}"
+                );
+            }
+            other => panic!("expected ClientFrame::Text, got {other:?}"),
+        }
+
+        // (b) migrating_out flipped.
+        assert!(
+            migrating.load(std::sync::atomic::Ordering::Acquire),
+            "migrating_out should be true after process_transfers"
+        );
+
+        // (c) TransferOutbound set.
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_some(),
+            "player entity should be marked TransferOutbound"
+        );
+
+        // (d) AuthorityTransfer enqueued.
+        let outbound = &world.resource::<OutboundTransfers>().messages;
+        assert_eq!(outbound.len(), 1, "one AuthorityTransfer should be queued");
+        let (_, bytes) = &outbound[0];
+        let msg = deserialize_versioned(bytes);
+        match msg {
+            PeerMessage::AuthorityTransfer {
+                entity_id,
+                to_server,
+                ..
+            } => {
+                assert_eq!(entity_id, pid);
+                assert_eq!(to_server, ServerId(2));
+            }
+            other => panic!("expected AuthorityTransfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_transfers_player_uses_wss_scheme_from_tls_peer() {
+        // WI-203: the Reconnect URL should use whatever scheme the peer
+        // advertised via PeerInfo.tls. This test seeds a wss:// url to
+        // confirm it propagates through.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerWsAddresses>()
+            .0
+            .insert(2, "wss://192.168.0.173:7879".to_string());
+
+        let (_, pid) = spawn_auth_player(&mut world, Vec3::new(50.0, 0.0, 50.0), 1);
+        let (mut rx, _migrating) = register_test_client_for_player(&mut world, 42, pid);
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 10;
+        process_transfers(&mut world);
+
+        let frame = rx.try_recv().unwrap();
+        match frame {
+            crate::resources::ClientFrame::Text(json) => {
+                assert!(
+                    json.contains("wss://192.168.0.173:7879"),
+                    "expected wss:// scheme in reconnect url, got: {json}"
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_transfers_player_with_no_client_is_skipped() {
+        // WI-203: A player entity exists but no client owns it (e.g. the
+        // entity was adopted via crash recovery, or the browser tab died
+        // without removing the entity). Migration is meaningless without
+        // someone to Reconnect — skip.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerWsAddresses>()
+            .0
+            .insert(2, "ws://127.0.0.1:7879".to_string());
+        let (player_entity, _pid) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        // No client registered.
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 5;
+        process_transfers(&mut world);
+
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_none(),
+            "player with no client must not be migrated"
+        );
+    }
+
+    #[test]
+    fn process_transfers_prefers_npcs_over_players() {
+        // WI-203: sort order. With enough NPCs to fill the transfer
+        // budget, players remain untouched. The sort puts NPCs (is_player=0)
+        // before Players (is_player=1) regardless of distance.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerWsAddresses>()
+            .0
+            .insert(2, "ws://127.0.0.1:7879".to_string());
+
+        // 20 NPCs so transfer_count = (21/10).max(1) = 2.
+        for i in 0..20 {
+            spawn_auth_npc(
+                &mut world,
+                Vec3::new(i as f32 * 100.0, 0.0, 0.0), // spread
+                1,
+            );
+        }
+        // 1 Player in the middle.
+        let (player_entity, pid) = spawn_auth_player(&mut world, Vec3::new(500.0, 0.0, 500.0), 1);
+        let (_rx, migrating) = register_test_client_for_player(&mut world, 42, pid);
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 5;
+        process_transfers(&mut world);
+
+        // Player must NOT be picked when NPCs fill the budget.
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_none(),
+            "player must not migrate when NPCs fill the budget"
+        );
+        assert!(
+            !migrating.load(std::sync::atomic::Ordering::Acquire),
+            "migrating_out must stay false if the player didn't migrate"
+        );
+
+        // Two NPCs should have migrated (the budget).
+        let npc_out = world
+            .query_filtered::<(), (With<TransferOutbound>, With<Authoritative>)>()
+            .iter(&world)
+            .count();
+        assert_eq!(npc_out, 2, "two NPCs should have been picked");
+    }
+
+    #[test]
+    fn process_transfers_falls_back_to_player_when_no_npcs() {
+        // WI-203: if the only candidate is a Player, the migration system
+        // must migrate it (this is the whole point of 080).
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<PeerAddresses>()
+            .0
+            .insert(2, "127.0.0.1:9102".parse().unwrap());
+        world
+            .resource_mut::<PeerWsAddresses>()
+            .0
+            .insert(2, "ws://127.0.0.1:7879".to_string());
+
+        let (player_entity, pid) = spawn_auth_player(&mut world, Vec3::new(100.0, 0.0, 100.0), 1);
+        let (mut rx, migrating) = register_test_client_for_player(&mut world, 42, pid);
+
+        world.resource_mut::<PendingTransfers>().transfers = Some((vec![], ServerId(2)));
+        world.resource_mut::<TickCounter>().0 = 5;
+        process_transfers(&mut world);
+
+        assert!(
+            world.get::<TransferOutbound>(player_entity).is_some(),
+            "player must migrate when it's the only candidate"
+        );
+        assert!(
+            migrating.load(std::sync::atomic::Ordering::Acquire),
+            "migrating_out must be flipped"
+        );
+        let frame = rx.try_recv().expect("client must receive Reconnect");
+        matches!(frame, crate::resources::ClientFrame::Text(_));
     }
 }

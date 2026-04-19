@@ -60,17 +60,26 @@ impl Registry {
         tls: bool,
         reply_tx: mpsc::UnboundedSender<String>,
     ) {
-        if let Some(existing) = self.servers.get(&server_id) {
-            if existing.reply_tx.is_closed() {
-                tracing::info!(
-                    "S{server_id} re-registering (old connection dead) — replacing entry"
-                );
-            } else {
-                tracing::warn!(
-                    "S{server_id} already registered with live connection — ignoring duplicate"
-                );
-                return;
-            }
+        // Newest-wins semantics (design 016, Batch 1 / audit finding 076): a
+        // fresh Register always replaces any existing entry for this
+        // server_id. The mpsc channel stays open under `kill -9` / power-off
+        // until TCP surfaces the half-open state (minutes), so the previous
+        // "keep old entry if reply_tx.is_closed() == false" policy made
+        // restarted sim-servers invisible for up to 15 s. Matches the
+        // session-id newest-wins semantics already used for UDP peers.
+        //
+        // Dropping the old ServerEntry closes its reply_tx (no other clone
+        // holds it here — the paired sink_task has its own Sender clone
+        // locally, which will close when TCP finally dies). No code path
+        // sends to the old reply_tx once the HashMap::insert below returns,
+        // so leakage is bounded.
+        if let Some(old) = self.servers.get(&server_id) {
+            let age = old.registered_at.elapsed();
+            tracing::info!(
+                server_id,
+                old_age_secs = age.as_secs_f32(),
+                "S{server_id} re-registering — replacing existing entry (new connection wins)"
+            );
         }
         let now = std::time::Instant::now();
         self.servers.insert(
@@ -370,12 +379,19 @@ impl Registry {
 
         // If the unfiltered busiest was busy with in-flight transfers AND a
         // rebalance against it would have crossed thresholds, log the skip.
+        // WI-205: apply the same size-aware floor here so the info log fires
+        // on small meshes too (not just when diff >= 10).
         if let (Some(busy), Some(under)) = (busiest_unfiltered, underloaded) {
             let filtered_out =
                 busy.in_flight > 0 && overloaded.map(|o| o.id != busy.id).unwrap_or(true);
             if filtered_out && busy.id != under.id {
                 let diff = busy.weighted_load as i32 - under.weighted_load as i32;
-                let thresholds_met = diff >= 10 && (diff as f32) >= avg * 0.2;
+                let log_floor = if avg < 50.0 {
+                    (avg * 0.3).max(2.0) as i32
+                } else {
+                    10
+                };
+                let thresholds_met = diff >= log_floor && (diff as f32) >= avg * 0.2;
                 if thresholds_met {
                     tracing::info!(
                         "Rebalance skipped: S{busy_id} (w{load}) has {n} in-flight transfer(s), deferring",
@@ -400,8 +416,18 @@ impl Registry {
 
         let diff = overloaded.weighted_load as i32 - underloaded.weighted_load as i32;
 
-        // Rebalance if diff > 20% of average and at least 10 weighted units apart
-        if diff < 10 || (diff as f32) < avg * 0.2 {
+        // Rebalance if diff > 20% of average and at least `floor` weighted units apart.
+        // WI-205 (design 016, Batch 4): scale the absolute floor by mesh size so
+        // small meshes can still rebalance. At avg < 50 we use max(avg*0.3, 2)
+        // which bottoms out at 2 — enough to fire a rebalance on a 2-server
+        // mesh where one side is 3 weighted units heavier. At avg >= 50, the
+        // original 10-unit floor preserves existing behavior.
+        let floor = if avg < 50.0 {
+            (avg * 0.3).max(2.0) as i32
+        } else {
+            10
+        };
+        if diff < floor || (diff as f32) < avg * 0.2 {
             return false;
         }
 
@@ -497,7 +523,9 @@ impl Registry {
     /// Each server receives a list excluding itself.
     /// Server ID 0 (gateway) is excluded from sim-server peer lists.
     pub fn broadcast_peer_list(&self) {
-        // Only real sim-servers (id > 0) go in the peer list
+        // Only real sim-servers (id > 0) go in the peer list.
+        // WI-200: `tls` is propagated so source servers can construct
+        // `wss://` vs `ws://` URLs when issuing player-migration Reconnects.
         let sim_peers: Vec<PeerInfo> = self
             .servers
             .values()
@@ -506,6 +534,7 @@ impl Registry {
                 server_id: ServerId(s.server_id),
                 udp_addr: format!("{}:{}", s.host, s.udp_port),
                 ws_addr: format!("{}:{}", s.host, s.ws_port),
+                tls: s.tls,
             })
             .collect();
 
@@ -644,12 +673,17 @@ mod tests {
 
     #[test]
     fn rebalance_below_minimum_threshold() {
+        // WI-205: this test exercises the large-mesh branch (avg >= 50)
+        // where the 10-unit floor applies. Inputs bumped from 12/5 to
+        // 105/98 (avg = 101.5, diff = 7 < 10) so the original semantic
+        // "diff < 10 rejects" still holds.
         let mut reg = Registry::new();
         let _rx1 = register_server(&mut reg, 1);
         let _rx2 = register_server(&mut reg, 2);
-        reg.heartbeat(1, 12, 0);
-        reg.heartbeat(2, 5, 0);
-        // diff = 7, which is less than 10 minimum
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 105, 0);
+        reg.heartbeat(2, 98, 0);
+        // diff = 7, avg = 101.5 -> floor = 10, so rejected.
         assert!(!reg.try_rebalance());
     }
 
@@ -889,11 +923,21 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_register_ignored() {
+    fn duplicate_register_replaces_entry() {
+        // Newest-wins (design 016 Batch 1 / finding 076): a second Register
+        // for the same server_id replaces the existing entry, even when the
+        // first reply_tx is still live.
         let mut reg = Registry::new();
-        let _rx1 = register_server(&mut reg, 1);
-        let _rx2 = register_server(&mut reg, 1); // duplicate, should be ignored
+        let (tx1, _rx1) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx1.clone());
+        let (tx2, _rx2) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx2.clone());
+
+        // Still one entry (replacement, not addition).
         assert_eq!(reg.server_count(), 1);
+        // The *new* reply_tx is stored.
+        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx2));
+        assert!(!reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx1));
     }
 
     #[test]
@@ -1047,6 +1091,75 @@ mod tests {
         assert!(reg.detect_dead_servers().is_empty());
     }
 
+    // =========================================================================
+    // WI-214 (finding 084): re-register before timeout must suppress RecoverEntities
+    // =========================================================================
+
+    #[test]
+    fn recovery_does_not_fire_if_re_register_beats_timeout() {
+        // WI-214 (design 016 Batch 5): Scenario — S2 dies, 15s timeout elapses
+        // on the OLD entry, but S2 re-registers BEFORE detect_dead_servers()
+        // fires. Thanks to Batch 1 newest-wins semantics, the fresh register
+        // replaces the old entry and resets `last_heartbeat` to `now`, so the
+        // subsequent `detect_dead_servers()` call correctly returns no
+        // candidates — no RecoverEntities broadcast, no destructive shadow
+        // promotion on survivors.
+        //
+        // This is a regression test against the destructive scenario described
+        // in finding 084. If the newest-wins policy ever regresses (e.g.,
+        // "keep old entry if reply_tx isn't closed yet"), this test fires.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2_old = register_server(&mut reg, 2);
+        let _rx3 = register_server(&mut reg, 3);
+
+        // Simulate S2 being silent for 20 seconds (past 15s timeout).
+        reg.servers.get_mut(&2).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+        // Sanity: before re-register, detect_dead_servers would return [2].
+        assert_eq!(reg.detect_dead_servers(), vec![2]);
+
+        // S2 re-registers (process was restarting — fresh connection arrives).
+        // Batch 1 newest-wins: this replaces the stale entry and resets
+        // last_heartbeat to now.
+        let (tx2_new, _rx2_new) = make_tx();
+        reg.register(2, 9102, 7879, None, false, tx2_new);
+
+        // Now detect_dead_servers MUST NOT return [2]. This is the load-bearing
+        // assertion — the restarted S2's entity count will come in via
+        // subsequent heartbeats; a RecoverEntities broadcast here would cause
+        // survivors to destructively promote S2's shadows.
+        assert!(
+            reg.detect_dead_servers().is_empty(),
+            "re-register before timeout must clear the dead-server signal (WI-214/084)"
+        );
+    }
+
+    #[test]
+    fn recovery_still_fires_if_re_register_misses_window() {
+        // Complement to the above: if S2's restart takes LONGER than 15s, the
+        // timeout fires first and RecoverEntities is broadcast. The restarted
+        // S2's late re-register succeeds (newest-wins), but survivors have
+        // already promoted its shadows. The full remedy for THIS scenario is
+        // WI-215 — the restarted S2 sees cold_start=false and doesn't
+        // re-spawn initial_npcs. This test documents the heartbeat-side
+        // behavior.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+
+        // S2 stale past timeout; no re-register yet.
+        reg.servers.get_mut(&2).unwrap().last_heartbeat =
+            std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+        assert_eq!(
+            reg.detect_dead_servers(),
+            vec![2],
+            "15s timeout with no re-register must still produce a dead-server signal"
+        );
+    }
+
     #[test]
     fn re_register_replaces_dead_connection() {
         let mut reg = Registry::new();
@@ -1070,18 +1183,84 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_register_with_live_connection_rejected() {
+    fn duplicate_register_with_live_connection_replaces_entry() {
+        // Newest-wins (design 016 Batch 1 / finding 076): a second Register
+        // arriving while the first connection's mpsc is still live replaces
+        // the entry — old behavior silently dropped the new connection,
+        // leaving restarted sim-servers invisible for up to 15 s.
         let mut reg = Registry::new();
         let (tx1, _rx1) = make_tx();
         reg.register(1, 9101, 7878, None, false, tx1.clone());
 
-        // Try to register again while the first connection is still alive
+        // Sanity: first connection is still alive.
+        assert!(!tx1.is_closed());
+
+        // Register again with a fresh tx. Old tx is still live.
         let (tx2, _rx2) = make_tx();
         reg.register(1, 9101, 7878, None, false, tx2.clone());
         assert_eq!(reg.server_count(), 1);
 
-        // The original tx should still be the one stored
-        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx1));
+        // The *new* tx should be stored (newest wins).
+        assert!(reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx2));
+        assert!(!reg.servers.get(&1).unwrap().reply_tx.same_channel(&tx1));
+    }
+
+    #[test]
+    fn re_register_preserves_host_from_new_connection() {
+        // Newest-wins: the new connection's advertised host is authoritative.
+        let mut reg = Registry::new();
+        let (tx1, _rx1) = make_tx();
+        reg.register(1, 9101, 7878, Some("host-a.local".to_string()), false, tx1);
+        assert_eq!(reg.servers.get(&1).unwrap().host, "host-a.local");
+
+        let (tx2, _rx2) = make_tx();
+        reg.register(1, 9101, 7878, Some("host-b.local".to_string()), false, tx2);
+        // Stored host should track the new connection.
+        assert_eq!(reg.servers.get(&1).unwrap().host, "host-b.local");
+    }
+
+    #[test]
+    fn re_register_resets_entity_count_to_zero() {
+        // A re-registering sim-server is a fresh process with no entities
+        // yet; its first heartbeat will re-announce the new count. Until
+        // then, the stale count from the dead process must not linger.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        reg.heartbeat(1, 100, 300);
+        assert_eq!(reg.servers.get(&1).unwrap().entity_count, 100);
+        assert_eq!(reg.servers.get(&1).unwrap().weighted_load, 300);
+
+        // Re-register with a new connection.
+        let (tx2, _rx2) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx2);
+
+        // Counters reset so subsequent /assign and rebalance decisions
+        // reflect reality (they will re-populate on the next heartbeat).
+        assert_eq!(reg.servers.get(&1).unwrap().entity_count, 0);
+        assert_eq!(reg.servers.get(&1).unwrap().weighted_load, 0);
+    }
+
+    #[test]
+    fn re_register_clears_in_flight_transfers() {
+        // A re-registered process is not the same entity as the one the
+        // rebalance directive was sent to. Any bookkeeping associated with
+        // the old process must be cleared so the fresh process isn't
+        // unfairly excluded from rebalance eligibility (see
+        // `try_rebalance`'s `in_flight == 0` filter).
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 100, 0);
+        reg.heartbeat(2, 10, 0);
+        assert!(reg.try_rebalance());
+        assert_eq!(reg.servers.get(&1).unwrap().in_flight_transfers.len(), 1);
+
+        // S1 restarts — re-register its entry. The in-flight bookkeeping
+        // from the old process is irrelevant to the new one.
+        let (tx_new, _rx_new) = make_tx();
+        reg.register(1, 9101, 7878, None, false, tx_new);
+        assert!(reg.servers.get(&1).unwrap().in_flight_transfers.is_empty());
     }
 
     #[test]
@@ -1350,6 +1529,84 @@ mod tests {
         assert_eq!(s1["in_flight_transfers"], 1);
         let s2 = list.iter().find(|s| s["server_id"] == 2).unwrap();
         assert_eq!(s2["in_flight_transfers"], 0);
+    }
+
+    // ====================================================================
+    // WI-205 — Small-mesh rebalance threshold
+    // ====================================================================
+
+    #[test]
+    fn rebalance_small_mesh_triggers_at_low_threshold() {
+        // WI-205: 2-server mesh, S1 weighted 6, S2 weighted 0.
+        // avg = 3, floor = max(0.9, 2.0) = 2, diff = 6 >= 2 and >= 0.6.
+        // Should rebalance.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 2, 6); // weighted = 6 (2 players)
+        reg.heartbeat(2, 0, 0);
+        assert!(
+            reg.try_rebalance(),
+            "small mesh 6-vs-0 should trigger rebalance under WI-205"
+        );
+    }
+
+    #[test]
+    fn rebalance_small_mesh_below_floor_no_fire() {
+        // WI-205: diff below the size-aware floor should not fire.
+        // S1 weighted 3, S2 weighted 2 -> avg = 2.5, floor = max(0.75, 2) = 2,
+        // diff = 1 < 2. Rejected.
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        reg.heartbeat(1, 1, 3);
+        reg.heartbeat(2, 2, 2);
+        assert!(
+            !reg.try_rebalance(),
+            "diff below the size-aware floor should not rebalance"
+        );
+    }
+
+    #[test]
+    fn rebalance_small_mesh_at_floor_exactly_fires() {
+        // Boundary: diff exactly equals the floor. Should fire
+        // (condition is `diff < floor`, so equal is allowed).
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        // avg = 2.5, floor = max(0.75, 2) = 2. Need diff >= 2 AND diff >= avg*0.2 = 0.5.
+        reg.heartbeat(1, 1, 4);
+        reg.heartbeat(2, 1, 2);
+        // diff = 2, avg = 3, floor = max(0.9, 2) = 2. diff == floor.
+        assert!(reg.try_rebalance());
+    }
+
+    #[test]
+    fn rebalance_pre_wi205_behavior_preserved_for_large_meshes() {
+        // WI-205: for avg >= 50, the floor stays at 10. This test locks in
+        // that a 9-unit diff on a large mesh still rejects (the pre-WI-205
+        // behavior).
+        let mut reg = Registry::new();
+        let _rx1 = register_server(&mut reg, 1);
+        let _rx2 = register_server(&mut reg, 2);
+        age_all_servers(&mut reg);
+        // avg = 54, floor = 10 (avg >= 50). diff = 9 rejects.
+        reg.heartbeat(1, 50, 58);
+        reg.heartbeat(2, 50, 49);
+        assert!(
+            !reg.try_rebalance(),
+            "large-mesh diff below 10 must still reject"
+        );
+
+        // At avg >= 50 with a large enough imbalance, rebalance fires.
+        // Need both: diff >= 10 AND diff >= avg*0.2.
+        // 200 vs 100: avg = 150, diff = 100, avg*0.2 = 30. Passes.
+        reg.heartbeat(1, 100, 200);
+        reg.heartbeat(2, 100, 100);
+        assert!(reg.try_rebalance());
     }
 
     #[test]

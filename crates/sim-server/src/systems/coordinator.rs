@@ -16,17 +16,48 @@ pub fn process_coord_events(world: &mut World) {
 
     // PeerList
     for peers in peer_list_updates {
-        let mut addrs = world.resource_mut::<PeerAddresses>();
-        addrs.0.clear();
-        for peer in &peers {
-            // Try direct parse first (IP:port). DNS resolution is not available
-            // in sync context so we only use direct parse here.
-            let addr: Option<std::net::SocketAddr> = peer.udp_addr.parse().ok();
-            if let Some(addr) = addr {
-                addrs.0.insert(peer.server_id.0, addr);
-            } else {
-                tracing::warn!("Could not parse peer address: {}", peer.udp_addr);
+        {
+            let mut addrs = world.resource_mut::<PeerAddresses>();
+            addrs.0.clear();
+            for peer in &peers {
+                // Try direct parse first (IP:port). DNS resolution is not
+                // available in sync context so we only use direct parse here.
+                let addr: Option<std::net::SocketAddr> = peer.udp_addr.parse().ok();
+                if let Some(addr) = addr {
+                    addrs.0.insert(peer.server_id.0, addr);
+                } else {
+                    tracing::warn!("Could not parse peer address: {}", peer.udp_addr);
+                }
             }
+        }
+        // WI-202: populate PeerWsAddresses with full URLs (ws:// or wss://)
+        // so process_transfers can reach them when sending Reconnect during
+        // player migration. Cleared + repopulated each PeerList update so
+        // departed peers are pruned automatically.
+        {
+            let mut ws_addrs = world.resource_mut::<PeerWsAddresses>();
+            ws_addrs.0.clear();
+            for peer in &peers {
+                let scheme = if peer.tls { "wss" } else { "ws" };
+                let url = format!("{scheme}://{}", peer.ws_addr);
+                ws_addrs.0.insert(peer.server_id.0, url);
+            }
+        }
+        // WI-213: publish the new active-peer set into the shared `ActivePeers`
+        // resource. The UDP receiver reads this in its periodic sweep to prune
+        // per-peer state (`session_of_peer`, `session_history`, `latest_tick`)
+        // for departed peers. Without this write, those maps grow unbounded
+        // over the server's lifetime.
+        //
+        // Clear + repopulate (rather than diff) so the semantics are "this is
+        // the complete current set". Empty-peers case is legal — a sole
+        // remaining server briefly has no peers; the receiver's "only prune
+        // when non-empty" gate handles that correctly.
+        {
+            let active = world.resource::<ActivePeers>().0.clone();
+            let mut guard = active.write().unwrap_or_else(|e| e.into_inner());
+            guard.clear();
+            guard.extend(peers.iter().map(|p| p.server_id.0));
         }
         tracing::info!(
             "Peer list updated: {} peers {:?}",
@@ -49,7 +80,7 @@ pub fn process_coord_events(world: &mut World) {
         let mut drain = world.resource_mut::<DrainState>();
         drain.0 = Some(DrainInfo {
             targets: target_servers.clone(),
-            started_tick: 0,
+            started_tick: None,
         });
         tracing::info!(
             "Received drain directive -> {:?}",
@@ -139,6 +170,10 @@ mod tests {
         world.insert_resource(SessionId(0));
         world.init_resource::<TickCounter>();
         world.init_resource::<PeerAddresses>();
+        world.init_resource::<PeerWsAddresses>();
+        // WI-213: ActivePeers is cloned to share with the receiver task in
+        // production; tests only exercise the write side, so Default is fine.
+        world.init_resource::<ActivePeers>();
         world.init_resource::<EntityLookup>();
         world.init_resource::<InboundQueue>();
         world.init_resource::<CoordEventQueue>();
@@ -180,6 +215,7 @@ mod tests {
                 server_id: SId(2),
                 udp_addr: "127.0.0.1:9102".into(),
                 ws_addr: "127.0.0.1:7879".into(),
+                tls: false,
             }]);
 
         process_coord_events(&mut world);
@@ -261,11 +297,13 @@ mod tests {
                     server_id: SId(2),
                     udp_addr: "not-a-valid-address".into(),
                     ws_addr: "127.0.0.1:7879".into(),
+                    tls: false,
                 },
                 PeerInfo {
                     server_id: SId(3),
                     udp_addr: "127.0.0.1:9103".into(),
                     ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
                 },
             ]);
 
@@ -293,6 +331,7 @@ mod tests {
                 server_id: SId(2),
                 udp_addr: "127.0.0.1:9102".into(),
                 ws_addr: "127.0.0.1:7879".into(),
+                tls: false,
             }]);
         world
             .resource_mut::<CoordEventQueue>()
@@ -302,11 +341,13 @@ mod tests {
                     server_id: SId(3),
                     udp_addr: "127.0.0.1:9103".into(),
                     ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
                 },
                 PeerInfo {
                     server_id: SId(4),
                     udp_addr: "127.0.0.1:9104".into(),
                     ws_addr: "127.0.0.1:7881".into(),
+                    tls: false,
                 },
             ]);
 
@@ -442,6 +483,165 @@ mod tests {
         let (ids, target) = pending.transfers.as_ref().unwrap();
         assert_eq!(*target, ServerId(3));
         assert_eq!(ids.len(), 2);
+    }
+
+    // -- WI-202: PeerWsAddresses populated from PeerInfo.tls --
+
+    #[test]
+    fn coord_peer_list_populates_ws_urls() {
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![
+                PeerInfo {
+                    server_id: SId(2),
+                    udp_addr: "192.168.0.173:9102".into(),
+                    ws_addr: "192.168.0.173:7879".into(),
+                    tls: true,
+                },
+                PeerInfo {
+                    server_id: SId(3),
+                    udp_addr: "127.0.0.1:9103".into(),
+                    ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
+                },
+            ]);
+
+        process_coord_events(&mut world);
+
+        let ws_addrs = world.resource::<PeerWsAddresses>();
+        assert_eq!(
+            ws_addrs.0.get(&2).map(|s| s.as_str()),
+            Some("wss://192.168.0.173:7879"),
+            "tls=true peer should produce wss:// url"
+        );
+        assert_eq!(
+            ws_addrs.0.get(&3).map(|s| s.as_str()),
+            Some("ws://127.0.0.1:7880"),
+            "tls=false peer should produce ws:// url"
+        );
+    }
+
+    #[test]
+    fn coord_peer_list_prunes_ws_urls_for_departed_peers() {
+        // First PeerList introduces S2 and S3.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![
+                PeerInfo {
+                    server_id: SId(2),
+                    udp_addr: "127.0.0.1:9102".into(),
+                    ws_addr: "127.0.0.1:7879".into(),
+                    tls: false,
+                },
+                PeerInfo {
+                    server_id: SId(3),
+                    udp_addr: "127.0.0.1:9103".into(),
+                    ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
+                },
+            ]);
+        process_coord_events(&mut world);
+        assert_eq!(world.resource::<PeerWsAddresses>().0.len(), 2);
+
+        // Second PeerList drops S3. The resource should be cleared +
+        // repopulated so the stale S3 entry is pruned.
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![PeerInfo {
+                server_id: SId(2),
+                udp_addr: "127.0.0.1:9102".into(),
+                ws_addr: "127.0.0.1:7879".into(),
+                tls: false,
+            }]);
+        process_coord_events(&mut world);
+        let ws_addrs = world.resource::<PeerWsAddresses>();
+        assert_eq!(ws_addrs.0.len(), 1);
+        assert!(ws_addrs.0.contains_key(&2));
+        assert!(!ws_addrs.0.contains_key(&3));
+    }
+
+    // -- WI-213: ActivePeers populated from PeerList --
+
+    #[test]
+    fn coord_peer_list_populates_active_peers() {
+        // On the first PeerList, the shared `ActivePeers` resource must be
+        // populated with the set of peer server_ids so the UDP receiver
+        // can subsequently prune state for departed peers.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![
+                PeerInfo {
+                    server_id: SId(2),
+                    udp_addr: "127.0.0.1:9102".into(),
+                    ws_addr: "127.0.0.1:7879".into(),
+                    tls: false,
+                },
+                PeerInfo {
+                    server_id: SId(3),
+                    udp_addr: "127.0.0.1:9103".into(),
+                    ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
+                },
+            ]);
+
+        process_coord_events(&mut world);
+
+        let active = world.resource::<ActivePeers>().0.clone();
+        let guard = active.read().unwrap();
+        assert!(guard.contains(&2));
+        assert!(guard.contains(&3));
+        assert_eq!(guard.len(), 2);
+    }
+
+    #[test]
+    fn coord_peer_list_prunes_active_peers_for_departed() {
+        // Second PeerList drops S3: ActivePeers must no longer contain 3.
+        let mut world = setup_world(1);
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![
+                PeerInfo {
+                    server_id: SId(2),
+                    udp_addr: "127.0.0.1:9102".into(),
+                    ws_addr: "127.0.0.1:7879".into(),
+                    tls: false,
+                },
+                PeerInfo {
+                    server_id: SId(3),
+                    udp_addr: "127.0.0.1:9103".into(),
+                    ws_addr: "127.0.0.1:7880".into(),
+                    tls: false,
+                },
+            ]);
+        process_coord_events(&mut world);
+        {
+            let guard = world.resource::<ActivePeers>().0.read().unwrap();
+            assert_eq!(guard.len(), 2);
+        }
+
+        world
+            .resource_mut::<CoordEventQueue>()
+            .peer_list_updates
+            .push(vec![PeerInfo {
+                server_id: SId(2),
+                udp_addr: "127.0.0.1:9102".into(),
+                ws_addr: "127.0.0.1:7879".into(),
+                tls: false,
+            }]);
+        process_coord_events(&mut world);
+        let active = world.resource::<ActivePeers>().0.clone();
+        let guard = active.read().unwrap();
+        assert!(guard.contains(&2));
+        assert!(!guard.contains(&3));
+        assert_eq!(guard.len(), 1);
     }
 
     // -- Crash recovery: aborts transfer to dead server --

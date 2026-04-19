@@ -4,20 +4,13 @@ import { Renderer } from './renderer';
 import { DebugOverlay } from './debug-overlay';
 import { DIAGNOSTICS } from './config';
 
-async function getServerUrl(): Promise<string> {
-  const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || '';
-  const assignUrl = coordinatorUrl ? `${coordinatorUrl}/assign` : '/assign';
-  const resp = await fetch(assignUrl);
-  const data = await resp.json();
-  console.log(`Assigned to server: ${data.ws_url}`);
-  return data.ws_url;
-}
-
 async function main() {
   const worldView = new WorldView();
   const coordinatorUrl = import.meta.env.VITE_COORDINATOR_URL || '';
-  const serverUrl = await getServerUrl();
-  const network = new NetworkClient(serverUrl, worldView);
+  // NetworkClient now owns the /assign lifecycle: it fetches on construction
+  // and re-fetches on every reconnect so the client migrates away from
+  // crashed or drained servers automatically (design 016 Batch 2).
+  const network = new NetworkClient(coordinatorUrl, worldView);
   const renderer = new Renderer(worldView, network);
   const debug = new DebugOverlay(worldView, coordinatorUrl);
 

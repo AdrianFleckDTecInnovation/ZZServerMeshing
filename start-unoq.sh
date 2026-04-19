@@ -124,7 +124,17 @@ BOARD_HOSTS=("$UNOQ" "$UNOQ2" "$UNOQ3")
 # --- Restart dashboard service (picks up new binary) ---
 echo "=== Restarting dashboards ==="
 for i in 1 2 3; do
-  MESH_ARGS="--server-id $i --port $(sim_ws_port $i) --udp-port $(sim_udp_port $i) --metrics-port $(sim_metrics_port $i) --coordinator ${ZZTTPI_IP}:${COORD_WS_PORT} --advertise-host ${BOARD_IPS[$((i-1))]} --initial-npcs $UNOQ_NPCS_PER_SERVER $TLS_ARGS"
+  # MESH_ARGS is used by the board dashboard's "Start Server" button, which
+  # is semantically a RESTART path (survivors already hold this server's
+  # entities, so re-spawning initial NPCs would duplicate them). Do NOT add
+  # --cold-start here. The initial-npcs value is still present so that a
+  # future operator who explicitly wants a fresh spawn can add --cold-start
+  # manually.
+  # WI-223: --coordinator-tls is REQUIRED here too. The coordinator on
+  # zzttpi serves WSS on :$COORD_WS_PORT and plain WS would fail the
+  # handshake. Unlike --cold-start this is not semantic-specific to the
+  # bootstrap vs. restart path — TLS is always required on the board mesh.
+  MESH_ARGS="--server-id $i --port $(sim_ws_port $i) --udp-port $(sim_udp_port $i) --metrics-port $(sim_metrics_port $i) --coordinator ${ZZTTPI_IP}:${COORD_WS_PORT} --advertise-host ${BOARD_IPS[$((i-1))]} --initial-npcs $UNOQ_NPCS_PER_SERVER --coordinator-tls $TLS_ARGS"
 
   ssh ${BOARD_HOSTS[$((i-1))]} "mkdir -p ~/.config/systemd/user/dashboard.service.d && cat > ~/.config/systemd/user/dashboard.service.d/mesh.conf << EOF
 [Service]
@@ -143,12 +153,30 @@ ssh $ZZTTPI 'systemctl --user restart mesh-coordinator'
 sleep 1
 
 # --- Start sim-servers on boards ---
+# WI-215: --cold-start is passed here because start-unoq.sh is the cluster
+# bootstrap entry point. A subsequent service-restart (systemd, dashboard
+# Start button, or manual rerun) MUST NOT pass --cold-start — survivors
+# already hold the restarted server's entities and re-spawning initial_npcs
+# would duplicate them on every cycle.
+#
+# Note: rerunning this script after an initial bootstrap will ALSO pass
+# --cold-start, which can duplicate entities. Treat `./start-unoq.sh` as a
+# one-shot bootstrap, not a restart tool. The board dashboard's Stop/Start
+# buttons, the systemd-based dashboard-driven start path, and an
+# operator re-running `~/mesh/sim-server` directly all omit --cold-start.
 for i in 1 2 3; do
   echo "=== Starting sim-server $i on ${BOARD_HOSTS[$((i-1))]} (${BOARD_IPS[$((i-1))]}) ==="
+  # WI-223 (design 016, Batch 6): --coordinator-tls opts into WSS for the
+  # outbound coordinator control channel, trusting the same self-signed cert
+  # the sim-server presents on its client-facing port. Paired with the
+  # coordinator also binding TLS on :$COORD_WS_PORT (via $TLS_ARGS on the
+  # coordinator side, which the systemd unit picks up).
   ssh ${BOARD_HOSTS[$((i-1))]} "nohup ~/mesh/sim-server \
     --server-id $i --port $(sim_ws_port $i) --udp-port $(sim_udp_port $i) --metrics-port $(sim_metrics_port $i) \
     --coordinator ${ZZTTPI_IP}:${COORD_WS_PORT} --advertise-host ${BOARD_IPS[$((i-1))]} \
     --initial-npcs $UNOQ_NPCS_PER_SERVER \
+    --cold-start \
+    --coordinator-tls \
     $TLS_ARGS \
     > ~/mesh/sim${i}.log 2>&1 &"
 done
