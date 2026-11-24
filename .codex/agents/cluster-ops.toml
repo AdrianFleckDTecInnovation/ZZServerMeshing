@@ -1,0 +1,5 @@
+name = "cluster-ops"
+description = "Operate and diagnose the named Pi and UNO Q mesh deployment."
+developer_instructions = """
+Read docs/cluster-services.md and docs/uno-q-deployment.md for host roles, service names and ports. Check the target and current services before an authorized operation. Compare metrics, heartbeats and peer sessions before and after. Report unreachable boards explicitly.
+"""

@@ -2,38 +2,49 @@
 
 ## Prerequisites
 
-- Rust (stable, 1.75+)
-- Node.js (18+)
-- npm
+- Rust stable with the platform C toolchain. On Windows install the MSVC toolchain, Visual Studio C++ Build Tools and the Windows SDK. On Debian/Ubuntu the native compiler and linker are provided by `build-essential`.
+- Node.js 22.16 or newer with npm. Run commands from the repository root. On PowerShell, `npm.cmd` also works when the local execution policy restricts `npm.ps1`.
 
 ## Setup
 
 ```bash
-# Clone and enter
-git clone <repo-url>
-cd ZZServerMeshing
-
-# Install client dependencies
-cd client && npm install && cd ..
-
-# Install tools dependencies (optional, for stress testing)
-cd tools && npm install && cd ..
+npm run setup
 ```
 
 ## Run the Cluster
 
 ```bash
 # Start coordinator + 3 sim-servers + client
-./start.sh
+npm start
 
 # Or with a custom number of servers
-./start.sh 5
+npm start -- --servers 5 --npcs 100
 
-# Stop everything
-./stop.sh
+# Stop from another terminal, or press Ctrl+C in the foreground terminal
+npm stop
 ```
 
-Open http://localhost:4321 in your browser.
+Open http://127.0.0.1:4321 in a browser with WebGPU or WebGL2 support. Each launcher owns its child processes and prints the service log directory under `target/mesh-run-*/`. Local port defaults and environment variable names are in `scripts/local-defaults.env`.
+
+## Verify and benchmark
+
+`npm test` runs the Rust workspace, three TypeScript test files and the client production build. Use free mesh ports for the smoke test and benchmark. The smoke test verifies the Vite page and assignment proxy, player input acknowledgement and peer shadow replication. The benchmark starts a fresh release mesh and writes JSON to stdout.
+
+```sh
+npm test
+npm run smoke
+npm run bench -- --npcs 3000 --seconds 20
+```
+
+For a specific scenario on an already running local mesh, pass the first sim-server WebSocket URL, the first metrics port, the server count and the scenario list.
+
+```sh
+npm --prefix tools run scenario -- ws://127.0.0.1:7878 8101 3 peer-replication
+```
+
+The release workloads and interpretation of the percentiles are in [the benchmark report](benchmark.md).
+
+To exercise the actual renderer against `npm start`, install the matching Playwright Chromium with `npm --prefix tools exec -- playwright install chromium` and run `npm --prefix tools run browser` in a second terminal. To use an installed Microsoft Edge, set `PLAYWRIGHT_CHANNEL` to `msedge`.
 
 ## Controls
 
@@ -75,13 +86,13 @@ Open http://localhost:4321 in your browser.
 cargo run -p coordinator -- --port 7870 --http-port 7871
 
 # Terminal 2: Sim-server 1
-cargo run -p sim-server -- --server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 --coordinator 127.0.0.1:7870
+cargo run -p sim-server -- --server-id 1 --port 7878 --udp-port 9101 --metrics-port 8101 --coordinator 127.0.0.1:7870 --cold-start
 
 # Terminal 3: Sim-server 2
-cargo run -p sim-server -- --server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 --coordinator 127.0.0.1:7870
+cargo run -p sim-server -- --server-id 2 --port 7879 --udp-port 9102 --metrics-port 8102 --coordinator 127.0.0.1:7870 --cold-start
 
 # Terminal 4: Client
-cd client && npx vite --port 4321
+npm --prefix client run dev -- --port 4321
 ```
 
 ## Log Files
@@ -108,7 +119,7 @@ To deploy on the embedded hardware mesh (3 UNO Q boards + Pi Zero W2), see [UNO 
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | Tick rate | 20 Hz | Server simulation rate |
-| World bounds | ±500 | X and Z axis limits |
+| World bounds | ±5000 | X and Z axis limits |
 | Grid cell size | 50 | Spatial grid cell size |
 | Rebalance interval | 5s | How often load is checked |
-| Heartbeat timeout | 5s | Dead server detection |
+| Heartbeat timeout | 15s | Dead server detection |

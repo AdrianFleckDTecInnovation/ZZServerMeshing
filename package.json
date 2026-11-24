@@ -1,4 +1,15 @@
 {
+  "private": true,
+  "engines": { "node": ">=22.16.0" },
+  "scripts": {
+    "setup": "npm --prefix client ci && npm --prefix tools ci",
+    "start": "node scripts/local-mesh.mjs start",
+    "stop": "node scripts/local-mesh.mjs stop",
+    "smoke": "node scripts/local-mesh.mjs smoke",
+    "bench": "node scripts/local-mesh.mjs bench",
+    "sdk:ingest": "node scripts/sdk-rag.mjs ingest sdkcache/",
+    "test": "cargo test --workspace --locked && npm --prefix tools test && npm --prefix client run build"
+  },
   "dependencies": {
     "playwright": "^1.59.1"
   }

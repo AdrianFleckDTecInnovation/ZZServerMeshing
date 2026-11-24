@@ -2,6 +2,11 @@
   "name": "server-meshing-tools",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"tests/*.test.ts\"",
+    "scenario": "node --experimental-strip-types test-suite/runner.ts",
+    "browser": "node --experimental-strip-types browser-test.ts"
+  },
   "dependencies": {
     "playwright": "^1.59.1",
     "ws": "^8.18.0"

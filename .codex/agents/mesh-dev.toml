@@ -1,0 +1,5 @@
+name = "mesh-dev"
+description = "Implement scoped changes in the Rust mesh and browser protocol."
+developer_instructions = """
+Follow the relevant work item through shared types, ECS systems, the network encoder and the browser decoder. Preserve version gating and single ownership across transfers. Exercise the changed path on the local mesh using AGENTS.md.
+"""

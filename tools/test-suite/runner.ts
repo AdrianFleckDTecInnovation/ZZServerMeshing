@@ -10,24 +10,24 @@ import type {
 } from './types.js';
 
 // Import all scenarios
-import { spawnBurst } from './scenarios/spawn-burst.js';
-import { steadyScale } from './scenarios/steady-scale.js';
-import { crashRecovery } from './scenarios/crash-recovery.js';
-import { rebalanceStorm } from './scenarios/rebalance-storm.js';
-import { spatialHotspot } from './scenarios/spatial-hotspot.js';
-import { inputLatency } from './scenarios/input-latency.js';
-import { smoothness } from './scenarios/smoothness.js';
-import { meshVerify } from './scenarios/mesh-verify.js';
-import { inputSeqEcho } from './scenarios/input-seq-echo.js';
-import { peerReplication } from './scenarios/peer-replication.js';
-import { forwardedInput } from './scenarios/forwarded-input.js';
-import { multiClient } from './scenarios/multi-client.js';
-import { entityLifecycle } from './scenarios/entity-lifecycle.js';
-import { authorityTransfer } from './scenarios/authority-transfer.js';
-import { aoiFiltering } from './scenarios/aoi-filtering.js';
-import { peerRestartReconvergence } from './scenarios/peer-restart-reconvergence.js';
-import { peerRestartTwice } from './scenarios/peer-restart-twice.js';
-import { rebalanceStuckRecovery } from './scenarios/rebalance-stuck-recovery.js';
+import { spawnBurst } from './scenarios/spawn-burst.ts';
+import { steadyScale } from './scenarios/steady-scale.ts';
+import { crashRecovery } from './scenarios/crash-recovery.ts';
+import { rebalanceStorm } from './scenarios/rebalance-storm.ts';
+import { spatialHotspot } from './scenarios/spatial-hotspot.ts';
+import { inputLatency } from './scenarios/input-latency.ts';
+import { smoothness } from './scenarios/smoothness.ts';
+import { meshVerify } from './scenarios/mesh-verify.ts';
+import { inputSeqEcho } from './scenarios/input-seq-echo.ts';
+import { peerReplication } from './scenarios/peer-replication.ts';
+import { forwardedInput } from './scenarios/forwarded-input.ts';
+import { multiClient } from './scenarios/multi-client.ts';
+import { entityLifecycle } from './scenarios/entity-lifecycle.ts';
+import { authorityTransfer } from './scenarios/authority-transfer.ts';
+import { aoiFiltering } from './scenarios/aoi-filtering.ts';
+import { peerRestartReconvergence } from './scenarios/peer-restart-reconvergence.ts';
+import { peerRestartTwice } from './scenarios/peer-restart-twice.ts';
+import { rebalanceStuckRecovery } from './scenarios/rebalance-stuck-recovery.ts';
 
 const ALL_SCENARIOS: Scenario[] = [
   spawnBurst,
@@ -477,6 +477,7 @@ async function connectServer(url: string): Promise<WebSocket> {
 async function cleanupSpawnedEntities(
   baselineIds: Set<string>,
   getSnapshot: () => { tick: number; entities: { id: string; entity_type: string }[] } | null,
+  participants: WebSocket[],
 ) {
   const snap = getSnapshot();
   if (!snap) return 0;
@@ -484,49 +485,24 @@ async function cleanupSpawnedEntities(
   const toRemove = snap.entities.filter(e => !baselineIds.has(e.id));
   if (toRemove.length === 0) return 0;
 
-  // Get all server addresses from coordinator so we can send RemoveEntity to each
-  // (entities may have been rebalanced to other servers)
-  const serverUrls: string[] = [];
-  try {
-    const resp = await fetch(`${coordinatorUrl}/servers`);
-    const data: { servers: { host: string; ws_port: number }[] } = await resp.json();
-    const wsProto = config.serverUrl.startsWith('wss') ? 'wss' : 'ws';
-    for (const s of data.servers) {
-      serverUrls.push(`${wsProto}://${s.host}:${s.ws_port}`);
-    }
-  } catch {
-    // Can't reach coordinator — just use the local connection
-  }
+  // Use the scenario's original clients so the owner can remove its fixtures.
+  // A crash scenario can close all of them before cleanup starts.
+  const live = participants.filter(ws => ws.readyState === WebSocket.OPEN);
+  const recovery = live.length ? [] : await openSpawnConnections(await fetchServerUrls());
+  const connections = live.length ? live : recovery;
+  if (!connections.length) return 0;
 
-  // Connect to each server and send RemoveEntity
-  const connections: WebSocket[] = [];
-  for (const url of serverUrls) {
-    try {
-      const ws = await new Promise<WebSocket>((resolve, reject) => {
-        const w = new WebSocket(url, wsOptions);
-        w.on('open', () => resolve(w));
-        w.on('error', reject);
-        setTimeout(() => reject(new Error('timeout')), 2000);
-      });
-      connections.push(ws);
-    } catch {}
-  }
-
-  // Send RemoveEntity in batches of 200 with a brief pause between batches
-  // to avoid overwhelming the server's WebSocket handler (large entity counts
-  // can cause TCP backpressure that blocks inbound message processing).
-  const BATCH_SIZE = 200;
+  // RemoveEntity shares the 30-input/second limit. Allow the last scenario
+  // input window to expire and pace batches on the same connections.
+  const BATCH_SIZE = 25;
   for (let start = 0; start < toRemove.length; start += BATCH_SIZE) {
+    await new Promise(r => setTimeout(r, 1050));
     const batch = toRemove.slice(start, start + BATCH_SIZE);
     for (const e of batch) {
       const msg = JSON.stringify({ type: 'RemoveEntity', entity_id: e.id });
       for (const ws of connections) {
         try { ws.send(msg); } catch {}
       }
-    }
-    // Brief pause between batches to let the server process
-    if (start + BATCH_SIZE < toRemove.length) {
-      await new Promise(r => setTimeout(r, 100));
     }
   }
 
@@ -576,7 +552,7 @@ async function cleanupSpawnedEntities(
     await new Promise(r => setTimeout(r, 1000));
   }
 
-  for (const ws of connections) {
+  for (const ws of recovery) {
     try { ws.close(); } catch {}
   }
 
@@ -711,9 +687,9 @@ async function runScenario(scenario: Scenario, config: RunnerConfig): Promise<Sc
   }
 
   // Clean up entities spawned during the scenario
-  const removed = await cleanupSpawnedEntities(baselineIds, ctx.getLatestSnapshot.bind(ctx));
+  const removed = await cleanupSpawnedEntities(baselineIds, ctx.getLatestSnapshot.bind(ctx), [ws, ...spawnConnections]);
   if (removed > 0) {
-    console.log(color.dim(`  [cleanup] removed ${removed} entities spawned during ${scenario.name}`));
+    console.log(color.dim(`  [cleanup] requested removal of ${removed} entities from ${scenario.name}`));
   }
 
   // Close all connections
@@ -743,7 +719,7 @@ async function main() {
     const ws = await connectServer(config.serverUrl);
     ws.close();
   } catch {
-    console.error(color.red('Failed to connect to sim-server. Is the cluster running? (./start.sh)'));
+    console.error(color.red('Failed to connect to sim-server. Start the cluster with npm start.'));
     process.exit(1);
   }
 

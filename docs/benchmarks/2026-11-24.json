@@ -1,0 +1,358 @@
+{
+  "date": "2026-11-24",
+  "rustc": "1.96.1",
+  "measurements": [
+    {
+      "environment": "windows",
+      "runs": [
+        {
+          "platform": "win32 10.0.26200 x64",
+          "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 30,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.019,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 401,
+              "snapshots": 401,
+              "tick_hz": 20.031,
+              "snapshot_hz": 20.031,
+              "snapshot_KiB_s": 26.838,
+              "tick_p50_ms": 0.273,
+              "tick_p95_ms": 0.479,
+              "tick_p99_ms": 0.828,
+              "p95_budget_pct": 0.958
+            },
+            {
+              "server": 2,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.981,
+              "snapshot_hz": 19.981,
+              "snapshot_KiB_s": 28.394,
+              "tick_p50_ms": 0.278,
+              "tick_p95_ms": 0.519,
+              "tick_p99_ms": 0.599,
+              "p95_budget_pct": 1.039
+            },
+            {
+              "server": 3,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 401,
+              "snapshots": 401,
+              "tick_hz": 20.031,
+              "snapshot_hz": 20.031,
+              "snapshot_KiB_s": 29.029,
+              "tick_p50_ms": 0.281,
+              "tick_p95_ms": 0.493,
+              "tick_p99_ms": 0.781,
+              "p95_budget_pct": 0.987
+            }
+          ]
+        },
+        {
+          "platform": "win32 10.0.26200 x64",
+          "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 3000,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.02,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.98,
+              "snapshot_hz": 19.98,
+              "snapshot_KiB_s": 2493.691,
+              "tick_p50_ms": 2.064,
+              "tick_p95_ms": 3.613,
+              "tick_p99_ms": 5.048,
+              "p95_budget_pct": 7.227
+            },
+            {
+              "server": 2,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 401,
+              "snapshots": 401,
+              "tick_hz": 20.03,
+              "snapshot_hz": 20.03,
+              "snapshot_KiB_s": 2630.578,
+              "tick_p50_ms": 1.971,
+              "tick_p95_ms": 3.001,
+              "tick_p99_ms": 4.7,
+              "p95_budget_pct": 6.002
+            },
+            {
+              "server": 3,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.98,
+              "snapshot_hz": 19.98,
+              "snapshot_KiB_s": 2621.58,
+              "tick_p50_ms": 2.137,
+              "tick_p95_ms": 3.174,
+              "tick_p99_ms": 5.149,
+              "p95_budget_pct": 6.349
+            }
+          ]
+        },
+        {
+          "platform": "win32 10.0.26200 x64",
+          "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 9000,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.013,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 401,
+              "tick_hz": 19.987,
+              "snapshot_hz": 20.037,
+              "snapshot_KiB_s": 7013.476,
+              "tick_p50_ms": 4.463,
+              "tick_p95_ms": 6.836,
+              "tick_p99_ms": 9.63,
+              "p95_budget_pct": 13.673
+            },
+            {
+              "server": 2,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 401,
+              "snapshots": 400,
+              "tick_hz": 20.037,
+              "snapshot_hz": 19.987,
+              "snapshot_KiB_s": 7545.225,
+              "tick_p50_ms": 4.427,
+              "tick_p95_ms": 6.303,
+              "tick_p99_ms": 10.041,
+              "p95_budget_pct": 12.606
+            },
+            {
+              "server": 3,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 401,
+              "snapshots": 401,
+              "tick_hz": 20.037,
+              "snapshot_hz": 20.037,
+              "snapshot_KiB_s": 7049.133,
+              "tick_p50_ms": 4.787,
+              "tick_p95_ms": 6.64,
+              "tick_p99_ms": 7.773,
+              "p95_budget_pct": 13.28
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "environment": "debian-vm",
+      "runs": [
+        {
+          "platform": "linux 6.1.0-56-cloud-amd64 x64",
+          "cpu": "QEMU Virtual CPU version 2.5+",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 30,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.003,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.997,
+              "snapshot_hz": 19.997,
+              "snapshot_KiB_s": 29.898,
+              "tick_p50_ms": 0.27,
+              "tick_p95_ms": 0.547,
+              "tick_p99_ms": 1.119,
+              "p95_budget_pct": 1.094
+            },
+            {
+              "server": 2,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.997,
+              "snapshot_hz": 19.997,
+              "snapshot_KiB_s": 29.601,
+              "tick_p50_ms": 0.162,
+              "tick_p95_ms": 0.294,
+              "tick_p99_ms": 0.557,
+              "p95_budget_pct": 0.588
+            },
+            {
+              "server": 3,
+              "authoritative": 11,
+              "shadows": 22,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.997,
+              "snapshot_hz": 19.997,
+              "snapshot_KiB_s": 29.69,
+              "tick_p50_ms": 0.171,
+              "tick_p95_ms": 0.331,
+              "tick_p99_ms": 0.464,
+              "p95_budget_pct": 0.662
+            }
+          ]
+        },
+        {
+          "platform": "linux 6.1.0-56-cloud-amd64 x64",
+          "cpu": "QEMU Virtual CPU version 2.5+",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 3000,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.009,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.991,
+              "snapshot_hz": 19.991,
+              "snapshot_KiB_s": 2681.88,
+              "tick_p50_ms": 2.134,
+              "tick_p95_ms": 4.819,
+              "tick_p99_ms": 6.827,
+              "p95_budget_pct": 9.639
+            },
+            {
+              "server": 2,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.991,
+              "snapshot_hz": 19.991,
+              "snapshot_KiB_s": 2612.767,
+              "tick_p50_ms": 1.788,
+              "tick_p95_ms": 6.036,
+              "tick_p99_ms": 8.123,
+              "p95_budget_pct": 12.072
+            },
+            {
+              "server": 3,
+              "authoritative": 1001,
+              "shadows": 2002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.991,
+              "snapshot_hz": 19.991,
+              "snapshot_KiB_s": 2532.124,
+              "tick_p50_ms": 1.715,
+              "tick_p95_ms": 4.486,
+              "tick_p99_ms": 5.813,
+              "p95_budget_pct": 8.972
+            }
+          ]
+        },
+        {
+          "platform": "linux 6.1.0-56-cloud-amd64 x64",
+          "cpu": "QEMU Virtual CPU version 2.5+",
+          "node": "v22.16.0",
+          "profile": "release",
+          "npcs": 9000,
+          "clients": 3,
+          "warmup_seconds": 5,
+          "measured_seconds": 20.007,
+          "servers": [
+            {
+              "server": 1,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.993,
+              "snapshot_hz": 19.993,
+              "snapshot_KiB_s": 6396.661,
+              "tick_p50_ms": 4.137,
+              "tick_p95_ms": 7.502,
+              "tick_p99_ms": 12.197,
+              "p95_budget_pct": 15.005
+            },
+            {
+              "server": 2,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.993,
+              "snapshot_hz": 19.993,
+              "snapshot_KiB_s": 5118.87,
+              "tick_p50_ms": 3.574,
+              "tick_p95_ms": 6.354,
+              "tick_p99_ms": 13.971,
+              "p95_budget_pct": 12.709
+            },
+            {
+              "server": 3,
+              "authoritative": 3001,
+              "shadows": 6002,
+              "peers": 2,
+              "ticks": 400,
+              "snapshots": 400,
+              "tick_hz": 19.993,
+              "snapshot_hz": 19.993,
+              "snapshot_KiB_s": 4838.393,
+              "tick_p50_ms": 3.445,
+              "tick_p95_ms": 6.856,
+              "tick_p99_ms": 11.12,
+              "p95_budget_pct": 13.713
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -19,8 +19,8 @@ Clients connect directly to sim-servers (true peer-to-peer mesh). The coordinato
 
 | Service | Language | Port(s) | Role |
 |---------|----------|---------|------|
-| **Coordinator** | Rust | 7870 (WS), 7871 (HTTPS) | Server registry, peer discovery, load-based rebalancing, crash detection, client assignment, serves client app |
-| **Sim-Server N** | Rust | 7877+N (WSS), 9100+N (UDP), 8100+N (metrics) | Game simulation (Bevy ECS), entity authority, peer replication, direct client connections |
+| **Coordinator** | Rust | 7870 (WS), 7871 (HTTP, optional TLS) | Server registry, peer discovery, load-based rebalancing, crash detection, client assignment and dashboard |
+| **Sim-Server N** | Rust | 7877+N (WS, optional TLS), 9100+N (UDP), 8100+N (HTTP metrics) | Game simulation (Bevy ECS), entity authority, peer replication, direct client connections |
 | **Board Dashboard** | Rust | 3000 | Per-board system health + sim-server control (UNO Q boards only) |
 | **Client** | Three.js WebGPU | 4321 (dev) or via coordinator | Renders entities, player controls (WASD), debug overlay |
 
@@ -37,7 +37,7 @@ Clients connect directly to sim-servers (true peer-to-peer mesh). The coordinato
   2. Simulation (Bevy ECS)
      ├─ NPC AI: random direction change every 3 seconds
      ├─ Integration: position += velocity × dt
-     └─ Bounds clamping: [-500, 500] on X and Z
+     └─ Bounds clamping: [-5000, 5000] on X and Z
 
   3. Authority Transfers
      ├─ Coordinator issues RebalanceDirective to overloaded server
@@ -49,8 +49,8 @@ Clients connect directly to sim-servers (true peer-to-peer mesh). The coordinato
      └─ Peers store as shadow entities (read-only copies)
 
   5. Client Broadcast
-     ├─ Each server sends full world view (auth + shadow) to its connected clients
-     └─ Binary WebSocket frames at 20Hz (47 bytes per entity)
+     ├─ Each server collects authoritative and shadow entities within client interest
+     └─ Clients receive binary full or delta snapshots and acknowledge the tick
 ```
 
 ### Entity Authority Model
@@ -72,23 +72,17 @@ Entity IDs are UUIDs. Server IDs are u16 (1-65535).
 
 ## Rebalancing Algorithm
 
-Runs every 5 seconds in the coordinator:
+The coordinator checks weighted load every five seconds. A player contributes three units and an NPC contributes one. It selects an eligible source and target when their difference reaches 20% of average load and a size-dependent minimum. A source with transfers in flight waits. A new target becomes eligible ten seconds after registration. [Coordinator logic](../crates/coordinator/src/registry.rs)
 
-1. Compute average entity count across all sim-servers
-2. Find most overloaded and most underloaded server
-3. Trigger if: `difference ≥ 5 entities AND difference ≥ 30% of average`
-4. Transfer count: `(difference / 2), capped at 10% of overloaded server's entities, minimum 1`
-5. Cooldown: 5 seconds between rebalances
-
-The overloaded server picks which entities to transfer — selects NPCs farthest from origin (peripheral entities are cheapest to move). Players are never transferred automatically.
+The source sim-server selects a batch of roughly 10% of its eligible entities, with a minimum of one. It prefers NPCs and sorts each entity type by descending distance from the origin. A player transfer sends the owning client a reconnect message for the target server. [Transfer logic](../crates/sim-server/src/systems/transfers.rs)
 
 ## Crash Recovery
 
-1. Coordinator detects missing heartbeats (5-second timeout)
+1. Coordinator detects a disconnect or missing heartbeats (15-second timeout)
 2. Dead server is unregistered, peer list updated
-3. Coordinator broadcasts `RecoverEntities { dead_server_id }` to all survivors
-4. Each survivor promotes shadow entities from the dead server to authoritative
-5. Rebalancer evens out distribution within 10 seconds
+3. Coordinator broadcasts `RecoverEntities` with the dead server ID and the sorted list of survivors
+4. Each survivor hashes the entity IDs and promotes the shadows assigned to it
+5. Subsequent rebalance checks use the surviving servers' reported loads
 
 ## Graceful Drain
 

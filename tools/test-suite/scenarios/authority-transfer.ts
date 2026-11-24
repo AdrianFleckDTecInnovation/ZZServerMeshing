@@ -24,19 +24,17 @@ export const authorityTransfer: Scenario = {
         details.push(`  S${m.server_id}: ${m.entity_count} entities`);
       }
     }
-    const totalBaseline = baseline.length > 0
-      ? baseline.reduce((s, m) => s + m.entity_count, 0)
-      : (ctx.getLatestSnapshot()?.entities.length ?? 0);
-
     // ── Step 2: Overload one server to trigger rebalance ──
-    // Spawn 100 entities — they all go to our connected server
-    ctx.log('Spawning 100 entities to trigger imbalance...');
+    // The sim accepts five spawns per client per second. Keep the requests on
+    // the primary connection so the resulting load is concentrated on one server.
+    ctx.log('Spawning 100 entities on one server at four per second...');
     for (let i = 0; i < 100; i++) {
       ctx.server.send(JSON.stringify({
         type: 'SpawnEntity',
         position: [(Math.random() - 0.5) * 400, 0, (Math.random() - 0.5) * 400],
         entity_type: 'npc',
       }));
+      await ctx.sleep(250);
     }
 
     await ctx.sleep(2000);
@@ -74,7 +72,6 @@ export const authorityTransfer: Scenario = {
     ctx.log('Waiting for rebalance (up to 30s)...');
     let transfersDetected = 0;
     const transferredEntities: { id: string; from: number; to: number }[] = [];
-    let rebalanced = false;
 
     for (let i = 0; i < 60; i++) { // up to 30 seconds
       await ctx.sleep(500);
@@ -111,7 +108,6 @@ export const authorityTransfer: Scenario = {
       }
 
       if (transfersDetected > 5) {
-        rebalanced = true;
         break;
       }
     }
@@ -133,7 +129,7 @@ export const authorityTransfer: Scenario = {
       details.push(`  ... and ${transferredEntities.length - 10} more`);
     }
 
-    // ── Step 6: Verify total entity count preserved ──
+    // ── Step 6: Record the client's final view ──
     const snapPost = ctx.getLatestSnapshot();
     const clientEntities = snapPost?.entities.length ?? 0;
     details.push(`Client sees: ${clientEntities} entities`);
@@ -150,8 +146,8 @@ export const authorityTransfer: Scenario = {
 
     return {
       name: 'authority-transfer',
-      status: rebalanced ? 'pass' : 'warn',
-      summary: `${transfersDetected} entities transferred, balance ${rebalanced ? 'restored' : 'improving'}`,
+      status: transfersDetected > 5 ? 'pass' : 'warn',
+      summary: `Observed authority changes for ${transfersDetected} distinct entities`,
       details,
       durationMs: 0,
     };

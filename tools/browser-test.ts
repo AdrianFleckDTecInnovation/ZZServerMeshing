@@ -3,47 +3,28 @@
  * waits for frames, then reads window.__diag to detect flicker + warping.
  *
  * Usage:
- *   npx tsx browser-test.ts [gateway-url]
- *   npx tsx browser-test.ts ws://20.29.160.152
+ *   npm --prefix tools run browser -- http://127.0.0.1:4321
+ *   A ws:// URL can also select one sim-server for the local client.
  */
-import { chromium } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 
-const GW_URL = process.argv[2] || 'ws://localhost:4322';
-const CLIENT_URL = 'http://localhost:4321';
+const target = new URL(process.argv[2] || 'http://127.0.0.1:4321');
+const direct = ['ws:', 'wss:'].includes(target.protocol);
+const CLIENT_URL = direct ? 'http://127.0.0.1:4321' : target.href;
 const TEST_DURATION_MS = 15000;
 
-async function main() {
-  console.log('Launching browser...');
-  const browser = await chromium.launch({ headless: true });
+async function run(browser: Browser) {
   const page = await browser.newPage();
+  if (direct) {
+    await page.route('**/assign', route => route.fulfill({ json: { ws_url: target.href } }));
+  }
 
   // Capture console logs
   const consoleLogs: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   page.on('console', (msg) => {
-    consoleLogs.push(`[${msg.type()}] ${msg.text()}`);
-  });
-
-  // Start the Vite dev server
-  const { execSync, spawn } = await import('child_process');
-
-  // Kill anything on 4321
-  try { execSync('lsof -ti tcp:4321 | xargs kill -9 2>/dev/null'); } catch {}
-  await new Promise(r => setTimeout(r, 500));
-
-  console.log('Starting Vite dev server...');
-  const vite = spawn('npx', ['vite', '--port', '4321'], {
-    cwd: process.cwd().replace(/\/tools$/, '/client'),
-    env: { ...process.env, VITE_GATEWAY_URL: GW_URL },
-    stdio: 'pipe',
-  });
-
-  // Wait for Vite to be ready
-  await new Promise<void>((resolve) => {
-    vite.stdout?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      if (text.includes('ready') || text.includes('Local:')) resolve();
-    });
-    setTimeout(resolve, 8000); // fallback
+    consoleLogs.push(`[${msg.type()}] ${msg.text()} ${msg.location().url}`);
   });
 
   console.log(`Opening ${CLIENT_URL}...`);
@@ -58,7 +39,9 @@ async function main() {
   const diag = await page.evaluate(() => {
     const d = (window as any).__diag;
     if (!d) return null;
+    const overlay = document.querySelector('#debug-overlay')?.textContent ?? '';
     return {
+      renderFps: Number(overlay.match(/Render (\d+) FPS/)?.[1] ?? 0),
       frames: d.frames,
       applied: d.applied,
       dropped: d.dropped,
@@ -74,9 +57,6 @@ async function main() {
     };
   });
 
-  await browser.close();
-  vite.kill();
-
   console.log(`\n${'='.repeat(60)}`);
   console.log(`  BROWSER TEST RESULTS`);
   console.log(`${'='.repeat(60)}\n`);
@@ -85,11 +65,13 @@ async function main() {
     console.log('FAIL: window.__diag not found — client did not initialize');
     console.log('\nConsole logs:');
     for (const log of consoleLogs.slice(-20)) console.log(`  ${log}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   console.log(`Frames received:  ${diag.frames}`);
   console.log(`Frames applied:   ${diag.applied}`);
+  console.log(`Render rate:      ${diag.renderFps} FPS`);
   console.log(`Frames dropped:   ${diag.dropped}`);
   console.log(`Duplicate ticks:  ${diag.dupes}`);
   console.log(`Text frames:      ${diag.textFrames}`);
@@ -121,7 +103,9 @@ async function main() {
   }
 
   console.log(`\n${'='.repeat(60)}`);
-  const problems: string[] = [];
+  const problems: string[] = [...pageErrors];
+  if (diag.renderFps <= 0) problems.push('render loop did not update the live FPS counter');
+  if (diag.errors.length) problems.push(`${diag.errors.length} client errors`);
   if (diag.entityFlickerIn > 5) problems.push(`${diag.entityFlickerIn} flicker-in events`);
   if (diag.entityFlickerOut > 5) problems.push(`${diag.entityFlickerOut} flicker-out events`);
   if (diag.positionJumps > 0) problems.push(`${diag.positionJumps} position jumps (worst: ${diag.worstJump.toFixed(1)})`);
@@ -129,13 +113,18 @@ async function main() {
   if (diag.applied < 20) problems.push(`only ${diag.applied} frames applied in ${TEST_DURATION_MS/1000}s`);
 
   if (problems.length === 0) {
-    console.log('PASS — browser client shows no flicker or warping');
-    process.exit(0);
+    console.log('PASS — browser rendered the mesh and met the snapshot checks');
   } else {
     console.log('FAIL:');
     for (const p of problems) console.log(`  - ${p}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
+}
+
+async function main() {
+  const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL });
+  try { await run(browser); }
+  finally { await browser.close(); }
 }
 
 main().catch((e) => {

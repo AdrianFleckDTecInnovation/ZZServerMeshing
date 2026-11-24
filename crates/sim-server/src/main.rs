@@ -308,18 +308,7 @@ async fn main() {
         r = coord_handle => { if let Err(e) = r { tracing::error!("Coordinator client error: {e}"); } }
         r = sim_handle => { if let Err(e) = r { tracing::error!("Game loop error: {e}"); } }
         r = sender_handle => { if let Err(e) = r { tracing::error!("UDP sender error: {e}"); } }
-        // WI-192: handle both SIGINT (interactive ctrl_c) and SIGTERM
-        // (systemd default stop signal). Inner select fires on whichever
-        // signal arrives first.
-        _ = async {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate()
-            ).expect("failed to install SIGTERM handler");
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = sigterm.recv() => {}
-            }
-        } => {
+        _ = shutdown_signal() => {
             tracing::info!(
                 "Received shutdown signal -- sent Draining to coordinator, waiting for drain to complete (max 35s)"
             );
@@ -353,4 +342,19 @@ async fn main() {
             }
         }
     }
+}
+
+/// Interactive shutdown on all hosts, plus SIGTERM for Unix service managers.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    tokio::signal::ctrl_c().await.expect("install Ctrl+C handler");
 }

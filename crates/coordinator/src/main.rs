@@ -141,17 +141,15 @@ async fn main() {
         // heartbeat timeout fires first; keepalive is the backstop when the
         // sink_task never gets a chance to send).
         //
-        // macOS only exposes `with_time`; interval and retries land on
-        // TCP_KEEPINTVL/TCP_KEEPCNT which the darwin socket2 build gates out.
-        // The Pi Zero W2 (armv7 linux-gnueabihf) and UNO Q (aarch64 linux) both
-        // support the full set, so the deployment target gets full coverage.
+        // socket2 0.5 supports the probe interval on Windows, but leaves
+        // the number of probes to the OS. Keep the existing macOS defaults.
         {
             use socket2::{SockRef, TcpKeepalive};
             let ka = TcpKeepalive::new().with_time(std::time::Duration::from_secs(10));
             #[cfg(not(target_os = "macos"))]
-            let ka = ka
-                .with_interval(std::time::Duration::from_secs(5))
-                .with_retries(3);
+            let ka = ka.with_interval(std::time::Duration::from_secs(5));
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let ka = ka.with_retries(3);
             let sock = SockRef::from(&stream);
             if let Err(e) = sock.set_tcp_keepalive(&ka) {
                 tracing::warn!("set_tcp_keepalive failed for {addr}: {e}");

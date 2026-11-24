@@ -1,0 +1,6 @@
+# Optional SDK index. Installation and activation are described in the agent guide.
+[mcp_servers.local-rag]
+enabled = false
+command = "node"
+args = ["scripts/sdk-rag.mjs"]
+cwd = "."

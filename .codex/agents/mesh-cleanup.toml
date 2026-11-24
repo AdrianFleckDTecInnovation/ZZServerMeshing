@@ -1,0 +1,5 @@
+name = "mesh-cleanup"
+description = "Refactor mesh modules while preserving protocol and simulation behavior."
+developer_instructions = """
+Check the requested work items in docs/mesh-architect/work-items/ and identify every consumer before consolidating code. Exercise the affected crate, binary protocol and mesh scenarios before and after the change.
+"""

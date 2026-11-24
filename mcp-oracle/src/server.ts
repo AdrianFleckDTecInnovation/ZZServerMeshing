@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, dirname, delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -10,28 +11,35 @@ const REPO_ROOT = resolve(__dirname, "../..");
 
 const ORACLE_SYSTEM_PROMPT = `You are the codebase oracle for the ZZServerMeshing project. Answer the question by reading actual code and tests — they are the ultimate source of truth. Cite file:line for every claim. If docs contradict code, say so. Be precise and concise.`;
 
-function askClaude(question: string): Promise<string> {
+// npm installs a .cmd shim on Windows. Invoke the package's JS entry point
+// directly when a native Codex binary is unavailable on PATH.
+function codexCommand(): string[] {
+  if (process.env.CODEX_BIN) return [process.env.CODEX_BIN];
+  if (process.platform === "win32") {
+    for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+      const native = join(dir, "codex.exe");
+      if (existsSync(native)) return [native];
+      const npmCli = join(dir, "node_modules/@openai/codex/bin/codex.js");
+      if (existsSync(npmCli)) return [process.execPath, npmCli];
+    }
+  }
+  return ["codex"];
+}
+
+function askCodex(question: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    const [command, ...prefix] = codexCommand();
     const proc = spawn(
-      "claude",
-      [
-        "-p",
-        "--output-format",
-        "text",
-        "--dangerously-skip-permissions",
-        "--allowedTools",
-        "Read,Glob,Grep",
-        "--append-system-prompt",
-        ORACLE_SYSTEM_PROMPT,
-        question,
-      ],
+      command,
+      [...prefix, "-a", "never", "exec", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-"],
       {
         cwd: REPO_ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       }
     );
-
+    proc.stdin.on("error", reject);
+    proc.stdin.end(`${ORACLE_SYSTEM_PROMPT}\n\n${question}`);
     let stdout = "";
     let stderr = "";
 
@@ -47,12 +55,12 @@ function askClaude(question: string): Promise<string> {
       if (code === 0) {
         resolve(stdout.trim());
       } else {
-        reject(new Error(`claude exited with code ${code}: ${stderr}`));
+        reject(new Error(`codex exited with code ${code}: ${stderr}`));
       }
     });
 
     proc.on("error", (err) => {
-      reject(new Error(`Failed to spawn claude: ${err.message}`));
+      reject(new Error(`Failed to start Codex: ${err.message}`));
     });
   });
 }
@@ -74,7 +82,7 @@ server.tool(
   },
   async ({ question }) => {
     try {
-      const answer = await askClaude(question);
+      const answer = await askCodex(question);
       return {
         content: [{ type: "text", text: answer }],
       };

@@ -324,34 +324,28 @@ pub async fn run_game_loop_ecs(
         // -- Phase 1: Swap inbound data from async buffers into ECS resources --
         let t0 = Instant::now();
         {
-            let mut iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<InboundQueue>();
-            std::mem::swap(&mut *iq, &mut *ecs_queue);
-        }
-        #[cfg(debug_assertions)]
-        {
-            let iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
+            // Only the ECS queue belongs to the completed tick. Producers may
+            // enqueue next tick's messages as soon as the swap releases the lock.
             debug_assert!(
-                iq.peer_updates.is_empty(),
+                ecs_queue.peer_updates.is_empty(),
                 "InboundQueue.peer_updates was not drained last tick"
             );
             debug_assert!(
-                iq.client_inputs.is_empty(),
+                ecs_queue.client_inputs.is_empty(),
                 "InboundQueue.client_inputs was not drained last tick"
             );
+            let mut iq = inbound.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::swap(&mut *iq, &mut *ecs_queue);
         }
         {
-            let mut cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
             let mut ecs_queue = world.resource_mut::<CoordEventQueue>();
-            std::mem::swap(&mut *cq, &mut *ecs_queue);
-        }
-        #[cfg(debug_assertions)]
-        {
-            let cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
             debug_assert!(
-                cq.peer_list_updates.is_empty(),
+                ecs_queue.peer_list_updates.is_empty(),
                 "CoordEventQueue.peer_list_updates was not drained last tick"
             );
+            let mut cq = coord_events.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::swap(&mut *cq, &mut *ecs_queue);
         }
         let input_drain_dur = t0.elapsed();
 
