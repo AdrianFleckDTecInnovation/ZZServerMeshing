@@ -7,18 +7,18 @@ use std::{
 };
 use zz_mesh::wire::{Identity, Role, Service};
 
-pub(crate) fn keyfile(path: &Path, data: &[u8]) -> mesh::Result<()> {
-    let mut opts = fs::OpenOptions::new();
-    opts.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
+pub(crate) fn write_new_credential(path: &Path, data: &[u8]) -> mesh::Result<()> {
     use std::io::Write;
-    let mut f = opts.open(path)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut f = tempfile::NamedTempFile::new_in(parent)?;
     f.write_all(data)?;
-    f.sync_all()?;
+    f.as_file().sync_all()?;
+    f.persist_noclobber(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 pub(crate) fn issuer_params() -> mesh::Result<CertificateParams> {
@@ -40,29 +40,35 @@ fn issue(
     ca: &rcgen::Certificate,
     issuer: &KeyPair,
 ) -> mesh::Result<()> {
-    let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
-    let mut p = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
-        .map_err(|e| invalid(e.to_string()))?;
-    p.distinguished_name.push(rcgen::DnType::CommonName, name);
-    p.extended_key_usages = vec![usage];
-    let cert = p
-        .signed_by(&key, ca, issuer)
-        .map_err(|e| invalid(e.to_string()))?;
-    keyfile(&dir.join(format!("{name}.key")), &key.serialize_der())?;
-    fs::write(dir.join(format!("{name}.der")), cert.der())?;
-    Ok(())
+    crate::deployment::credential(
+        dir,
+        name,
+        vec!["localhost".into(), "127.0.0.1".into()],
+        usage,
+        ca,
+        issuer,
+    )
+    .map(|_| ())
 }
 pub fn init_tls(dir: &Path) -> mesh::Result<()> {
     fs::create_dir_all(dir)?;
     let mut guard = rusqlite::Connection::open(dir.join("provision.sqlite"))?;
     guard.busy_timeout(std::time::Duration::from_secs(5))?;
     let lock = guard.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !dir.join("ca.der").exists() {
-        let issuer = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
+    if !dir.join("ca.der").try_exists()? {
+        let key_path = dir.join("issuer.pem");
+        let issuer = match fs::read_to_string(&key_path) {
+            Ok(pem) => KeyPair::from_pem(&pem).map_err(|e| invalid(e.to_string()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
+                write_new_credential(&key_path, key.serialize_pem().as_bytes())?;
+                key
+            }
+            Err(e) => return Err(e.into()),
+        };
         let ca = issuer_params()?
             .self_signed(&issuer)
             .map_err(|e| invalid(e.to_string()))?;
-        keyfile(&dir.join("issuer.pem"), issuer.serialize_pem().as_bytes())?;
         issue(
             dir,
             "server",
@@ -77,7 +83,7 @@ pub fn init_tls(dir: &Path) -> mesh::Result<()> {
             &ca,
             &issuer,
         )?;
-        fs::write(dir.join("ca.der"), ca.der())?;
+        write_new_credential(&dir.join("ca.der"), ca.der())?;
     }
     lock.commit()?;
     Ok(())

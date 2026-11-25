@@ -1,6 +1,6 @@
 //! One authority volume and separately provisioned worker and player directories.
 use crate::{
-    host::{identity, init_tls, issuer_params, keyfile, resume_node, run_node},
+    host::{identity, init_tls, issuer_params, resume_node, run_node, write_new_credential},
     *,
 };
 use rcgen::{Certificate, CertificateParams, ExtendedKeyUsagePurpose, KeyPair, PublicKeyData};
@@ -32,19 +32,21 @@ fn issuer(dir: &Path) -> mesh::Result<(Certificate, KeyPair)> {
 }
 fn sign(
     subject: &impl PublicKeyData,
+    name: &str,
     names: Vec<String>,
     usage: ExtendedKeyUsagePurpose,
     ca: &Certificate,
     issuer: &KeyPair,
 ) -> mesh::Result<Vec<u8>> {
     let mut p = CertificateParams::new(names).map_err(|e| invalid(e.to_string()))?;
+    p.distinguished_name.push(rcgen::DnType::CommonName, name);
     p.extended_key_usages = vec![usage];
     Ok(p.signed_by(subject, ca, issuer)
         .map_err(|e| invalid(e.to_string()))?
         .der()
         .to_vec())
 }
-fn credential(
+pub(crate) fn credential(
     dir: &Path,
     name: &str,
     names: Vec<String>,
@@ -54,19 +56,24 @@ fn credential(
 ) -> mesh::Result<Vec<u8>> {
     let key_path = dir.join(format!("{name}.key"));
     let cert_path = dir.join(format!("{name}.der"));
-    if key_path.exists() && cert_path.exists() {
+    if cert_path.try_exists()? {
+        if !key_path.try_exists()? {
+            return Err(invalid(format!(
+                "missing private key for {name} certificate"
+            )));
+        }
         return Ok(fs::read(cert_path)?);
     }
-    let key = if key_path.exists() {
+    let key = if key_path.try_exists()? {
         let bytes = fs::read(&key_path)?;
         KeyPair::try_from(bytes.as_slice()).map_err(|e| invalid(e.to_string()))?
     } else {
         let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
-        keyfile(&key_path, &key.serialize_der())?;
+        write_new_credential(&key_path, &key.serialize_der())?;
         key
     };
-    let cert = sign(&key, names, usage, ca, signer)?;
-    fs::write(cert_path, &cert)?;
+    let cert = sign(&key, name, names, usage, ca, signer)?;
+    write_new_credential(&cert_path, &cert)?;
     Ok(cert)
 }
 fn registry(dir: &Path) -> mesh::Result<Connection> {
@@ -141,16 +148,41 @@ pub fn provision(dir: &Path, dest: &Path, slot: Option<u32>) -> mesh::Result<()>
         tx.execute("INSERT INTO enrolments(slot,fingerprint) VALUES(?,?) ON CONFLICT(slot) DO UPDATE SET fingerprint=excluded.fingerprint",
             rusqlite::params![slot, digest(&cert).0.as_slice()])?;
     } else {
-        keyfile(
+        write_new_credential(
             &temp.path().join("player.key"),
             &fs::read(dir.join("player.key"))?,
         )?;
         fs::write(temp.path().join("server-name"), GAME_DNS)?;
     }
-    fs::rename(temp.path(), dest)?;
+    publish_directory(temp.path(), dest)?;
     tx.commit()?;
     Ok(())
 }
+fn publish_directory(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        if dest.try_exists()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                dest.display().to_string(),
+            ));
+        }
+        match fs::rename(source, dest) {
+            // Windows can temporarily deny the rename while a handle to a staged
+            // credential is closing. Keep the generated keys and the transaction.
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+                    && attempts < 6 =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10 << attempts));
+                attempts += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 struct PublicPoint(Vec<u8>);
 impl PublicKeyData for PublicPoint {
     fn der_bytes(&self) -> &[u8] {
@@ -189,6 +221,7 @@ impl Endpoint for AuthorityHost {
             }
             let cert = sign(
                 &PublicPoint(public_key.clone()),
+                "worker incarnation",
                 vec![],
                 ExtendedKeyUsagePurpose::ClientAuth,
                 &self.ca,
@@ -286,4 +319,66 @@ pub fn connect_worker(
     };
     let db = Store::connect(store_addr, STORE_DNS.into(), ca, cred.clone());
     Ok((db, worker, cred))
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_first_boot_reuses_the_issuer_and_published_credentials() {
+        let original = tempfile::tempdir().unwrap();
+        init_tls(original.path()).unwrap();
+        let interrupted = tempfile::tempdir().unwrap();
+        for name in ["issuer.pem", "server.key", "server.der", "player.key"] {
+            fs::copy(original.path().join(name), interrupted.path().join(name)).unwrap();
+        }
+        init_tls(interrupted.path()).unwrap();
+        for name in ["issuer.pem", "server.key", "server.der", "player.key"] {
+            assert!(
+                fs::read(original.path().join(name)).unwrap()
+                    == fs::read(interrupted.path().join(name)).unwrap()
+            );
+        }
+        let cert = fs::read(interrupted.path().join("player.der")).unwrap();
+        assert!(!cert.is_empty());
+        init_tls(interrupted.path()).unwrap();
+        assert_eq!(
+            fs::read(interrupted.path().join("player.der")).unwrap(),
+            cert
+        );
+    }
+
+    #[test]
+    fn staging_publishes_the_complete_directory_and_preserves_an_existing_export() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("staging");
+        let dest = root.path().join("published");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("marker"), b"complete").unwrap();
+        #[cfg(windows)]
+        let holder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let dir = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .custom_flags(0x0200_0000)
+                .open(&stage)
+                .unwrap(); // FILE_FLAG_BACKUP_SEMANTICS
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                drop(dir);
+            })
+        };
+        publish_directory(&stage, &dest).unwrap();
+        #[cfg(windows)]
+        holder.join().unwrap();
+        assert_eq!(fs::read(dest.join("marker")).unwrap(), b"complete");
+        fs::create_dir(&stage).unwrap();
+        assert_eq!(
+            publish_directory(&stage, &dest).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(stage.is_dir());
+    }
 }
