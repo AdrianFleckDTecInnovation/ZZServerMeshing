@@ -695,6 +695,7 @@ pub async fn run_game_loop_ecs(
             m.record(TickTimings {
                 input_drain: input_drain_dur,
                 simulation: sim_dur,
+                client_snapshot: world.resource::<ClientRegistry>().snapshot_time,
                 transfers: transfer_dur,
                 replication: repl_dur,
                 shadow_cleanup: std::time::Duration::ZERO, // included in sim_dur now

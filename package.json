@@ -8,6 +8,7 @@
     "smoke": "node scripts/local-mesh.mjs smoke",
     "bench": "node scripts/local-mesh.mjs bench",
     "bench:quick": "node scripts/bench-quick.mjs",
+    "bench:servers": "node scripts/compare-server-count.mjs",
     "bench:compare": "node scripts/compare-mesh.mjs",
     "bench:clusters": "cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json",
     "bench:cluster-wire": "cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/cluster-wire.json",

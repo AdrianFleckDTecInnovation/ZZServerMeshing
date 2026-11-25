@@ -19,9 +19,15 @@ function runDriver({ servers, host, index, drivers }) {
   const failed = new AbortController();
   const signal = failed.signal;
   const clients = [];
+  const traffic = { frames: 0, full: 0, records: 0, removals: 0, bytes: 0 };
+  function move(client, x, timed) {
+    const seq = ++client.seq;
+    if (timed) client.pending.set(seq, performance.now());
+    client.socket.send(JSON.stringify({ type: 'MoveInput', entity_id: client.id, direction: [x, 0, 0], seq }));
+  }
   function connect(server) {
     const socket = new WebSocket(`ws://${host}:${server.ws}`);
-    const c = { socket, id: null, seq: 0, frames: 0, bytes: 0, pending: new Map(), delays: [] };
+    const c = { socket, id: null, seq: 0, frames: 0, pending: new Map(), delays: [] };
     socket.binaryType = 'arraybuffer';
     socket.onmessage = ({ data }) => {
       try {
@@ -37,7 +43,11 @@ function runDriver({ servers, host, index, drivers }) {
         ack[0] = 3;
         socket.send(ack);
         c.frames++;
-        c.bytes += data.byteLength;
+        traffic.frames++;
+        traffic.full += Number(frame.type === 'full');
+        traffic.records += frame.entities.length;
+        traffic.removals += frame.removals.length;
+        traffic.bytes += data.byteLength;
         const seq = frame.entities.find(e => e.id === c.id)?.last_input_seq;
         if (c.pending.has(seq)) {
           c.delays.push(performance.now() - c.pending.get(seq));
@@ -62,7 +72,7 @@ function runDriver({ servers, host, index, drivers }) {
   async function measure() {
     if (!clients.length) return null;
     const startFrames = clients.map(c => c.frames);
-    const startBytes = clients.reduce((n, c) => n + c.bytes, 0);
+    const previous = { ...traffic };
     const timerDelay = [];
     for (const c of clients) {
       c.pending.clear();
@@ -72,11 +82,7 @@ function runDriver({ servers, host, index, drivers }) {
     let sent = 0;
     for (let i = 0; i < pulses; i++) {
       if (performance.now() - start >= 4000) break;
-      for (const c of clients) {
-        c.pending.set(++c.seq, performance.now());
-        c.socket.send(JSON.stringify({ type: 'MoveInput', entity_id: c.id,
-          direction: [i % 2 === 0 ? 1 : -1, 0, 0], seq: c.seq }));
-      }
+      for (const c of clients) move(c, i % 2 === 0 ? 1 : -1, true);
       sent += clients.length;
       const due = performance.now() + intervalMs;
       await sleep(intervalMs, undefined, { signal });
@@ -84,18 +90,23 @@ function runDriver({ servers, host, index, drivers }) {
     }
     const elapsed = (performance.now() - start) / 1000;
     const minHz = Math.min(...clients.map((c, i) => (c.frames - startFrames[i]) / elapsed));
-    const bytes = clients.reduce((n, c) => n + c.bytes, 0) - startBytes;
+    const received = Object.fromEntries(Object.keys(traffic).map(k => [k, traffic[k] - previous[k]]));
     const drainUntil = performance.now() + 500;
     while (clients.some(c => c.pending.size) && performance.now() < drainUntil) {
       await sleep(20, undefined, { signal });
     }
     return { sent, delays: clients.flatMap(c => c.delays), timerDelay, minHz,
       minEchoes: Math.min(...clients.map(c => c.delays.length)),
-      snapshotMiBs: bytes / elapsed / 1048576, elapsed };
+      received, snapshotMiBs: received.bytes / elapsed / 1048576, elapsed };
   }
-  parentPort.on('message', async ({ count }) => {
+  parentPort.on('message', async ({ count, warmup }) => {
     try {
       signal.throwIfAborted();
+      if (warmup) {
+        for (const client of clients) move(client, -1, false);
+        parentPort.postMessage({ result: true });
+        return;
+      }
       const result = count === undefined ? await measure() : await join(count);
       signal.throwIfAborted();
       parentPort.postMessage({ result });
@@ -105,7 +116,7 @@ function runDriver({ servers, host, index, drivers }) {
 
 if (!isMainThread) runDriver(workerData);
 
-export async function benchmarkPlayers({ servers, host, total, metrics, signal: parent }) {
+export async function benchmarkPlayers({ servers, host, total, players, metrics, signal: parent }) {
   const drivers = Number(process.env.MESH_BENCH_DRIVERS ?? 4);
   if (!Number.isInteger(drivers) || drivers < 1 || drivers > 16) {
     throw new Error('MESH_BENCH_DRIVERS must be an integer between 1 and 16');
@@ -132,13 +143,21 @@ export async function benchmarkPlayers({ servers, host, total, metrics, signal: 
       worker.on('error', e => failed.abort(e));
       worker.on('exit', () => { if (!closing) failed.abort(new Error(`Load driver ${index} exited early`)); });
     }
-    for (const count of levels) {
+    for (const count of (players ? [players] : levels)) {
       // A saturated workstation must still return the lower, completed load levels.
       const timeout = AbortSignal.timeout(20000);
       const stageSignal = AbortSignal.any([signal, timeout]);
       let samples, before, start;
       try {
+        if (players) {
+          for (let batch = 64; batch < count; batch += 64) await dispatch({ count: batch }, stageSignal);
+        }
         const ids = (await dispatch({ count }, stageSignal)).flat();
+        if (players) {
+          await dispatch({ warmup: true }, stageSignal);
+          // Three seconds covers a complete NPC direction-change period.
+          await sleep(3200, undefined, { signal: stageSignal });
+        }
         before = await metrics();
         start = performance.now();
         if (ids.length !== count || new Set(ids).size !== count ||
@@ -154,16 +173,31 @@ export async function benchmarkPlayers({ servers, host, total, metrics, signal: 
       }
       const after = await metrics();
       const windowSeconds = (performance.now() - start) / 1000;
+      if (after.reduce((n, m) => n + m.connected_clients, 0) !== count ||
+          after.reduce((n, m) => n + m.entity_count, 0) !== total + count) {
+        throw new Error(`Mesh population changed while measuring ${count} players`);
+      }
       const delays = samples.flatMap(s => s.delays);
-      const serverMetrics = after.map((m, i) => ({
-        server: m.server_id, tick_hz: round((m.tick - before[i].tick) / windowSeconds),
-        rolling_200_tick_p95_ms: Object.fromEntries(Object.entries(m.phases).map(([k, v]) => [k, v.p95])),
-      }));
+      const serverMetrics = after.map((m, i) => {
+        const prior = before[i];
+        const ticks = m.tick - prior.tick;
+        if (m.session_id !== prior.session_id || ticks <= 0) throw new Error('Server restarted or made no tick progress');
+        return { server: m.server_id, tick_hz: round(ticks / windowSeconds),
+          ...(m.work && prior.work ? {
+            tick_mean_ms: round((m.work.total_us - prior.work.total_us) / (1000 * ticks)),
+            snapshot_mean_ms: round((m.work.client_snapshot_us - prior.work.client_snapshot_us) / (1000 * ticks)),
+          } : {}),
+          last_tick_shadows: m.shadow_count, last_tick_udp_bytes: m.udp_bytes_out,
+          rolling_200_tick_p95_ms: Object.fromEntries(Object.entries(m.phases).map(([k, v]) => [k, v.p95])) };
+      });
+      const received = Object.fromEntries(Object.keys(samples[0].received).map(k =>
+        [k, samples.reduce((sum, s) => sum + s.received[k], 0)]));
       const row = { clients: count, planned: count * pulses,
         sent: samples.reduce((n, s) => n + s.sent, 0), echoed: delays.length,
         min_client_echoes: Math.min(...samples.map(s => s.minEchoes)), echo_ms: percentiles(delays),
         min_snapshot_hz: round(Math.min(...samples.map(s => s.minHz))),
         snapshot_MiB_s: round(samples.reduce((n, s) => n + s.snapshotMiBs, 0)),
+        received,
         measurement_seconds: round(Math.max(...samples.map(s => s.elapsed))),
         driver_timer_late_ms: percentiles(samples.flatMap(s => s.timerDelay)), server_metrics: serverMetrics };
       rows.push(row);
@@ -173,7 +207,8 @@ export async function benchmarkPlayers({ servers, host, total, metrics, signal: 
         break;
       }
     }
-    return { servers: servers.length, npcs: total, load_drivers: drivers, pulses_per_client: pulses,
+    return { servers: servers.length, npcs: total, fixed_players: players, moving_warmup_ms: players ? 3200 : 0,
+      load_drivers: drivers, pulses_per_client: pulses,
       interval_ms: intervalMs, ramp_target: rampTarget, stopped, rows };
   } finally {
     closing = true;

@@ -265,6 +265,8 @@ pub const ACK_STALE_TICKS: u64 = 40;
 #[derive(Resource, Default)]
 pub struct ClientRegistry {
     pub clients: HashMap<u64, ClientHandle>,
+    /// Elapsed time collecting, encoding and enqueueing client snapshots on this tick.
+    pub snapshot_time: std::time::Duration,
 }
 
 impl ClientRegistry {

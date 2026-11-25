@@ -9,6 +9,8 @@ const RING_SIZE: usize = 200; // 10 seconds at 20Hz
 pub struct TickTimings {
     pub input_drain: Duration,
     pub simulation: Duration,
+    /// Part of simulation, measured before asynchronous WebSocket transmission.
+    pub client_snapshot: Duration,
     pub transfers: Duration,
     pub replication: Duration,
     pub shadow_cleanup: Duration,
@@ -23,6 +25,7 @@ pub struct MetricsCollector {
     /// this server has restarted.
     session_id: u64,
     ring: VecDeque<TickTimings>,
+    work: TickWork,
     pub current_tick: u64,
     pub entity_count: usize,
     pub shadow_count: usize,
@@ -102,6 +105,8 @@ pub struct MetricsSnapshot {
     pub connected_clients: usize,
     pub tick_budget_pct: f64,
     pub phases: PhaseMetrics,
+    /// Cumulative elapsed work. Differences between two snapshots cover that exact tick window.
+    pub work: TickWork,
     /// Replication mode on the most recent tick: "full", "filtered", or "tiered".
     pub replication_mode: String,
     /// Total authoritative entity count (would be sent unfiltered).
@@ -126,10 +131,17 @@ pub struct MetricsSnapshot {
 pub struct PhaseMetrics {
     pub input_drain_ms: Percentiles,
     pub simulation_ms: Percentiles,
+    pub client_snapshot_ms: Percentiles,
     pub transfers_ms: Percentiles,
     pub replication_ms: Percentiles,
     pub shadow_cleanup_ms: Percentiles,
     pub total_ms: Percentiles,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct TickWork {
+    pub total_us: u64,
+    pub client_snapshot_us: u64,
 }
 
 impl MetricsCollector {
@@ -138,6 +150,7 @@ impl MetricsCollector {
             server_id,
             session_id: 0,
             ring: VecDeque::with_capacity(RING_SIZE),
+            work: TickWork::default(),
             current_tick: 0,
             entity_count: 0,
             shadow_count: 0,
@@ -168,6 +181,14 @@ impl MetricsCollector {
     }
 
     pub fn record(&mut self, timings: TickTimings) {
+        self.work.total_us = self
+            .work
+            .total_us
+            .saturating_add(timings.total.as_micros() as u64);
+        self.work.client_snapshot_us = self
+            .work
+            .client_snapshot_us
+            .saturating_add(timings.client_snapshot.as_micros() as u64);
         if self.ring.len() >= RING_SIZE {
             self.ring.pop_front();
         }
@@ -189,9 +210,11 @@ impl MetricsCollector {
             peer_count: self.peer_count,
             connected_clients: self.connected_clients,
             tick_budget_pct,
+            work: self.work,
             phases: PhaseMetrics {
                 input_drain_ms: self.percentiles(|t| t.input_drain),
                 simulation_ms: self.percentiles(|t| t.simulation),
+                client_snapshot_ms: self.percentiles(|t| t.client_snapshot),
                 transfers_ms: self.percentiles(|t| t.transfers),
                 replication_ms: self.percentiles(|t| t.replication),
                 shadow_cleanup_ms: self.percentiles(|t| t.shadow_cleanup),
@@ -240,6 +263,7 @@ mod tests {
         TickTimings {
             input_drain: Duration::from_micros(100),
             simulation: Duration::from_micros(500),
+            client_snapshot: Duration::from_micros(250),
             transfers: Duration::from_micros(50),
             replication: Duration::from_micros(200),
             shadow_cleanup: Duration::from_micros(30),
@@ -298,6 +322,9 @@ mod tests {
         let snap = c.snapshot();
         // All entries should now be 10ms
         assert!((snap.phases.total_ms.p50 - 10.0).abs() < 0.1);
+        // Interval counters also include ticks which have left the percentile window.
+        assert_eq!(snap.work.total_us, 2_200_000);
+        assert_eq!(snap.work.client_snapshot_us, 100_000);
     }
 
     #[test]
@@ -345,6 +372,7 @@ mod tests {
         let t = TickTimings {
             input_drain: Duration::from_millis(1),
             simulation: Duration::from_millis(5),
+            client_snapshot: Duration::from_millis(4),
             transfers: Duration::from_millis(2),
             replication: Duration::from_millis(3),
             shadow_cleanup: Duration::from_millis(1),
@@ -354,6 +382,9 @@ mod tests {
         let snap = c.snapshot();
         assert!((snap.phases.input_drain_ms.p50 - 1.0).abs() < 0.1);
         assert!((snap.phases.simulation_ms.p50 - 5.0).abs() < 0.1);
+        assert_eq!(snap.phases.client_snapshot_ms.p50, 4.0);
+        assert_eq!(snap.work.total_us, 12_000);
+        assert_eq!(snap.work.client_snapshot_us, 4_000);
         assert!((snap.phases.transfers_ms.p50 - 2.0).abs() < 0.1);
         assert!((snap.phases.replication_ms.p50 - 3.0).abs() < 0.1);
         assert!((snap.phases.shadow_cleanup_ms.p50 - 1.0).abs() < 0.1);

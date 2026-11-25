@@ -66,11 +66,11 @@ async function main() {
   const [mode = 'start', ...args] = process.argv.slice(2);
   const { values } = parseArgs({ args, options: {
     servers: { type: 'string' }, npcs: { type: 'string' },
-    ...(mode === 'bench' ? { seconds: { type: 'string' }, 'bin-dir': { type: 'string' }, 'client-ramp': { type: 'boolean' } } : {}),
+    ...(mode === 'bench' ? { seconds: { type: 'string' }, 'bin-dir': { type: 'string' }, 'client-ramp': { type: 'boolean' }, players: { type: 'string' } } : {}),
     help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) {
-    console.log('node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL] [bench: --seconds N --bin-dir RELEASE_DIR --client-ramp]');
+    console.log('node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL] [bench: --seconds N --bin-dir RELEASE_DIR --client-ramp | --players N]');
     return;
   }
   const client = integer('CLIENT_PORT', setting('CLIENT_PORT'), 1, 65535);
@@ -91,6 +91,8 @@ async function main() {
   if (!['start', 'smoke', 'bench'].includes(mode)) throw new Error(`Unknown command: ${mode}`);
   const count = integer('--servers', values.servers ?? setting('DEFAULT_NUM_SERVERS'), mode === 'smoke' ? 2 : 1, 65535);
   const total = integer('--npcs', values.npcs ?? setting('DEFAULT_TOTAL_NPCS'), 0, 0xffffffff);
+  const players = values.players === undefined ? undefined : integer('--players', values.players, 1, 65535);
+  if (players && values['client-ramp']) throw new Error('Choose a fixed --players count or --client-ramp');
   const seconds = integer('--seconds', values.seconds ?? '15', 10, 3600);
   const port = key => integer(key, setting(key), 1, 65535);
   const ws = port('COORD_WS_PORT'), http = port('COORD_HTTP_PORT');
@@ -200,8 +202,8 @@ async function main() {
       console.error(`Client ${url}   Dashboard ${coord}/dashboard   (Ctrl+C to stop)`);
     }
     if (mode === 'bench') {
-      const measure = values['client-ramp'] ? (await import('./bench-player-clients.mjs')).benchmarkPlayers : benchmark;
-      console.log(JSON.stringify(await measure({ servers, host, total, seconds, metrics, signal }), null, 2));
+      const measure = (players || values['client-ramp']) ? (await import('./bench-player-clients.mjs')).benchmarkPlayers : benchmark;
+      console.log(JSON.stringify(await measure({ servers, host, total, seconds, players, metrics, signal }), null, 2));
     } else if (mode === 'smoke') {
       const task = launch('smoke scenarios', process.execPath, ['--experimental-strip-types', 'test-suite/runner.ts', `ws://${host}:${servers[0].ws}`,
         servers[0].metrics, count, 'peer-replication,input-seq-echo', '--no-color'], {

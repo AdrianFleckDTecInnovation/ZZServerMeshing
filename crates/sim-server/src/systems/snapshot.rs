@@ -46,8 +46,10 @@ pub fn prepare_client_snapshot(
     >,
 ) {
     if registry.clients.is_empty() {
+        registry.snapshot_time = std::time::Duration::ZERO;
         return;
     }
+    let start = std::time::Instant::now();
     let mut entities = Vec::with_capacity(
         auth_query.iter().count() + shadow_query.iter().count() + transfer_query.iter().count(),
     );
@@ -220,6 +222,7 @@ pub fn prepare_client_snapshot(
             }
         }
     }
+    registry.snapshot_time = start.elapsed();
 }
 
 #[cfg(test)]
