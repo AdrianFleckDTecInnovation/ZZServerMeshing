@@ -344,7 +344,7 @@ fn run() -> Result<()> {
     }
     // Strong scaling at fixed total load, with workers shared by distant islands.
     let mut shared = vec![];
-    for workers in [2, 4, 8] {
+    for workers in [1, 2, 4, 8] {
         let mut scene = Scene::new(4, PER_SITE, workers)?;
         let row = scene.segment("shared-workers", separated_ticks, |_, m| site(m.origin))?;
         assert_eq!(row["end_islands"], 4);
