@@ -1,0 +1,127 @@
+{
+  "measured_date": "2026-11-25",
+  "candidate": "5d9c55cd358f4cb0836723340195bb041b7fcf41",
+  "verified_release": "4614978c670edd58c62ccd4dda07cf961f15ec35",
+  "octree_reference": "6cc85bea1ad1345c6b1ac9f8caf897771d51be16",
+  "batch_reference": "d6975630848570a1323af4aa7d024533dcbeca04",
+  "browser_reference": "3ef0d789196aa6c16de4fa12be394bdf7f8ea835",
+  "cpu": "Intel Core i7-13850HX, 20 cores / 28 logical",
+  "physical_hosts": 1,
+  "host": "Windows 11 Enterprise build 26200 x64, 64 GiB",
+  "guest": "Debian 12 x86_64 QEMU/WHPX, 6 vCPUs and 8 GiB",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "node": "v22.16.0",
+  "profile": "release",
+  "tests": {
+    "windows": {
+      "rust": 684,
+      "typescript_assertions": 85,
+      "client_build": true
+    },
+    "debian": {
+      "rust": 684,
+      "typescript_assertions": 85,
+      "client_build": true
+    }
+  },
+  "smoke": [
+    "input-seq-echo",
+    "peer-replication"
+  ],
+  "standalone_game": "both platforms restarted the external Git consumer with reactor energy 1 then 2",
+  "benchmarks": {
+    "direct": "three temporally alternating pairs per OS; 32 measured ticks per matched layout, 16 at each weak-scaling point; peak transitions timed separately",
+    "browser": "two alternating reference/candidate pairs, 3 clients, 5 s warmup and 15 s measurements",
+    "crowd_clients": "two one/three-server pairs per size on Windows; response target 100 ms p95, minimum 18 Hz, every planned echo",
+    "transition_reference": "identical scenes, view assertions and timers, --crowd 256 on isolated builds of d697563 and candidate; historical baseline-count assertions disabled only on d697563 to record its actual extra baselines; three alternating pairs under Debian",
+    "cluster_tls": "2/4/8 real worker processes plus durable authority and disjoint credential directories; 12 isolated barriers each",
+    "direct_worker_execution": "sequential in one process; no claim of multicore throughput or an Internet client count"
+  },
+  "binary_sha256": {
+    "windows": {
+      "reference_cluster_bench": "ff8ab37716b8ee3373cfc2f59955a9b9658d82ea6baf1c02dd72096f670ec5fe",
+      "cluster-bench": "7272e32dc9593455a1f2f6ca1ebc05b372be94b1243bea20c4b7df5a50bddcf7",
+      "infinite-stars": "d214ffa4573bd554341005a232161fb49aa1f9fa0ef9cf222f74a9c5ed65af09",
+      "cluster-wire": "f5b6bf8b16576d2d9183c3e8e5de723ae4a206d649d4dbb9ed3ea8258c318cad",
+      "mesh-bench": "e52d08a99b41b6447f7aa7f45d2188f194a76e4c199d458c49dbce0980f4b4cd",
+      "sim-server": "5376fdd32e425c3bd1599d7bf9ab4bd096c85a812feed4610f00e690c2694637",
+      "coordinator": "9cafafe28ef36dfcb510028c86637186183e6fa04af528f8c8e9cdaf71dc0f7d"
+    },
+    "debian": {
+      "cluster-bench": "e9fef17fe3a4caa32c1de27a649f80cbf51dabdb912dbb0cae872af9aae8365c",
+      "cluster-wire": "35f3ba4866123238ab99fdb612de37f121e0356126c6777203f87eee1c62a157",
+      "mesh-bench": "b7615d7b01fc0d725b5db357a50f4fd07d025625817ed1652f92698da7bb62fc",
+      "infinite-stars": "013b7703b66f849bf2e178d681712a44340a9064a755087725f1bdc466c42c19"
+    }
+  },
+  "paired_binary_sha256": {
+    "windows": {
+      "cluster-bench.exe": "a267e66cdc97a89750de15378727e74516906382e1b9b3423a68a798753bc98a",
+      "infinite-stars.exe": "63b4ea6867af6e02f80c0a82d8b510946fd1aa5fff5a9796537cc96dd8cf0e32",
+      "cluster-wire.exe": "c72fe8b1cc8e08a883517c6e069c0f07c44801cc16ecadbaa4e2cee79d32ce7a",
+      "mesh-bench.exe": "e6283ac2727bde3281dd1dbf397d7676f81523865f20be46c0a1f6c1445e80e0"
+    },
+    "debian": {
+      "batch-ref-binary": "7e6c02708a79d2330b4b94561b83649de60921eb67ccfc1f8ebebfa58d93bc4e",
+      "batched-bench": "192f72541d91152f29440d4355019ada4906e55a576bd4e633923e205d8ac15c",
+      "record-prebatch": "c5d3a16be866cebe69d01146440d4dd9a20625cac96f623432c12162202c6cbb",
+      "record-rtree": "c635cbdd15a620446881cc31ca991fad3dfec9aa2b04bbbef2f293ca7efe30f0",
+      "infinite-stars": "e923ce4c38ef56eef8ce190f4cb46ec734335738bb227a965f82991ec51c076f",
+      "cluster-wire": "96ae764eed4174bc0b64f3c7098119516e8ad3f2e839e87b618ecff6b50e7242",
+      "mesh-bench": "a04f47555dd79ac849aea1b11871402466915a455bd73755e104e86d72251c8d"
+    }
+  },
+  "windows_credential_exports": {
+    "exports": 24,
+    "initial_errors": [],
+    "valid_final_directories": 24
+  },
+  "rust_audit": {
+    "packages": 290,
+    "advisory_database": {
+      "advisory-count": 1568,
+      "last-commit": "b9b8a3c2cb1f2a3c76ab17a551193568c9f8b7a4",
+      "last-updated": "2026-11-25T12:10:30+01:00"
+    },
+    "vulnerabilities": 0,
+    "maintenance_notices": [
+      "basic-toml",
+      "bincode",
+      "rustls-pemfile"
+    ]
+  },
+  "npm_audit": {
+    "root": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "client": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "tools": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "mcp-oracle": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    }
+  }
+}
