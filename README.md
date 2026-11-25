@@ -2,7 +2,7 @@
 
 Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)
 
-Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. The game guide covers separate processes, certificates, recovery and the wire format. The benchmark report includes independent player clusters, moving players, and cluster merges. [Infinite Stars guide](docs/infinite-stars.md) · [Cluster benchmarks](docs/cluster-performance.md)
+Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. Run `npm run bench:quick` to measure live WebSocket input latency, separated player islands and dense crowds on your hardware. The report graphs player capacity, merge and split costs, NPC and object scaling on Windows and Linux. [Infinite Stars guide](docs/infinite-stars.md) · [Performance graphs and results](docs/cluster-performance.md)
 
 ## Browser demo
 

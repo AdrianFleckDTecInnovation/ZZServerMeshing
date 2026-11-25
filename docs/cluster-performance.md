@@ -1,191 +1,78 @@
-# Bewegte Spielercluster und ursprüngliche Browser-Demo
+# Leistungsprofil und Spielergrenze
 
-Bei acht getrennten Inseln mit zusammen 128 bewegten Spielern erhielt der erste Worker über 120 Schritte dieselben 960 Positionsframes wie bei einer Insel. Zwischen den Inseln wurden null Entity-Frames zugestellt. Bei 64 Spielern auf acht Workern verschmolzen vier Inseln schrittweise zu einer und trennten sich wieder. Der vollständig verschmolzene Zustand brauchte einschließlich Abfrage aller Inselmitglieder 2,69 ms p95 unter Windows und 2,55 ms unter Debian. Über acht TCP/mTLS-Prozesse dauerte der langsamste Annäherungsschritt rund 308 ms bis zur korrekten Sicht beim letzten Empfänger.
+**384 gleichzeitig verbundene Spieler** erfüllten im lokalen Browser-Test auf Windows und Debian das gewählte Ziel. Alle 6.144 Eingabesequenzen erschienen im Snapshot des richtigen Spielers. Bei **512 Verbindungen** überschritt die Eingabelatenz auf beiden Systemen das Ziel. Für das persistente Bevy-Spiel zählt zusätzlich die Dichte. Dieselben **384 bewegten Spielfiguren auf acht Workern** brauchten über vier Inseln verteilt 21,6 / 42,3 ms p95 pro Schritt (Windows / Debian). Zusammen an einem Ort waren es 120,2 / 128,8 ms. Bei 20 Hz stehen 50 ms zur Verfügung.
 
-Auch die ursprüngliche Browser-Demo wurde neu gemessen. Bei 9.000 NPCs sanken p95 und p99 auf beiden Plattformen. Im kleinen Bibliothekstest mit vier Workern und 256 Objekten bleibt im Median eine Mehrzeit von rund 6–7 µs bei p50. Unter Windows betrug die p95-Mehrzeit dort rund 6 µs. Die Phasenmessungen und alle Einzelwerte stehen weiter unten.
+Das Repo eignet sich zur Integration in ein eigenes Bevy-0.15-Spiel und für einen Pilotbetrieb auf einem Host. `zz-mesh` verwaltet dauerhafte Objekt-IDs, Schreibzuständigkeit, räumliche Abonnements, private Komponenten, Übergaben und Wiederanlauf. Das Infinite-Stars-Beispiel implementiert unter anderem Inventar, Handel, Planeten und Voxel-Chunks. Die persistente Referenz verwendet eine gemeinsame lokale SQLite-WAL-Datei. Für eine öffentliche Welt über mehrere Hosts fehlen ein verteilter dauerhafter Speicher und ein Kapazitätsnachweis mit dem eigenen Gameplay, WAN und längerer Laufzeit. [Integration mit ausführbarem Beispiel](../crates/zz-mesh/README.md) · [Betriebsmodell](infinite-stars.md)
 
-## Reproduzieren
+## Wie viele Spieler verkraftet die Browser-Demo?
 
-Die folgenden Befehle laufen im Repository-Root auf Windows und Linux mit Rust Stable und Node.js ab 22.16.
+Drei Sim-Server, 300 bewegte NPCs und bis zu 512 echte WebSocket-Verbindungen auf Loopback. Jeder Client dekodiert die regulären Full-/Delta-Snapshots, bestätigt den Tick und sucht seine eigene Eingabesequenz. Das lokale Messziel beträgt p95 höchstens 100 ms bis zum Echo, mindestens 18 Ticks/s je Server und 18 Snapshots/s je Client sowie ein Echo für jede der 16 geplanten Eingaben pro Client. Die Tabelle nennt bei Überlast auch die tatsächlich gesendeten Eingaben. p95 bedeutet, dass 95 % der beobachteten Echos innerhalb der angegebenen Zeit ankamen.
+
+| System | Verbindungen | Geplant / gesendet / bestätigt | Eingabe p50 / p95 / p99 | Langsamster Server / Client | Snapshot-Nutzlast gesamt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Windows | 256 | 4.096 / 4.096 / 4.096 | 37 / 64 / 73 ms | 19,9 / 19,6 Hz | 120 MiB/s |
+| Debian | 256 | 4.096 / 4.096 / 4.096 | 35 / 57 / 62 ms | 19,8 / 19,9 Hz | 122 MiB/s |
+| Windows | **384** | 6.144 / 6.144 / 6.144 | 46 / **76** / 87 ms | 19,7 / 19,6 Hz | 216 MiB/s |
+| Debian | **384** | 6.144 / 6.144 / 6.144 | 43 / **73** / 90 ms | 19,7 / 19,6 Hz | 230 MiB/s |
+| Windows | **512** | 8.192 / 2.688 / 2.687 | 882 / **1.628** / 1.757 ms | 20,0 / 10,3 Hz | 261 MiB/s |
+| Debian | **512** | 8.192 / 8.192 / 8.192 | 74 / **230** / 383 ms | 20,0 / 18,0 Hz | 352 MiB/s |
+
+Bei 384 Spielern entsprechen die empfangenen Snapshots rund **1,81–1,93 Gbit/s** vor TCP/IP-Overhead. Ein einzelner 1-Gbit/s-Uplink wäre für diese Sichtweite und Änderungsrate bereits zu klein. Alle Clients liefen ohne Renderer auf derselben Maschine wie die Server. Die Verbindungen wurden gleichmäßig auf die drei Server verteilt. Der Echozähler erfasst genau beobachtete Sequenzen. Eine neuere Eingabe kann eine ältere im Snapshot überholen. Client-Framerate, Internetlaufzeit und ein dauerhaft tragbares Spielerlimit fürs eigene Spiel brauchen eine eigene Messung.
+
+![Eingabelatenz, Snapshot-Bandbreite, Tickraten, Eingabe-Echos und Konvergenz über mTLS](benchmarks/mesh-latenz.png)
+
+**Wo entsteht die Wartezeit?**
+
+- **Eingabe bis sichtbare Bestätigung.** Bei drei Clients lag p95 schon bei 60 / 51 ms, obwohl der langsamste Server unter 1,2 ms p95 Rechenzeit brauchte. Eingaben warten auf den nächsten 50-ms-Tick und die Snapshot-Ausgabe. Bei 384 erreichte der ECS-Schritt einschließlich Snapshot-Aufbereitung rund 25,5 / 25,8 ms p95. Bei 512 kamen die Sendetimer der vier lokalen Lastgenerator-Threads um 954 / 136 ms p95 zu spät. Empfang und Dekodierung auf dem gemeinsamen Host tragen also erheblich zur beobachteten Grenze bei. Ein Kontrolllauf mit **nur einem** Decoder-Thread lieferte bereits bei 256 Clients lediglich 3.460 / 3.498 von 4.096 Echos. Serverphasen nutzen ein rollendes Fenster von bis zu 200 Ticks. Ihre Perzentile beschreiben die Serverarbeit in diesem Zeitfenster. Die Zeitstempel für das Eingabe-Echo stammen vom jeweiligen Client. [Browser-Lastgenerator](../scripts/bench-player-clients.mjs) · [Server-Zeitmessung](../crates/sim-server/src/game_loop.rs)
+- **Direkter Bevy-Schritt.** Bei 256 Figuren an einem Ort entfielen unter Windows im Mittel 24,18 ms auf Simulation und Versandvorbereitung, 7,74 ms auf Zustellung und ACK sowie 0,42 ms auf die Inselabfrage. Über vier Inseln waren es 4,09 / 0,74 / 0,36 ms. Der erste Block umfasst auch Checkpoint-Verarbeitung, räumliche Suche, Feldauswahl und Warteschlangen. Die Stackgrafik zeigt arithmetische Mittel. [Messgrenzen im Bevy-Szenario](../examples/infinite-stars/src/bin/cluster-bench.rs)
+- **Bis alle Worker die richtige Sicht haben.** Acht echte Prozesse, 64 simulierte Figuren und TCP/mTLS benötigten bei Annäherung **306 / 367 ms p95**, beim Austausch **312 / 315 ms p95**. Enthalten sind die 50-ms-Updates der Worker, die Meldung ans Directory, die Weitergabe der Abonnements, Peer-Zustellung und die Kontrolle beim letzten Empfänger im 5-ms-Raster. Die Messung ordnet TLS-Kryptografie und Socketlaufzeit keinen separaten Anteil zu. [Mehrprozess-Test](../examples/infinite-stars/src/bin/cluster-wire.rs)
+
+## Was ist für getrennte und verschmelzende Inseln belegt?
+
+![Gleiche Spielerzahl getrennt und dicht, räumlich isolierter Verkehr, Merge, Split und Wechsel](benchmarks/mesh-spielercluster.png)
+
+| Bevy-Szene mit acht Workern | Windows p95 je Schritt | Debian p95 je Schritt | Entity-Frames pro Schritt |
+| --- | ---: | ---: | ---: |
+| 256 Spieler, vier Inseln | 7,4 ms | 10,9 ms | 256 |
+| 256 Spieler, eine Insel | 40,9 ms | 44,7 ms | 1.792 |
+| 384 Spieler, vier Inseln | 21,6 ms | 42,3 ms | 384 |
+| 384 Spieler, eine Insel | 120,2 ms | 128,8 ms | 2.688 |
+
+**Unabhängige Inseln.** Bei 1, 2, 4 und 8 Inseln mit je 16 Spielern und zwei Workern empfing Worker 1 jedes Mal **acht Positionsframes pro Schritt**. Trotz wachsender Welt gingen **null Entity-Frames zwischen getrennten Inseln**. Über die acht echten mTLS-Prozesse ergaben zwölf getrennte Schritte ebenfalls null fremde Frames bei 768 korrekt angewandten Positionsframes. Directory, Steuerung und lokale Nachbarn erzeugten weiterhin TLS-Verkehr. Die direkte Szene prüft nach jedem Schritt die Inselmitglieder anhand einer unabhängigen vollständigen 3D-Suche, die tatsächlich installierten Replikate, ihre Positionen und den Schutz privater Inventare. [Geometrie und Sichtprüfung](../examples/infinite-stars/src/bin/cluster-bench.rs) · [Prüfung über die Netzwerkverbindung](../examples/infinite-stars/src/bin/cluster-wire.rs)
+
+**Bewegliche Gruppen.** Bei 64 Spielern durchlief die Welt 4 → 3 → 2 → 1 → 2 → 3 → 4 Inseln. Die Zustellungen pro Schritt folgten mit **64 → 128 → 256 → 448 → 256 → 128 → 64**. Ein zweites Szenario ließ 4, 8, 16, 32 und 64 Spieler gleichzeitig die Seite wechseln. Beim Wechsel aller 64 stieg die Schrittzeit auf 11,0 / 12,0 ms p95. Die Schreibzuständigkeit bleibt in diesen Szenen fest, damit die Messung den Preis der räumlichen Überschneidung zeigt. Die Bibliothek prüft Zuständigkeitsübergaben separat. [Handoff- und Recovery-Tests](../examples/infinite-stars/tests/contract.rs)
+
+## Was kostet eine weitere Entity, ein NPC oder ein Worker?
+
+![Originalvergleich mit NPCs, selten veränderte Weltobjekte, gleiche Last auf mehr Workern und räumliche Kandidaten](benchmarks/mesh-objekte.png)
+
+| Last | Charakteristik im laufenden Code |
+| --- | --- |
+| **Spieler mit eigenem Sichtbereich** | Für bewegte Objekte fragt das Directory einen 3D-R-Baum ab. Entscheidend ist, wie viele Bereiche eine Änderung tatsächlich trifft. Sehen sich alle Spieler innerhalb jeder Insel und bewegen sich alle, wächst die beobachtete Kandidatenzahl wie die Summe der quadrierten Inselgrößen. 384 an einem Ort ergaben **147.456** Kandidaten pro Schritt, vier Gruppen à 96 ergaben **36.864**. Bei zusätzlichen gleich großen, vollständig getrennten Inseln wächst die Summe linear mit der Inselzahl. Das ist eine Aussage über Suchtreffer in dieser Geometrie. |
+| **Empfänger einer Änderung** | Das Directory bündelt mehrere Sichtbereiche desselben Workers in einem Abonnement. Mit acht Workern lagen die Zustellungen je Figur bei **einem** anderen Worker auf vier Inseln und **sieben** in der gemeinsamen Insel. Bei individuellen Clients, die alle anderen bewegten Figuren sehen, kann die auszugebende Datenmenge quadratisch mit der Spielerzahl wachsen. Feldauswahl, Änderungsrate und Detailstufe bestimmen die Bytes. |
+| **Server der Browser-Demo** | Pro lokalem Client durchsucht der aktuelle Snapshot-Pfad die bekannten autoritativen und Schatten-Entities zur Sichtfilterung. Bei P Clients und E bekannten Entities kostet diese Prüfung pro Server und Tick bis zu **O(P × E)**, zuzüglich Kodierung der sichtbaren Updates. Auch ein Rechner mit 20 stabilen Ticks/s kann seine Clients oder seinen Uplink überlasten. |
+| **Bewegte NPCs** | Im Originalvergleich mit drei echten Clients und 9.000 einfachen Bewegungs-NPCs sank die Tickzeit des langsamsten Servers unter Windows bei p95 von **7,57 auf 5,20 ms**, bei p99 von **10,38 auf 6,45 ms**. Komplexe KI, Navigation, Kollisionen und Spieler-Eingabequittungen erzeugen andere Arbeit. |
+| **Selten geänderte Weltobjekte** | 256 Positionsobjekte je Insel, vier Positionsänderungen je Insel und Schritt. Bei 4.096 Objekten auf 16 Inseln dauerte der serielle Poolschritt **1,66 / 5,28 ms p95**. Der Beobachter der ersten Insel erhielt in 160 Schritten stets 697 Frames mit 17.101 Byte Felddaten. Bei Chunks und Bauplänen kommen Datenvolumen, Codec und der Cachezustand bei der Übergabe hinzu. |
+| **Weitere Worker** | Der direkte Pool tickt seine Bevy-Worlds seriell. Bei denselben 64 Spielern auf vier Inseln kosteten zwei, vier und acht Worker unter Windows **2,26 / 1,00 / 1,08 ms**, unter Debian **1,90 / 1,86 / 2,99 ms** p95. Ein zusätzlicher Worker bringt eigenen ECS-, Routing- und Zustellaufwand. Horizontaler Durchsatz über weitere physische Rechner ist damit offen. |
+
+Die Rechenpfade und das unabhängige NPC-Vergleichsprogramm sind direkt im Repo nachlesbar. [Räumlicher Index](../crates/zz-mesh/src/spatial.rs) · [Worker-Pool](../crates/zz-mesh/src/pool.rs) · [Browser-Snapshots](../crates/sim-server/src/systems/snapshot.rs) · [Objekt- und Voxelbenchmark](../examples/infinite-stars/src/bin/mesh-bench.rs) · [Originalvergleich](../scripts/compare-mesh.mjs)
+
+**Gegenprobe zur bisherigen Bibliothek.** Bei 64 verschmolzenen Figuren und acht Workern ergaben vier abwechselnde Vergleichspaare gegen `fa3d470` unter Windows 4,08 → 4,09 ms p95 und unter Debian **6,57 → 8,82 ms p95**. Eine Nachmessung isolierte dieselbe dichte Szene auf einer festen virtuellen CPU, mit identischem Messcode, sechs Paaren und 192 Schritten je Lauf. Dort lagen die Mediane bei **7,24 → 7,08 ms p95**. Die mittlere Thread-CPU-Zeit sank in jeder der drei gemessenen Phasen. Die höhere Latenz im ersten Debian-Lauf bleibt dokumentiert. Die kurzen Vergleichsläufe erlauben hier nur eine Aussage über die jeweils gemessene Last und Ausführungsumgebung. [Einzelwerte, Binärhashes und Messcode](benchmarks/mesh-profile-2026-11-25.json)
+
+## Schnell auf der eigenen Hardware nachmessen
 
 ```sh
-npm run setup
-npm test
-npm run smoke
-npm run bench:compare
-npm run bench:clusters
-npm run bench:cluster-wire
-cargo run --locked --release -p infinite-stars --bin mesh-bench -- target/stars-benchmark.json
+npm run bench:quick
 ```
 
-Der Browser-Vergleich baut den Referenzstand `3ef0d789` und den aktuellen Checkout im Release-Profil. Für den ursprünglichen Stand übernimmt er die erste versionierte Cargo.lock aus `a2c478bf`. Windows braucht aus diesem Commit auch die beiden portierten Prozesseinstiegspunkte für Keepalive und Shutdown. Die Simulationsschleife der Referenz stammt auf beiden Plattformen aus `3ef0d789`. Ein bereits gebautes Paar lässt sich mit `--reference PFAD --candidate PFAD` angeben. Der Befehl protokolliert die SHA-256 der gemessenen Binärdateien. [Vergleichsprogramm](../scripts/compare-mesh.mjs) · [Referenzbuild](../scripts/build-benchmark-reference.mjs)
+Am 25. November 2026 dauerte die eigentliche Last **44,4 s auf Windows und 45,8 s auf Debian**, zuzüglich 1,0 / 0,6 s für den warmen Release-Build. Der erste Build braucht länger. Der Befehl schreibt `target/mesh-quick.json`. Er beginnt mit drei Verbindungen und endet bei der ersten verfehlten Laststufe oder spätestens bei 512. Pro Stufe sind 16 Eingaben je Client in 137-ms-Abständen geplant. Nach vier Sekunden begrenzt jeder Lastgenerator weitere Eingaben. Das trennt geplante, gesendete und tatsächlich beobachtete Sequenzen. Hardware, Revision, Tickraten, Zähler und Perzentile stehen im JSON. [Launcher](../scripts/bench-quick.mjs)
 
-Der Browser-Vergleich nutzt eigene Standardports neben der Entwicklungsdemo. Der Koordinator startet auf 17710 und 17711. Die Basisports für Simulation, UDP und Metriken sind 17717, 19100 und 18100. Bei Bedarf lassen sich `COORD_WS_PORT`, `COORD_HTTP_PORT`, `SIM_WS_BASE`, `SIM_UDP_BASE` und `SIM_METRICS_BASE` setzen. Die Spielerszenen verwenden eigene temporäre Speicher und zugewiesene Ports. Standardausgaben sind `target/browser-comparison.json`, `target/cluster-players.json` und `target/cluster-wire.json`. Der manuell gestartete GitHub-Workflow **Native mesh** führt den Originalvergleich auf Windows und Linux mit `--max-growth-percent 0` aus und archiviert die Einzelwerte auch bei einem gemessenen Anstieg. [Lokaler Start und Ports](quickstart.md) · [CI-Workflow](../.github/workflows/native-mesh.yml)
+Mit Python 3 und Matplotlib erzeugt der zweite Befehl dieselben drei Graphen unter `target/mesh-profile/`. Er ersetzt die räumlichen und Browser-Messungen des aktuellen Betriebssystems. Die andere Plattform, der Originalvergleich und die mTLS-Messungen stammen aus der archivierten Messreihe.
 
-## Was die Zahlen messen
+```sh
+python scripts/plot-mesh-profile.py --quick target/mesh-quick.json
+```
 
-- **Browser-Demo.** Drei native Sim-Prozesse, drei echte WebSocket-Clients mit Snapshot-ACKs, fünf Sekunden Warmlauf und 20 Sekunden Messung pro Start. Beide Versionen laufen je Laststufe dreimal in wechselnder Reihenfolge. Die ursprüngliche Demo wählt Startpositionen und UUIDs zufällig. Jede Zeile fasst den Median der drei jeweils langsamsten Server zusammen. Die Tickperzentile kommen aus den letzten 200 Server-Ticks. Tick- und Snapshotrate verwenden das gesamte Messintervall. `--max-growth-percent 0` lässt den Vergleich bei jedem gemessenen p95- oder p99-Anstieg fehlschlagen. Mit `--noise-ms` kann ein absoluter Spielraum für eine bestimmte Messmaschine gesetzt werden.
-- **Bevy-Worlds.** Jeder Spieler hat eine dauerhafte ID, eigene Schreibzuständigkeit, eine Position, ein privates Inventar und einen aktiven Sichtbereich. Alle Spieler bewegen sich in jedem Schritt. Je Cluster schreiben zwei Worker. Im Test mit geteilten Workern bedienen dieselben Worker mehrere Orte. Der direkte Pool tickt alle Worlds seriell. Die Zeit umfasst Positionsänderung, ECS-Schritt, Discovery, Projektion, Zustellung und ACK. Eine zweite Zeitmessung schließt die explizite Abfrage aller Inselmitgliedschaften ein. Die unabhängige Gegenprüfung und die Auswertung der Zähler liegen außerhalb beider Messintervalle. Die ausgewiesenen Feldbytes stammen aus den typisierten Updates. [Szenen](../examples/infinite-stars/src/bin/cluster-bench.rs)
-- **Gegenprüfung.** Nach jedem Schritt vergleicht der Test Abonnements, tatsächlich installierte Replikate, exakte Koordinaten und private Komponenten mit einer vollständigen 3D-Suche. Spieler innerhalb von 10 m Achsenabstand müssen sichtbar sein. Jenseits von 11 m muss die fremde Sicht entladen sein. Dazwischen gilt die Hysterese des Plugins. Alle Writer und Generationen bleiben während der Geometrie-Szenen auf ihrer ursprünglichen Platzierung. Das erlaubt eine eigene Messung der Kosten von Merge und Split. Übergabe und automatisches Placement haben separate Tests. [Räumliche Tests](../crates/zz-mesh/tests/spatial.rs) · [Spiel- und Übergabetests](../examples/infinite-stars/tests/contract.rs)
-- **Getrennte Prozesse.** Zwei, vier oder acht Betriebssystemprozesse verwenden den echten Directory-Broker, SQLite, Peer-Publisher und TCP mit gegenseitiger TLS-Authentifizierung. Jeder Worker simuliert acht Spieler. Die Teststeuerung gibt Bewegungen über stdin vor und liest fertige ECS-Sichten zurück. Jede Phase wartet auf die richtigen IDs und exakten Positionen bei allen Empfängern. Die Konvergenzzeit enthält die 50-ms-Simulations- und Directory-Zyklen, Warteschlangen und die Abfrage durch die Teststeuerung. TLS-Bytezähler erfassen alle Listener einschließlich Handshake, Kontrollverkehr und Wiederholung. IP-Header und vom Betriebssystem wiederholte TCP-Segmente fallen außerhalb dieser Messstelle. [Netzwerkszenen](../examples/infinite-stars/src/bin/cluster-wire.rs)
-- **Dynamik.** Eine Gruppe startet im Zentrum. Drei weitere starten jeweils 64 m davon entfernt auf unterschiedlichen Raumachsen. Sie kommen nacheinander ins Zentrum und kehren anschließend zu ihren Ausgangsorten zurück. Ein separater Versuch schickt zunehmend größere Teilgruppen auf Gegenkurs. Die Worker behalten beim Wechsel die Schreibrechte ihrer Spieler. Ein gerichtetes Paar zählt einen Sender und einen Empfänger genau einmal, auch wenn viele Spieler am selben Ort dasselbe Objekt benötigen. Der Zähler für fremde Herkunft erfasst zugestellte Frames zwischen den ursprünglichen Orten. Wenn ein Worker mehrere Orte bedient, steht für diesen Zähler in den aktuellen Direktmessungen `null`.
+**Messbedingungen.** Windows 11 nativ auf einem Intel Core i7-13850HX mit 20 Kernen und 28 logischen Prozessoren. Debian 12.15 in einer WHPX-VM auf demselben Host mit sechs vCPUs und 8 GiB RAM. Beide Reihen liefen nacheinander im Release-Profil mit Rust 1.96.1 und Node 22.16. Der direkte Bevy-Test verwendet SQLite im Speicher, sechs Warmschritte und 32 Messschritte pro Dichtestufe. p95 entspricht dort dem zweithöchsten Schritt. Kurze Stichproben schwanken. In einem zusätzlichen Vier-Thread-Lauf lag die Browser-Eingabe bei 256 Clients bei 72 / 152 ms p95. Das zeigt die Streuung auch unterhalb der höchsten erreichten Stufe. Der Originalvergleich umfasst je drei alternierende Paare mit 5 s Warmlauf und 15 s Messung. Die anderen Leistungsdaten und der längere mTLS-Test lassen sich getrennt reproduzieren. [Rohdaten einschließlich Kontrollläufen](benchmarks/mesh-profile-2026-11-25.json) · [Vorherige Messreihe, Befehle und Härtung](cluster-performance-2026-11-24.md)
 
-Die Windows-Messung lief nativ auf einem Intel Core i7-13850HX. Debian 12 lief auf demselben Rechner mit sechs virtuellen CPUs und 8 GiB RAM unter QEMU/WHPX. Die Abschlussmessungen der beiden Betriebssysteme liefen nacheinander. Die Mehrprozesszahlen beschreiben Loopback auf einem Host. Ein physischer Mehrrechner-Cluster mit WAN-Latenz, Paketverlust und unabhängigen Datenträgern ist eine andere Messumgebung.
-
-## Messergebnisse vom 24. November 2026
-
-![p95-Tickzeiten beim Verschmelzen von vier Spielerclustern und bei steigender Spielerdichte](benchmarks/cluster-scaling.png)
-
-### Browser-Demo im direkten Vergleich
-
-| System | NPCs | p95 Original ms | p95 aktuell ms | p99 Original ms | p99 aktuell ms | Ticks/s aktuell | Snapshots/s aktuell |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows | 30 | 0,423 | 0,166 | 0,721 | 0,252 | 19,99 | 19,99 |
-| Windows | 3000 | 2,607 | 1,776 | 3,473 | 2,691 | 19,99 | 19,99 |
-| Windows | 9000 | 5,390 | 4,295 | 6,098 | 7,004 | 19,99 | 19,99 |
-| Debian | 30 | 0,354 | 0,250 | 0,639 | 0,495 | 20,00 | 20,00 |
-| Debian | 3000 | 2,816 | 1,713 | 5,697 | 3,124 | 20,00 | 20,00 |
-| Debian | 9000 | 7,802 | 5,407 | 10,913 | 6,758 | 20,00 | 20,00 |
-
-Bei 9.000 NPCs unter Windows lag p99 im ersten Dreiervergleich bei 6,098 ms für die Referenz und 7,004 ms für den aktuellen Stand. Zwei der drei zeitlich benachbarten Paare fielen zugunsten des aktuellen Stands aus. Deshalb wurde diese Laststufe um sieben vorab festgelegte Paare erweitert. Über **alle zehn Paare** lag p95 bei 5,422 → 4,236 ms und p99 bei 6,444 → 4,861 ms. In 8 von 10 Paaren war der aktuelle p99-Wert niedriger. Binärdateien, Last, Reihenfolgewechsel und Messdauer blieben über alle 20 Starts gleich. [Alle Messungen bei 9.000 NPCs](benchmarks/browser-windows-9000-confirmation.json)
-
-Die drei Windows-Clients empfingen bei 9.000 NPCs über zehn Paare zusammen im Median 21,21 MiB/s im Original und 21,64 MiB/s im aktuellen Stand. Die Startpositionen und die sichtbaren Entities variieren je Start. In einem zusätzlichen 20-Sekunden-Paar wurden alle Nutzbytes den Headern, Entity-Zuständen und entfernten UUIDs zugeordnet. Beide Versionen benötigten exakt 47 Byte je Entity-Zustand und 16 Byte je entfernter UUID. Das Original lieferte 9.484.349 Zustände in 1.201 Frames, der aktuelle Stand 9.431.102 in 1.202 Frames. [Bytezähler pro Client](benchmarks/browser-snapshot-accounting.json) · [Binärformat](../crates/sim-server/src/encoding.rs)
-
-Ein Zwischenschritt ohne die zeitgesteuerte Scheduler-Übergabe lag bei 30 NPCs auf Debian bei 0,401 ms p95 und 0,771 ms p99 gegenüber 0,367 und 0,657 ms der damaligen Referenz. Danach wurden beide vollständigen A/B-Matrizen mit neu gebauten Release-Servern erneut ausgeführt. [Zwischenmessung Debian](benchmarks/browser-before-scheduler-linux.json) · [Zwischenmessung Windows](benchmarks/browser-before-scheduler-windows.json)
-
-Die erste Kontrollmessung vor der Optimierung lag unter Windows bei 9.000 NPCs bei 6,710 ms p95 gegenüber 5,549 ms für das Original. Die JSON-Dateien enthalten je Server die Snapshotrate, Datenrate, Tickzeiten und p95 der Verarbeitungsphasen. [Vor der Optimierung](benchmarks/browser-before-tuning-windows.json) · [Windows-A/B](benchmarks/browser-comparison-windows.json) · [Debian-A/B](benchmarks/browser-comparison-linux.json)
-
-### Unabhängige Cluster und steigende Spielerdichte
-
-| Inseln | Worker | Spieler | gerichtete Paare | p95 Windows ms | p95 Debian ms | Frames an Worker 1 | Frames zwischen Inseln |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 2 | 16 | 2 | 0,16 | 0,15 | 960 | 0 |
-| 2 | 4 | 32 | 4 | 0,41 | 0,37 | 960 | 0 |
-| 4 | 8 | 64 | 8 | 0,77 | 0,76 | 960 | 0 |
-| 8 | 16 | 128 | 16 | 1,54 | 1,40 | 960 | 0 |
-
-Alle 120 Schritte je Szene erzeugen dieselbe Zahl von Positionsframes für Worker 1. Für die reine Bevy-Replikation ist die Netzwerklast des direkten Pfads null. Die folgenden Dichtewerte verwenden immer zwei Worker am gleichen Ort, je 100 Schritte pro Durchlauf und den Median der drei Durchlaufperzentile.
-
-| Spieler an einem Ort | Windows p50 ms | p95 ms | p99 ms | Debian p50 ms | p95 ms | p99 ms |
-| --- | --- | --- | --- | --- | --- | --- |
-| 16 | 0,11 | 0,16 | 0,23 | 0,11 | 0,14 | 0,20 |
-| 32 | 0,27 | 0,37 | 0,48 | 0,25 | 0,33 | 0,53 |
-| 64 | 0,78 | 1,05 | 1,26 | 0,69 | 1,00 | 1,23 |
-| 128 | 2,44 | 3,10 | 3,41 | 2,21 | 2,85 | 3,13 |
-| 256 | 7,96 | 9,57 | 10,56 | 7,71 | 9,13 | 9,92 |
-
-Bei gleichem Gesamtaufwand bleiben vier Orte mit je 16 Spielern räumlich unabhängig, auch wenn ein Worker gleichzeitig an mehreren Orten arbeitet.
-
-| Worker | Spieler | Inseln | gerichtete Paare | p95 Windows ms | p95 Debian ms |
-| --- | --- | --- | --- | --- | --- |
-| 2 | 64 | 4 | 2 | 0,64 | 0,61 |
-| 4 | 64 | 4 | 4 | 0,80 | 0,63 |
-| 8 | 64 | 4 | 8 | 0,82 | 0,73 |
-
-### Annäherung, Zusammenschluss und erneute Trennung
-
-| Inseln | gerichtete Paare | Abos | Feldbyte/Schritt | Windows vorher p95 ms | Windows aktuell p95 ms | Debian aktuell p95 ms |
-| --- | --- | --- | --- | --- | --- | --- |
-| 4 | 8 | 64 | 1504 | 4,77 | 0,88 | 0,75 |
-| 3 | 16 | 128 | 2800 | 10,87 | 1,09 | 1,00 |
-| 2 | 32 | 256 | 5440 | 34,98 | 1,71 | 1,56 |
-| 1 | 56 | 448 | 9408 | 90,89 | 2,62 | 2,48 |
-| 2 | 32 | 256 | 5440 | 36,34 | 1,78 | 1,44 |
-| 3 | 16 | 128 | 2800 | 11,67 | 1,19 | 1,17 |
-| 4 | 8 | 64 | 1504 | 4,54 | 0,79 | 0,79 |
-
-Die Tabelle zeigt die stabilen Phasen. Jeder Übergang umfasst zusätzlich 32 Schritte mit bewegten Spielern. Die Rohdaten enthalten diese Übergänge und die Spitzenwerte der Zustellwarteschlange. Neue gerichtete Abos erhalten eine Baseline. In sämtlichen stabilen Phasen entstehen beim Weiterbewegen der Spieler null neue Vollbaselines.
-
-Im vollständig verschmolzenen Cluster wurde zusätzlich die Zeit für die explizite Abfrage aller Inselmitgliedschaften in jedem Tick gemessen. Windows 2,69 ms mit vollständiger Inselabfrage, davon 0,098 ms p95 für die Abfrage und Debian 2,55 ms mit vollständiger Inselabfrage, davon 0,112 ms p95 für die Abfrage. Ein unabhängiger vollständiger Graphvergleich prüft die tatsächlichen Inselmitglieder nach jedem Schritt. Die separaten Perzentile sind nicht additiv.
-
-| Wechselnde Spieler von 64 | Anteil | max. gerichtete Paare auf dem Hinweg | Windows p95 ms | Debian p95 ms |
-| --- | --- | --- | --- | --- |
-| 4 | 6,25 % | 12 | 1,32 | 1,12 |
-| 8 | 12,50 % | 12 | 1,50 | 1,28 |
-| 16 | 25,00 % | 12 | 1,60 | 1,47 |
-| 32 | 50,00 % | 12 | 1,93 | 1,90 |
-| 64 | 100,00 % | 12 | 7,20 | 6,78 |
-
-Je Wechselstufe steht der höhere der beiden p95-Mediane für Hin- und Rückweg in der Tabelle. Die kanonischen IDs, privaten Inventare und Schreibgenerationen werden nach jedem Schritt geprüft. [Direktmessungen Windows einschließlich Vorher-Läufen](benchmarks/player-clusters-windows.json) · [Direktmessungen Debian](benchmarks/player-clusters-linux.json)
-
-### TCP/mTLS mit getrennten Prozessen
-
-| System | Prozesse | Spieler | Konvergenz p50 ms | p95 ms | TLS-TX Byte | TLS-RX Byte | angewandte Frames | Frames zwischen Inseln |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows | 2 | 16 | 47,7 | 65,9 | 6936 | 46392 | 192 | 0 |
-| Windows | 4 | 32 | 50,2 | 57,4 | 13872 | 94992 | 384 | 0 |
-| Windows | 8 | 64 | 52,5 | 63,6 | 28120 | 192760 | 768 | 0 |
-| Debian | 2 | 16 | 51,6 | 52,6 | 6936 | 46392 | 192 | 0 |
-| Debian | 4 | 32 | 50,5 | 55,3 | 13919 | 95039 | 384 | 0 |
-| Debian | 8 | 64 | 51,5 | 59,1 | 27791 | 192431 | 768 | 0 |
-
-Jede Zeile umfasst zwölf Bewegungsschritte mit vollständiger Konvergenz bei allen Empfängern. Die Listener-Bytezähler messen pro empfangendem Server beide Richtungen. Auch bei ruhenden Spielern melden die Worker ihre Anwesenheit beim Directory.
-
-- **Windows mit acht Prozessen.** In 5,5 s Stillstand flossen 81.310 TLS-Byte bei null Entity-Frames. Im vollständig verschmolzenen Cluster kamen 448 Positionsframes pro Bewegungsschritt an. Der langsamste der 24 Annäherungsschritte brauchte 307,9 ms bis zur letzten korrekten Sicht. [Rohdaten Windows](benchmarks/cluster-wire-windows.json)
-- **Debian mit acht Prozessen.** In 5,5 s Stillstand flossen 81.216 TLS-Byte bei null Entity-Frames. Im vollständig verschmolzenen Cluster kamen 448 Positionsframes pro Bewegungsschritt an. Der langsamste der 24 Annäherungsschritte brauchte 307,4 ms bis zur letzten korrekten Sicht. [Rohdaten Debian](benchmarks/cluster-wire-linux.json)
-
-Bei acht Prozessen bewegten sich zusätzlich Spieler zweier Herkunftsorte aufeinander zu und wechselten die Seiten. Die anderen beiden Orte liefen weiter. Für jede Stufe enthalten die Werte alle 16 Bewegungsschritte des Hin- und Rückwegs. Die letzte Spalte zählt alle zugestellten Entity-Frames zwischen verschiedenen Herkunftsorten, jeweils über beide Wege.
-
-| Wechselnde Spieler von 64 | Windows p50 ms | Windows p95 ms | Debian p50 ms | Debian p95 ms | Frames zwischen Herkunftsorten Windows / Debian |
-| --- | --- | --- | --- | --- | --- |
-| 4 | 53,3 | 305,6 | 52,4 | 309,2 | 304 / 303 |
-| 16 | 56,5 | 306,8 | 53,1 | 334,4 | 448 / 440 |
-| 32 | 55,4 | 293,8 | 53,5 | 300,5 | 320 / 312 |
-
-
-### Bestehender Infinite-Stars-Benchmark v1
-
-| System | Worker | Inseln | Objekte | vorher p95 ms | aktuell p95 ms | vorher p99 ms | aktuell p99 ms |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows | 1 | 1 | 256 | 0,172 | 0,090 | 0,868 | 0,396 |
-| Windows | 2 | 1 | 256 | 0,235 | 0,158 | 0,898 | 0,432 |
-| Windows | 4 | 1 | 256 | 0,265 | 0,325 | 1,157 | 0,476 |
-| Windows | 4 | 4 | 1024 | 0,752 | 0,479 | 3,134 | 1,777 |
-| Windows | 16 | 16 | 4096 | 3,705 | 1,589 | 12,898 | 6,676 |
-| Debian | 1 | 1 | 256 | 0,136 | 0,126 | 0,806 | 0,345 |
-| Debian | 2 | 1 | 256 | 0,284 | 0,168 | 0,776 | 0,401 |
-| Debian | 4 | 1 | 256 | 0,340 | 0,246 | 0,996 | 0,456 |
-| Debian | 4 | 4 | 1024 | 0,669 | 0,517 | 2,894 | 1,708 |
-| Debian | 16 | 16 | 4096 | 2,665 | 1,543 | 11,919 | 6,039 |
-
-Je fünf abwechselnde Release-Läufe pro Variante und System, Median der fünf Perzentile. Die Referenz ist der Stand der Bibliothek vor den Änderungen dieser Messreihe. Der Beobachter der ersten Insel empfing in allen Szenen weiterhin 697 Frames mit 17.101 Byte Felddaten. Die vollständigen v1-Ausgaben enthalten außerdem lokale und über TLS vermittelte Übergaben, Aktionsbatches, UDP/TLS- und Voxelcodec-Messungen. [Gepaarte Szenen einschließlich Einzelwerten](benchmarks/infinite-stars-v1-paired.json) · [Historische Messung](infinite-stars-benchmarks.md) · [Vollständiger Lauf Windows](benchmarks/infinite-stars-v1-repeat-windows.json) · [Vollständiger Lauf Debian](benchmarks/infinite-stars-v1-repeat-linux.json)
-
-Die Szene mit vier Workern und 256 Objekten in derselben Insel wurde auf jedem System mit **20 Paaren** nachgemessen. Die räumliche Suche verwendet ein Suchergebnis für Kapazitätsprüfung und Abonnements. In der Bevy-Phase behält jeder Worker den QueryState für neu angelegte Objekte und liest zur Checkpointprüfung den Mesh-Zustand einmal.
-
-| Perzentil | Windows Original ms | Windows aktuell ms | Debian Original ms | Debian aktuell ms |
-| --- | --- | --- | --- | --- |
-| p50 | 0,0856 | 0,0915 | 0,0763 | 0,0829 |
-| p95 | 0,3272 | 0,3331 | 0,3287 | 0,2514 |
-| p99 | 1,0591 | 0,4970 | 0,9635 | 0,4910 |
-
-Unter Debian sank die Zahl der Allokationen über 160 Schritte von 34.127 auf 23.163, die allozierten Bytes von 6.629.552 auf 4.720.520. Die Empfänger erhielten jeweils 20.718 Byte Felddaten. In 9 von 20 Windows-Paaren und 16 von 20 Debian-Paaren war der aktuelle p95-Wert niedriger. [Zwischenfassung vor Wiederverwendung der Routen](benchmarks/infinite-stars-v1-linux-four-workers-before-route-reuse.json) · [20 Paare Debian](benchmarks/infinite-stars-v1-linux-four-workers.json) · [20 Paare Windows](benchmarks/infinite-stars-v1-windows-four-workers.json)
-
-Für das Phasenprofil liefen Referenz und aktueller Stand mit denselben zusätzlichen Messpunkten unter Debian in weiteren 20 abwechselnden Paaren. Jedes Paar hatte sechs Warmlauf- und 160 Messschritte. Der Bevy-Wert summiert die Zeit in den vier `App::update`-Aufrufen. Die Zustellung umfasst das Anwenden der Nachricht und die vom Szenario vorgesehene ACK-Behandlung. Die Perzentile einzelner Phasen lassen sich nicht zu einem Tickperzentil addieren. [Phasenprofil mit Einzelwerten](benchmarks/infinite-stars-v1-four-worker-phases.json)
-
-| Phase | vorher p50 µs | aktuell p50 µs | vorher p99 µs | aktuell p99 µs |
-| --- | --- | --- | --- | --- |
-| Positionen bewegen | 0,20 | 0,20 | 0,70 | 0,60 |
-| Bevy-Worlds einschließlich Persistenz | 46,70 | 59,95 | 926,58 | 451,79 |
-| Beschreibungen und Raumindex | 12,45 | 6,20 | 109,80 | 29,85 |
-| Routen, Projektion und Warteschlangen | 9,40 | 8,85 | 27,50 | 29,45 |
-| Zustellung und ACK | 14,45 | 5,90 | 44,90 | 24,00 |
-
-## Änderungen an den gemessenen Pfaden
-
-Die Produktionspfade für Directory, Peer-Replikation und Client-Snapshots wurden anhand der Lastfälle geändert.
-
-- Das Directory prüft bei einer bewegten Spielerregion nur neu benötigte oder weggefallene Mitgliedschaften sowie geänderte Anforderungen erneut. Mehrere Beobachter desselben Workers behalten ein gemeinsames Abonnement. Die Inselabfrage ermittelt zusammenhängende Bereiche im 3D-Index bei Bedarf und entfernt schon besuchte Bereiche aus der Suche. Dadurch entfällt das Speichern aller überlappenden Spielerpaare.
-- Die Browser-Demo löst die Peer-Filter einmal pro Peer auf und aktualisiert die Komponenten eines vorhandenen Schattens in einer ECS-Abfrage. Client-Deltas sparen die Suche nach entfernten IDs, wenn alle vorherigen IDs weiter sichtbar sind. Bei mehr als 80 % geänderten Zuständen kann der Server früh einen vollständigen Snapshot wählen. Bei voller Sendewarteschlange verwirft er die Client-Baseline und erzwingt eine Neusynchronisation.
-- Ein kurzer Browser-Tick gibt den Executor am regulären 50-ms-Timer frei. Nach Simulation und UDP-Verarbeitung prüft der Server die verstrichene Zeit. Ist seit Tickbeginn oder der letzten freiwilligen Übergabe mindestens 1 ms vergangen, erhält Tokio einen zusätzlichen Übergabepunkt für die anderen Tasks.
-- SQLite hält vorbereitete SQL-Anweisungen für häufige Zuständigkeits-, Änderungs- und Checkpointabfragen im Verbindungscache. Die Parameter werden pro Aufruf gebunden und die Anweisungen in der laufenden Transaktion ausgeführt. Revisionen, Generationen und Objektzustand stammen dadurch auch bei Wiederholung aus dem aktuellen Datenbankstand.
-- Eine wiederverwendete Peer-Verbindung kann nach einer Ruhephase vom Listener geschlossen worden sein. Beim nächsten I/O-Fehler verbindet der Worker sich für die sequenzierten Directory-Berichte oder die quittierten Zustandsframes einmal neu. Die Gegenstelle erkennt eine wiederholte Zustellung. Ein Empfängerwechsel übernimmt den Hysteresebereich eines vorherigen Empfängers erst, wenn der neue Empfänger selbst den erforderlichen Sichtbereich erreicht hat.
-
-## Härtung
-
-Auf Windows 11 und Debian 12 bestanden jeweils 670 Rust-Tests, 85 TypeScript-Prüfungen, der Produktionsbuild des Clients und die beiden Live-Szenarien für Eingabe-ACKs und Peer-Replikation. Der Browser-Decoder prüft vor jeder Array-Allokation Header, angegebene Datensatzanzahl und tatsächliche Bytelänge. Zwei Tests laden dafür den Produktionsdecoder direkt. Der aktualisierte MCP-Oracle bestand den TypeScript-Build auf beiden Systemen und die lokale MCP-Tool-Erkennung unter Windows.
-
-Der RustSec-Lauf mit cargo-audit 0.23.0 prüfte am 24. November 2026 insgesamt 295 im Lockfile aufgelöste Rust-Pakete. Das Update auf rusqlite 0.43 aktualisiert die gebündelte SQLite-Version. Das Update auf rstar 0.14 zieht heapless 0.9.4 ein. Danach meldete cargo-audit null Schwachstellen und null Unsoundness-Warnungen. Drei Wartungshinweise bleiben für bincode 1.3, rustls-pemfile 2.2 und basic-toml 0.1. Die npm-Lockfiles von Root, Client, Tools und MCP-Oracle lieferten jeweils null gemeldete Schwachstellen einschließlich Entwicklungsabhängigkeiten. Die CI führt die Audits bei Änderungen aus. [Prüfergebnis und Advisory-Datenbankstand](benchmarks/cluster-dependency-audit.json) · [SQLite-Advisory](https://rustsec.org/advisories/RUSTSEC-2026-0459.html) · [RustSec-Prüfverfahren](https://github.com/rustsec/rustsec/blob/main/cargo-audit/README.md)
-
-Die Tests decken unter anderem private Inventare, alte Zuständigkeiten, Verlust und Wiederholung von ACKs, verspätete Frames bei Split und erneutem Zusammenschluss, Crash nach Commit, Wiederanlauf, Hystereseregeln und Überlastgrenzen ab. Die Netzwerk-Szene lässt direkte Verbindungen zusätzlich länger als den Socket-Timeout ruhen und prüft anschließend alle Replikate erneut. Diese Prüfung betrifft die getesteten Datenpfade und den Advisory-Stand des Messtags. [Netzwerk- und Recovery-Verträge](../examples/infinite-stars/tests/contract.rs) · [Mehrprozesstests](../examples/infinite-stars/tests/process.rs)
-
-Die mTLS-Ergebnisse beziehen sich auf den Adapter der persistenten Spielbibliothek. Der native Starter bindet die WebSocket-, UDP-, HTTP- und Metrikports der Browser-Demo an IPv4-Loopback. Dazu setzt er für seine eigenen Kindprozesse `MESH_LOOPBACK_ONLY=1`. Eigenständig gestartete Board- und Cloud-Dienste nutzen weiterhin ihre Netzschnittstellen. Für einen öffentlichen Spielbetrieb bleiben insbesondere externe Netzgrenzen, Zertifikatsbetrieb und unabhängige Sicherheitsprüfung eigene Aufgaben. [Browser-Demo](quickstart.md) · [Betriebsmodell der persistenten Worker](infinite-stars.md)
+**Sicherheit.** Die Abhängigkeitsprüfungen vom Messtag meldeten null bekannte Schwachstellen in den Rust- und npm-Lockfiles. RustSec listete drei nicht mehr gepflegte Pakete. Auf beiden Plattformen bestanden je 676 Rust-Tests, 85 TypeScript-Tests, der Client-Build und zwei Live-Szenarien. Die Tests prüfen unter anderem private Daten, abgelöste Schreibrechte, verspätete ACKs, Neustart und Wiederholung bestätigter Aktionen. Für öffentliche Verbindungen benötigt das Spiel eigene Zertifikate und die Zuordnung der authentisierten Identität zu Spielrollen. [Prüfstand](benchmarks/mesh-profile-2026-11-25.json) · [Betrieb und Vertrauensgrenzen](infinite-stars.md)

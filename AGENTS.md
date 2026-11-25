@@ -9,6 +9,7 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | Run Rust tests, TypeScript checks and the client production build | `npm test` |
 | Exercise input acknowledgements and peer replication on a fresh mesh | `npm run smoke` |
 | Measure release binaries with three clients and 3,000 NPCs | `npm run bench -- --servers 3 --npcs 3000 --seconds 15` |
+| Profile spatial layouts, cluster transitions and actual WebSocket input latency in a short release run | `npm run bench:quick` |
 | Compare the original browser demo with the working tree | `npm run bench:compare` |
 | Exercise player density, moving clusters and directed TLS traffic | `npm run bench:clusters` and `npm run bench:cluster-wire` |
 
