@@ -2,7 +2,7 @@
 
 Mit `zz-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definiert Komponenten, Simulationssysteme und Spielregeln. Die Bibliothek speichert stabile Objekt-IDs, prüft Schreibrechte und übergibt zusammengehörige Entities als Gruppe an einen anderen Worker.
 
-## In fünf Minuten zum ersten Spielstand
+## Vom Checkout zum ersten Spielstand
 
 1. Lege das Spiel und diesen Checkout nebeneinander. Ergänze im **Spiel** die Abhängigkeiten. Ein bestehendes `bevy = "0.15"` kann die beiden Bevy-Teilcrates ersetzen, wenn du deren Typen aus `bevy::prelude` importierst.
 
@@ -27,23 +27,7 @@ git push -u origin feat/bevy-game-integration
 git rev-parse HEAD
 ```
 
-Ersetze im Spiel den lokalen Pfad durch `zz-mesh = { git = "https://github.com/AdrianFleckDTecInnovation/ZZServerMeshing.git", rev = "<ausgegebener Commit>" }`. Übernimm die aktualisierte `Cargo.lock` ins Spiel-Repo.
-
-Mit dem Filter `With<Simulated>` läuft ein schreibendes Spielsystem auf den Entities, für die dieser Worker zuständig ist.
-
-```rust
-use bevy_ecs::prelude::*;
-use zz_mesh::prelude::Simulated;
-
-#[derive(Component)]
-struct Shield(u16);
-
-fn regenerate(mut shields: Query<&mut Shield, With<Simulated>>) {
-    for mut shield in &mut shields {
-        shield.0 = shield.0.saturating_add(1);
-    }
-}
-```
+Ersetze im Spiel den lokalen Pfad durch `zz-mesh = { git = "https://github.com/AdrianFleckDTecInnovation/ZZServerMeshing.git", rev = "<ausgegebener Commit>" }`. Übernimm die aktualisierte `Cargo.lock` ins Spiel-Repo. Im Mesh-Checkout öffnet `cargo doc --locked -p zz-mesh --no-deps --open` die lokale API-Referenz mit dem vollständigen Beispiel.
 
 ## Welche Entscheidungen trifft das Spiel?
 

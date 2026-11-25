@@ -1,4 +1,21 @@
-#![doc = include_str!("../README.md")]
+//! Persistente Worker für Bevy 0.15.
+//!
+//! Öffne den [`Store`] und starte eine Inkarnation mit [`Store::start_worker`].
+//! Installiere [`MeshPlugin::persistent`] und registriere Spielkomponenten über
+//! [`MeshApp::mesh_component`]. [`Managed`] verbindet Objekt und Übergabegruppe.
+//! Schreibende Spielsysteme verwenden den Filter `With<Simulated>`.
+//!
+//! Lade beim Neustart jede zugewiesene Gruppe mit [`restore_group`]. Verwende
+//! [`checkpoint_group`] für ausstehende Komponenten und [`commit_batch`] für
+//! dauerhafte Aktionen. [`Directory`] verwaltet räumliche Interessen.
+//! [`Pool`] betreibt mehrere Worker im Prozess, [`remote`] und [`wire`] verbinden
+//! getrennte Prozesse.
+//!
+//! ## Vollständiges Beispiel
+//!
+//! Dieses Programm erwartet den Pfad zu einer Weltdatei. Jeder Start erhöht die
+//! gespeicherte Energie des Reaktors um eins.
+#![doc = concat!("\n```no_run\n", include_str!("../examples/persistent_game.rs"), "\n```")]
 
 /// Imports for registering game components and running a persistent worker.
 pub mod prelude {

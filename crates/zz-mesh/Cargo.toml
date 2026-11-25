@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Persistent, interest-driven workers for Bevy 0.15 games"
 readme = "README.md"
+repository = "https://github.com/AdrianFleckDTecInnovation/ZZServerMeshing"
 
 [dependencies]
 bevy_app = "0.15"
