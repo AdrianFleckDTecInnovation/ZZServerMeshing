@@ -137,34 +137,44 @@ impl Pool {
     pub fn step(&mut self) -> Result<()> {
         self.tick += 1;
         let mut dirty = vec![];
-        for (&worker, node) in &mut self.nodes {
-            let start = Instant::now();
-            node.app.update();
-            node.last_tick = start.elapsed();
-            let us = node.last_tick.as_micros() as u64;
-            node.smoothed_us = (7 * node.smoothed_us + us) / 8;
-            let changed =
-                std::mem::take(&mut node.app.world_mut().resource_mut::<MeshState>().dirty);
-            let world = node.app.world();
-            for id in changed {
-                if let Some(description) = crate::network_mesh::describe(world, worker, id) {
-                    self.directory.upsert(description.presence)?;
-                    if let Some(area) = description.area {
-                        self.directory.register_area(area)?;
+        let spatial = self.directory.batch(|directory| {
+            for (&worker, node) in &mut self.nodes {
+                let start = Instant::now();
+                node.app.update();
+                node.last_tick = start.elapsed();
+                let us = node.last_tick.as_micros() as u64;
+                node.smoothed_us = (7 * node.smoothed_us + us) / 8;
+                let mut changed =
+                    std::mem::take(&mut node.app.world_mut().resource_mut::<MeshState>().dirty)
+                        .into_iter();
+                while let Some(id) = changed.next() {
+                    if let Some(description) =
+                        crate::network_mesh::describe(node.app.world(), worker, id)
+                    {
+                        let update =
+                            directory
+                                .upsert(description.presence)
+                                .and_then(|_| match description.area {
+                                    Some(area) => directory.register_area(area),
+                                    None => {
+                                        directory.remove_area(id);
+                                        Ok(())
+                                    }
+                                });
+                        if let Err(e) = update {
+                            let mut state = node.app.world_mut().resource_mut::<MeshState>();
+                            state.dirty.insert(id);
+                            state.dirty.extend(changed);
+                            return Err(e);
+                        }
+                        dirty.push((worker, id));
                     } else {
-                        self.directory.remove_area(id);
+                        directory.remove_owned(worker, id);
                     }
-                    dirty.push((worker, id));
-                } else if self
-                    .directory
-                    .presence(id)
-                    .is_some_and(|p| p.owner == worker)
-                {
-                    self.directory.remove_area(id);
-                    self.directory.remove(id);
                 }
             }
-        }
+            Ok(())
+        });
         let mut touched = BTreeSet::new();
         for c in self.directory.changes() {
             touched.insert(c.to);
@@ -215,6 +225,7 @@ impl Pool {
                 .publisher
                 .changed(&self.directory, id, self.tick);
         }
+        spatial?;
         for (&worker, n) in &mut self.nodes {
             let w = n.app.world();
             let batches = n.publisher.flush(w, &self.directory, self.tick, |id| {

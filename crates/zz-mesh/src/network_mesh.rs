@@ -125,12 +125,6 @@ impl Broker {
         }
         queue.insert(key, route);
     }
-    fn remove(&mut self, worker: Worker, id: Id) {
-        if self.index.presence(id).is_some_and(|p| p.owner == worker) {
-            self.index.remove_area(id);
-            self.index.remove(id);
-        }
-    }
     pub fn report(&mut self, role: Role, r: Report) -> Result<Routes> {
         let Role::Worker(from) = role else {
             return Err(Error::Denied);
@@ -156,7 +150,7 @@ impl Broker {
         if let Some(old) = self.slots.insert(from.slot, from) {
             if old != from {
                 for id in self.members.remove(&old).unwrap_or_default() {
-                    self.remove(old, id);
+                    self.index.remove_owned(old, id);
                 }
                 self.pending.remove(&old);
                 self.seq.remove(&old);
@@ -178,33 +172,35 @@ impl Broker {
                 .map(|(id, _)| *id)
                 .collect();
             let owners = self.db.authorities(&ids)?;
-            for (id, d) in r.changes {
-                if let Some(d) = d {
-                    if d.presence.owner != from
-                        || d.presence.id != id
-                        || d.area.as_ref().is_some_and(|a| {
-                            a.id != id || a.worker != from || a.to != Recipient::Worker(from)
-                        })
-                        || !owners
-                            .get(&id)
-                            .is_some_and(|(g, a)| *g == d.group && a.worker == from)
-                    {
-                        continue;
-                    }
-                    self.index.upsert(d.presence)?;
-                    if let Some(a) = d.area {
-                        self.index.register_area(a)?;
+            let members = self.members.entry(from).or_default();
+            self.index.batch(|index| {
+                for (id, d) in r.changes {
+                    if let Some(d) = d {
+                        if d.presence.owner != from
+                            || d.presence.id != id
+                            || d.area.as_ref().is_some_and(|a| {
+                                a.id != id || a.worker != from || a.to != Recipient::Worker(from)
+                            })
+                            || !owners
+                                .get(&id)
+                                .is_some_and(|(g, a)| *g == d.group && a.worker == from)
+                        {
+                            continue;
+                        }
+                        index.upsert(d.presence)?;
+                        if let Some(a) = d.area {
+                            index.register_area(a)?;
+                        } else {
+                            index.remove_area(id);
+                        }
+                        members.insert(id);
                     } else {
-                        self.index.remove_area(id);
-                    }
-                    self.members.entry(from).or_default().insert(id);
-                } else {
-                    self.remove(from, id);
-                    if let Some(s) = self.members.get_mut(&from) {
-                        s.remove(&id);
+                        index.remove_owned(from, id);
+                        members.remove(&id);
                     }
                 }
-            }
+                Ok(())
+            })?;
             for c in self.index.changes() {
                 let key = (c.to, c.object);
                 let prior = self.sources.remove(&key);

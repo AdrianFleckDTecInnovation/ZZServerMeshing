@@ -295,7 +295,8 @@ fn compare_layouts(ticks: usize) -> Result<Vec<Value>> {
     for players in [16, 32, 64, 128, 256, 384, 512, 768, 1024] {
         let mut scene = Scene::new(4, players / 4, 8)?;
         let separate = scene.segment("separated", ticks, |_, m| site(m.origin))?;
-        for _ in 0..6 {
+        let merge_step = scene.segment("merge", 1, |_, _| site(0))?;
+        for _ in 1..6 {
             scene.tick(&mut Sample::default(), |_| site(0))?;
         }
         let dense = scene.segment("dense", ticks, |_, _| site(0))?;
@@ -305,7 +306,13 @@ fn compare_layouts(ticks: usize) -> Result<Vec<Value>> {
         assert_eq!(separate["frames"], players * ticks);
         assert_eq!(dense["frames"], 7 * players * ticks);
         let over_budget = dense["step_with_topology_ms"]["p95"].as_f64().unwrap() >= 50.0;
-        rows.push(json!({"players":players, "separate":separate, "dense":dense}));
+        let split_step = scene.segment("split", 1, |_, m| site(m.origin))?;
+        assert_eq!(merge_step["end_islands"], 1);
+        assert_eq!(split_step["end_islands"], 4);
+        assert_eq!(merge_step["new_baselines"], 6 * players);
+        assert_eq!(split_step["new_baselines"], 0);
+        assert_eq!(split_step["frames"], players);
+        rows.push(json!({"players":players, "separate":separate, "dense":dense, "merge_step":merge_step, "split_step":split_step}));
         if players >= 256 && over_budget {
             break;
         }

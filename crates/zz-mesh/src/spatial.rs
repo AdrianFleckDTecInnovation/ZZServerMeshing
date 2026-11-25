@@ -106,10 +106,51 @@ pub struct Directory {
     subs: BTreeMap<Id, BTreeMap<Recipient, Subscription>>,
     clock: u64,
     changes: BTreeMap<(Recipient, Id), InterestChange>,
+    pending: Option<BTreeMap<Id, bool>>,
+    reserved: usize,
     pub candidates: u64,
     limit: Option<usize>,
 }
 impl Directory {
+    /// A simulation tick or directory report describes one coherent set of positions.
+    /// Re-evaluate each affected object once after all its observers have moved.
+    pub(crate) fn batch(&mut self, edit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        debug_assert!(self.pending.is_none());
+        self.pending = Some(BTreeMap::new());
+        let result = edit(self);
+        self.flush_pending();
+        self.pending = None;
+        result
+    }
+    fn flush_pending(&mut self) {
+        self.reserved = 0;
+        let ids = std::mem::take(self.pending.as_mut().expect("active directory batch"));
+        for (id, force) in ids {
+            self.refresh_now(id, force);
+        }
+    }
+    // A flush can change retained membership. The caller recomputes its operation
+    // before applying it when a conservative reservation reaches the queue bound.
+    fn reserve(&mut self, cost: usize) -> Result<bool> {
+        let limit = self.limit.unwrap_or(1_000_000);
+        if self
+            .changes
+            .len()
+            .saturating_add(self.reserved)
+            .saturating_add(cost)
+            > limit
+        {
+            if self.reserved > 0 {
+                self.flush_pending();
+                return Ok(true);
+            }
+            return Err(Error::Busy("drain pending interest changes"));
+        }
+        if self.pending.is_some() {
+            self.reserved += cost;
+        }
+        Ok(false)
+    }
     pub fn for_incarnation(inc: u64) -> Result<Self> {
         if inc >= 1 << 24 {
             return Err(invalid("directory incarnation limit"));
@@ -175,13 +216,8 @@ impl Directory {
                 touched.insert(object);
             }
         }
-        if self
-            .changes
-            .len()
-            .saturating_add(touched.len().saturating_mul(2))
-            > self.limit.unwrap_or(1_000_000)
-        {
-            return Err(Error::Busy("drain pending interest changes"));
+        if self.reserve(touched.len().saturating_mul(2))? {
+            return self.register_area(a);
         }
         // A newly assigned recipient must first enter the required range itself.
         // Retention belongs to the old route and cannot confer a new subscription.
@@ -221,6 +257,9 @@ impl Directory {
             self.area_index.remove(id, a.retained());
         }
         for object in self.area_objects.remove(&id).unwrap_or_default() {
+            if let Some(areas) = self.object_areas.get_mut(&object) {
+                areas.remove(&id);
+            }
             self.refresh(object);
         }
     }
@@ -240,14 +279,12 @@ impl Directory {
             return Ok(());
         }
         let candidates = self.area_index.query(predicted);
-        if self
-            .changes
-            .len()
-            .saturating_add(candidates.len())
-            .saturating_add(self.object_areas.get(&p.id).map_or(0, BTreeSet::len))
-            > self.limit.unwrap_or(1_000_000)
-        {
-            return Err(Error::Busy("drain pending interest changes"));
+        if self.reserve(
+            candidates
+                .len()
+                .saturating_add(self.object_areas.get(&p.id).map_or(0, BTreeSet::len)),
+        )? {
+            return self.upsert(p);
         }
         self.index_object(previous, p);
         if previous.is_some() && identity_changed {
@@ -266,7 +303,11 @@ impl Directory {
                 }
             }
         }
-        self.refresh_candidates(p.id, candidates, identity_changed);
+        if let Some(pending) = &mut self.pending {
+            *pending.entry(p.id).or_default() |= identity_changed;
+        } else {
+            self.refresh_candidates(p.id, candidates, identity_changed);
+        }
         Ok(())
     }
     fn index_object(&mut self, previous: Option<Presence>, p: Presence) {
@@ -289,12 +330,25 @@ impl Directory {
         self.refresh(id);
     }
     fn refresh(&mut self, id: Id) {
+        if let Some(pending) = &mut self.pending {
+            pending.insert(id, true);
+        } else {
+            self.refresh_now(id, true);
+        }
+    }
+    fn refresh_now(&mut self, id: Id, force: bool) {
         let candidates = self
             .objects
             .get(&id)
             .map(|p| self.area_index.query(p.predicted()))
             .unwrap_or_default();
-        self.refresh_candidates(id, candidates, true);
+        self.refresh_candidates(id, candidates, force);
+    }
+    pub(crate) fn remove_owned(&mut self, worker: Worker, id: Id) {
+        if self.presence(id).is_some_and(|p| p.owner == worker) {
+            self.remove_area(id);
+            self.remove(id);
+        }
     }
     fn refresh_candidates(&mut self, id: Id, mut candidates: Vec<Id>, force: bool) {
         self.candidates += candidates.len() as u64;
@@ -539,5 +593,92 @@ impl Views {
     }
     pub fn fields(&self, id: Id) -> Option<&BTreeMap<u32, Field>> {
         self.active.get(&id).map(|v| &v.3)
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    fn pair(i: u32, x: i64) -> (Presence, Area) {
+        let owner = Worker {
+            slot: i % 4 + 1,
+            incarnation: 1,
+        };
+        let id = Id::numbered(i.into());
+        let bounds = Box3::new(Id::numbered(99), [x - 2, -2, -2], [x + 2, 2, 2]).unwrap();
+        (
+            Presence {
+                id,
+                owner,
+                principal: id,
+                bounds,
+                velocity: [0; 3],
+                ahead: 0,
+            },
+            Area {
+                id,
+                worker: owner,
+                to: Recipient::Worker(owner),
+                bounds,
+                velocity: [0; 3],
+                ahead: 0,
+                hysteresis: 1,
+                activity: true,
+                components: BTreeMap::from([(
+                    1,
+                    Demand {
+                        detail: Detail::Exact,
+                        period: 1,
+                    },
+                )]),
+            },
+        )
+    }
+    #[test]
+    fn dense_edits_reaggregate_each_object_once_and_keep_stable_epochs() {
+        let mut d = Directory::default();
+        for (together, x) in [(false, 0), (true, 0), (true, 10000), (false, 10000)] {
+            let before = d.candidates;
+            d.batch(|d| {
+                for i in 0..32 {
+                    let (p, a) = pair(i, x + if together { 0 } else { 100 * i64::from(i) });
+                    d.upsert(p)?;
+                    d.register_area(a)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert!(d.candidates - before <= 32 * 32);
+            assert_eq!(d.islands().len(), if together { 1 } else { 32 });
+            for i in 0..32 {
+                assert_eq!(
+                    d.subscribers(Id::numbered(i)).count(),
+                    if together { 3 } else { 0 }
+                );
+            }
+            let changes = d.changes();
+            if together && x != 0 {
+                assert!(changes.is_empty(), "common translation changed routes");
+            }
+        }
+    }
+    #[test]
+    fn partial_report_at_quota_keeps_accepted_memberships_and_can_retry() {
+        let mut d = Directory::bounded(3);
+        let (p, _) = pair(0, 0);
+        d.upsert(p).unwrap();
+        let result = d.batch(|d| {
+            for i in 1..4 {
+                d.register_area(pair(i, 0).1)?;
+            }
+            d.register_area(pair(7, 2).1)
+        });
+        assert!(matches!(result, Err(Error::Busy(_))));
+        assert!(!d.changes().is_empty());
+        for i in 1..4 {
+            d.register_area(pair(i, 0).1).unwrap();
+            d.changes();
+        }
+        assert_eq!(d.subscribers(p.id).count(), 3);
     }
 }
