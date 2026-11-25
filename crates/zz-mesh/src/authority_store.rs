@@ -45,6 +45,7 @@ pub enum Operation {
     Switch(Handoff),
     Abort(Handoff),
     Authorities(Vec<Id>),
+    GroupStates(Vec<Id>, Option<Worker>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +123,7 @@ impl Connection {
                 | Frozen(_)
                 | Phase(_)
                 | Authorities(_)
+                | GroupStates(..)
         );
         let connect = || {
             Client::connect_counted(
@@ -270,6 +272,12 @@ impl AuthorityService {
                 encode(&db.abort_handoff(t)?)
             }
             Authorities(ids) => encode(&db.authorities(&ids)?),
+            GroupStates(ids, worker) => {
+                if let Some(w) = worker {
+                    own(w)?;
+                }
+                encode(&db.group_states(&ids, worker)?)
+            }
         }
     }
 }

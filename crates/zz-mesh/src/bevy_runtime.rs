@@ -125,7 +125,7 @@ pub struct Schemas {
 pub struct MeshState {
     pub entities: BTreeMap<Id, Entity>,
     mapped: HashMap<Entity, Managed>,
-    pending: BTreeSet<Id>,
+    pending: Checkpoints,
     removed: BTreeMap<Id, Id>,
     pub diagnostics: std::collections::VecDeque<String>,
     versions: BTreeMap<Id, u64>,
@@ -137,10 +137,35 @@ pub struct MeshState {
     pub(crate) external_staging: BTreeSet<Id>,
     pins: BTreeMap<Id, Vec<BlobPin>>,
     saved: BTreeMap<Id, BTreeMap<u32, Field>>,
+    input_sessions: HashMap<Id, Id>,
+}
+const CHECKPOINT_PERIOD: usize = 20;
+#[derive(Default)]
+struct Checkpoints {
+    due: [BTreeSet<Id>; CHECKPOINT_PERIOD],
+    urgent: BTreeSet<Id>,
+}
+impl Checkpoints {
+    fn slot(group: Id) -> usize {
+        (u128::from_be_bytes(group.0) % CHECKPOINT_PERIOD as u128) as usize
+    }
+    fn changed(&mut self, m: &Managed) {
+        self.due[Self::slot(m.group)].insert(m.id);
+    }
+    fn remove(&mut self, id: &Id, group: Id) {
+        self.due[Self::slot(group)].remove(id);
+        self.urgent.remove(id);
+    }
+    fn take_due(&mut self, tick: u64) -> BTreeSet<Id> {
+        let mut ids = std::mem::take(&mut self.due[(tick % CHECKPOINT_PERIOD as u64) as usize]);
+        ids.append(&mut self.urgent);
+        ids
+    }
 }
 impl MeshState {
     pub(crate) fn forget_view(&mut self, id: Id) {
         self.entities.remove(&id);
+        self.input_sessions.remove(&id);
         self.saved.remove(&id);
         self.versions.remove(&id);
     }
@@ -166,30 +191,103 @@ impl MeshState {
 #[derive(Resource)]
 pub struct InputHandler(pub fn(&mut World, Id, &Input, u64) -> Result<InputAck>);
 pub fn apply_input(w: &mut World, actor: Id, input: &Input, now: u64) -> Result<InputAck> {
+    let node = w.resource::<Node>().clone();
+    let (group, owner) = input_binding(w, &node, actor, input, now)?;
+    node.0.check_authority(group, owner, true)?;
+    let handler = w
+        .get_resource::<InputHandler>()
+        .ok_or_else(|| invalid("game input handler missing"))?
+        .0;
+    handler(w, actor, input, now)
+}
+fn input_binding(
+    w: &mut World,
+    n: &Node,
+    actor: Id,
+    input: &Input,
+    now: u64,
+) -> Result<(Id, Authority)> {
     if input.sequence == 0
         || input.at_ms > now.saturating_add(100)
         || now.saturating_sub(input.at_ms) > 500
     {
         return Err(invalid("input outside server time window"));
     }
-    let n = w.resource::<Node>().clone();
-    n.0.session(input.session, actor)?;
     let e = *w
         .resource::<MeshState>()
         .entities
         .get(&actor)
         .ok_or_else(|| Error::Missing("input actor".into()))?;
     let managed = w.get::<Managed>(e).ok_or(Error::Denied)?;
-    let owner = n.0.owner(managed.group)?;
+    let group = managed.group;
+    let owner = w
+        .resource::<MeshState>()
+        .authority(group)
+        .ok_or(Error::Fenced)?;
     if owner.worker != n.1 || w.get::<Simulated>(e).is_none() {
         return Err(Error::Fenced);
     }
-    n.0.check_authority(managed.group, owner, true)?;
+    if w.resource::<MeshState>().input_sessions.get(&actor) != Some(&input.session) {
+        n.0.session(input.session, actor)?;
+        w.resource_mut::<MeshState>()
+            .input_sessions
+            .insert(actor, input.session);
+    }
+    Ok((group, owner))
+}
+/// Admit a bounded batch of replaceable movement samples at one authority snapshot.
+/// Results retain input order. Session, live incarnation, generation, freeze and
+/// time checks also apply when a previous sample for the actor was accepted.
+pub fn apply_inputs(
+    w: &mut World,
+    inputs: &[(Id, Input)],
+    now: u64,
+) -> Result<Vec<Result<InputAck>>> {
+    if inputs.len() > MAX_TARGETS {
+        return Err(Error::Busy("input batch"));
+    }
+    let node = w.resource::<Node>().clone();
     let handler = w
         .get_resource::<InputHandler>()
         .ok_or_else(|| invalid("game input handler missing"))?
         .0;
-    handler(w, actor, input, now)
+    let bindings: Vec<_> = inputs
+        .iter()
+        .map(|(id, i)| input_binding(w, &node, *id, i, now))
+        .collect();
+    let mut ids: Vec<_> = bindings
+        .iter()
+        .filter_map(|r| r.as_ref().ok().map(|v| v.0))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let grants = node.0.group_states(&ids, Some(node.1))?;
+    Ok(inputs
+        .iter()
+        .zip(bindings)
+        .map(|((actor, i), binding)| {
+            let (group, owner) = binding?;
+            let (observed, frozen) = grants.get(&group).ok_or(Error::Fenced)?;
+            if owner != *observed {
+                return Err(Error::Fenced);
+            }
+            if *frozen {
+                return Err(Error::Busy("unit frozen for cutover"));
+            }
+            let e = w
+                .resource::<MeshState>()
+                .entities
+                .get(actor)
+                .copied()
+                .ok_or(Error::Fenced)?;
+            if w.get::<Simulated>(e).is_none()
+                || w.get::<Managed>(e).is_none_or(|m| m.group != group)
+            {
+                return Err(Error::Fenced);
+            }
+            handler(w, *actor, i, now)
+        })
+        .collect())
 }
 /// Synchronize dirty canonical fields before an action uses positions or inventory
 /// as economic inputs. Ordinary movement remains on the checkpoint cadence.
@@ -218,10 +316,8 @@ pub fn reconcile(w: &World, session: Id, actor: Id, group: Id) -> Result<(u64, u
 }
 pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
     let n = w.resource::<Node>().clone();
-    let mut ids: Vec<_> = w
-        .resource::<MeshState>()
-        .pending
-        .iter()
+    let mut ids: Vec<_> = w.resource::<MeshState>().pending.due[Checkpoints::slot(group)]
+        .union(&w.resource::<MeshState>().pending.urgent)
         .copied()
         .filter(|id| {
             w.resource::<MeshState>()
@@ -253,7 +349,7 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
         for r in batch {
             state.versions.insert(r.id, base);
             state.saved.insert(r.id, r.fields.clone());
-            state.pending.remove(&r.id);
+            state.pending.remove(&r.id, group);
         }
         state.groups.insert(group, (owner, base));
     }
@@ -474,7 +570,7 @@ fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>
                 let mut st = w.resource_mut::<MeshState>();
                 st.entities.insert(m.id, entity);
                 st.mapped.insert(entity, m);
-                st.pending.insert(m.id);
+                st.pending.urgent.insert(m.id);
                 st.dirty.insert(m.id);
                 if let Some((a, rev)) = grant {
                     st.groups.entry(m.group).or_insert((a, rev));
@@ -578,7 +674,8 @@ pub(crate) fn demote(w: &mut World, group: Id) {
             .insert(Replica);
         let mut st = w.resource_mut::<MeshState>();
         st.mapped.remove(&e);
-        st.pending.remove(&id);
+        st.input_sessions.remove(&id);
+        st.pending.remove(&id, group);
         st.dirty.insert(id);
     }
     w.resource_mut::<MeshState>().groups.remove(&group);
@@ -601,8 +698,9 @@ pub(crate) fn apply_records(
                     continue;
                 }
                 if let Some(e) = state.entities.remove(&r.id) {
+                    state.input_sessions.remove(&r.id);
                     state.mapped.remove(&e);
-                    state.pending.remove(&r.id);
+                    state.pending.remove(&r.id, r.group);
                     state.saved.remove(&r.id);
                     state.versions.remove(&r.id);
                     state.dirty.insert(r.id);
@@ -667,12 +765,12 @@ fn track<T: Component>(
     mut s: ResMut<MeshState>,
 ) {
     for m in &changed {
-        s.pending.insert(m.id);
+        s.pending.changed(m);
         s.dirty.insert(m.id);
     }
     for e in removed.read() {
         if let Some(m) = s.mapped.get(&e).copied() {
-            s.pending.insert(m.id);
+            s.pending.changed(&m);
             s.dirty.insert(m.id);
         }
     }
@@ -681,8 +779,9 @@ fn track_despawns(mut removed: RemovedComponents<Managed>, mut st: ResMut<MeshSt
     for entity in removed.read() {
         if let Some(m) = st.mapped.remove(&entity) {
             if st.entities.get(&m.id) == Some(&entity) {
+                st.input_sessions.remove(&m.id);
                 st.entities.remove(&m.id);
-                st.pending.remove(&m.id);
+                st.pending.remove(&m.id, m.group);
                 st.removed.insert(m.id, m.group);
                 st.dirty.insert(m.id);
             }
@@ -825,21 +924,12 @@ pub fn commit_batch(
         .execute(w.resource::<Actions>(), actor, owner, now_ms, intents)
 }
 fn flush(w: &mut World) {
-    let state = w.resource::<MeshState>();
-    if state.tick % 20 != 1
-        && state.removed.is_empty()
-        && state
-            .pending
-            .iter()
-            .all(|id| state.versions.contains_key(id))
-    {
-        return;
-    }
     let Some(Node(db, _)) = w.get_resource::<Node>().cloned() else {
         return;
     };
     let mut batches: BTreeMap<Id, Vec<Record>> = BTreeMap::new();
-    let changed = std::mem::take(&mut w.resource_mut::<MeshState>().pending);
+    let tick = w.resource::<MeshState>().tick;
+    let changed = w.resource_mut::<MeshState>().pending.take_due(tick);
     for id in changed {
         let Some(&e) = w.resource::<MeshState>().entities.get(&id) else {
             continue;
@@ -857,7 +947,7 @@ fn flush(w: &mut World) {
             Err(err) => {
                 let mut st = w.resource_mut::<MeshState>();
                 st.report(err.to_string());
-                st.pending.insert(id);
+                st.pending.urgent.insert(id);
             }
         }
     }
@@ -900,7 +990,7 @@ fn flush(w: &mut World) {
                         if r.deleted {
                             st.removed.insert(r.id, g);
                         } else {
-                            st.pending.insert(r.id);
+                            st.pending.urgent.insert(r.id);
                         }
                     }
                 }
@@ -974,7 +1064,7 @@ impl Prepared {
             let mut st = w.resource_mut::<MeshState>();
             st.mapped.remove(&e);
             st.forget_view(m.id);
-            st.pending.remove(&m.id);
+            st.pending.remove(&m.id, m.group);
             w.despawn(e);
         }
         for (id, member) in self.entities {

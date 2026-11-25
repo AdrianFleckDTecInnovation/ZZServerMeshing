@@ -7,6 +7,7 @@ mod replication;
 mod shadow;
 mod simulation;
 mod snapshot;
+mod snapshot_index;
 mod transfers;
 
 pub use coordinator::process_coord_events;

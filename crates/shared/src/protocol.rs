@@ -103,6 +103,12 @@ pub enum PeerMessage {
         total_chunks: u16,
         entities: Vec<EntityState>,
     },
+    Interest {
+        server_id: ServerId,
+        session_id: u64,
+        tick: u64,
+        cells: Box<crate::interest::InterestMask>,
+    },
 }
 
 // ── Sim-Server → Coordinator (JSON over WebSocket) ──
@@ -1157,6 +1163,12 @@ mod tests {
                 total_chunks: 1,
                 entities: vec![entity],
             },
+            PeerMessage::Interest {
+                server_id: ServerId(1),
+                session_id: 11,
+                tick: 3,
+                cells: Box::default(),
+            },
         ];
 
         // Serialize all and verify first bytes (discriminant) are unique
@@ -1172,16 +1184,26 @@ mod tests {
                 msg
             );
         }
-        assert_eq!(discriminants.len(), 6);
+        assert_eq!(discriminants.len(), 7);
     }
 
     // -- WI-131: PROTOCOL_VERSION bump + session_id field on every PeerMessage variant --
 
     #[test]
-    fn peer_message_wire_version_is_2() {
-        // Design 013 (peer-restart-recovery) bumps the wire protocol version to 2
-        // because every PeerMessage variant grew a `session_id: u64` field.
-        assert_eq!(crate::PROTOCOL_VERSION, 2);
+    fn peer_wire_version_carries_discovery_in_one_datagram() {
+        let msg = PeerMessage::Interest {
+            server_id: ServerId(2),
+            session_id: 42,
+            tick: 1,
+            cells: Box::default(),
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        assert_eq!(crate::PROTOCOL_VERSION, 3);
+        assert!(bytes.len() + 2 < 1200);
+        assert!(matches!(
+            bincode::deserialize(&bytes).unwrap(),
+            PeerMessage::Interest { session_id: 42, .. }
+        ));
     }
 
     #[test]

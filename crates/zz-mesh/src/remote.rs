@@ -287,6 +287,33 @@ fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Snapshot> 
     }
     Ok(snapshot)
 }
+fn flush_inputs(
+    w: &mut World,
+    samples: &mut Vec<(Id, Input)>,
+    replies: &mut Vec<SyncSender<Result<Response>>>,
+) {
+    if samples.is_empty() {
+        return;
+    }
+    let batch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| invalid("system clock before Unix epoch"))
+        .and_then(|t| apply_inputs(w, samples, t.as_millis() as u64));
+    match batch {
+        Ok(results) => {
+            for (reply, result) in replies.drain(..).zip(results) {
+                let _ = reply.send(result.map(Response::Input));
+            }
+        }
+        Err(e) => {
+            let failure = crate::authority_store::Failure::from(e);
+            for reply in replies.drain(..) {
+                let _ = reply.send(Err(failure.clone().into()));
+            }
+        }
+    }
+    samples.clear();
+}
 impl WorkerLoop {
     pub fn record_tick(&mut self, elapsed: Duration) {
         self.tick_us = (self.tick_us * 7 + elapsed.as_micros() as u64) / 8;
@@ -323,6 +350,8 @@ impl WorkerLoop {
             let Ok(job) = self.rx.try_recv() else { break };
             let session = match &job.1 {
                 Request::Actions(a) => a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0)),
+                Request::Input(i) => i.session,
+                Request::Sync { session, .. } => *session,
                 _ => Id::numbered(0),
             };
             let queue = self.sessions.entry(session).or_default();
@@ -336,6 +365,8 @@ impl WorkerLoop {
             queue.push_back(job);
             self.queued += 1;
         }
+        let mut samples = Vec::new();
+        let mut replies = Vec::new();
         for _ in 0..max {
             if start.elapsed() >= time {
                 break;
@@ -351,6 +382,16 @@ impl WorkerLoop {
                 self.turns.push_back(session)
             }
             self.queued -= 1;
+            if let Request::Input(input) = req {
+                if let Role::Player(actor) = role {
+                    samples.push((actor, input));
+                    replies.push(reply);
+                } else {
+                    let _ = reply.send(Err(Error::Denied));
+                }
+                continue;
+            }
+            flush_inputs(w, &mut samples, &mut replies);
             let result = match req {
                 Request::Load { group, required } => {
                     let cache = w.resource::<BlobCache>();
@@ -421,14 +462,7 @@ impl WorkerLoop {
                     .ok_or_else(|| invalid("peer transport disabled"))
                     .and_then(|p| p.receive(w, role, updates)),
                 Request::Control(t, c) => self.control(w, role, t, c).map(Response::Control),
-                Request::Input(i) => match role {
-                    Role::Player(actor) => std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|_| invalid("server clock"))
-                        .and_then(|n| apply_input(w, actor, &i, n.as_millis() as u64))
-                        .map(Response::Input),
-                    _ => Err(Error::Denied),
-                },
+                Request::Input(_) => unreachable!("input already queued"),
                 Request::Actions(batch) => {
                     let group = batch.first().map(|i| i.group);
                     group
@@ -447,6 +481,7 @@ impl WorkerLoop {
             };
             let _ = reply.send(result);
         }
+        flush_inputs(w, &mut samples, &mut replies);
     }
     fn control(&mut self, w: &mut World, role: Role, t: Handoff, c: Command) -> Result<Answer> {
         allowed(&self.service, role, t)?;

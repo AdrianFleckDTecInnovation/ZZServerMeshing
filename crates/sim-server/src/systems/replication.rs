@@ -6,28 +6,28 @@ use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityState, EntityType};
 
+use crate::peer_interest::cell as player_cell;
+use shared::interest::InterestMask;
+fn near(a: Vec3, b: Vec3) -> bool {
+    let dx = a.x - b.x;
+    let dz = a.z - b.z;
+    dx * dx + dz * dz <= PEER_AOI_RADIUS_SQ
+}
+
 /// Build the outbound replication plan for the tick.
 ///
 /// Compute the shadow bounds once, then classify the authoritative entities for each peer.
 /// - **Hot tier**: the peer has at least one Player shadow AND the entity is
 ///   within `PEER_AOI_RADIUS` of any of them. Every tick (20Hz).
-/// - **Cold tier**: the entity's phase (UUID `% 4`) matches `tick % 4` AND
-///   the peer has a valid `PeerBounds` AND the entity lies within those
-///   bounds. 5Hz via phase spreading.
-/// - **Bootstrap tier**: the peer is in `peer_addrs` but we have no shadows
-///   from it AT ALL. Phase-matched entities are sent so a peer that just
-///   came online or lost all its shadows can recover. 5Hz via phase
-///   spreading.
-///
-/// The hot/cold and bootstrap paths are mutually exclusive per-peer: a peer
-/// either has shadows (hot/cold) or has none (bootstrap). A peer that has
-/// shadows but no valid `PeerBounds` (degenerate: collapsed cluster) gets
-/// nothing from the cold path — that matches the pre-refactor behavior where
-/// the main loop `continue`d on missing bounds.
+/// - **Cold tier**: stagger updates at 5 Hz for cells covered by a peer's
+///   advertised interest. This also seeds an area outside its existing shadows.
+/// - **Bootstrap**: until a valid hint arrives, use known shadow bounds or
+///   send phase-matched entities to a new peer with no shadows.
 pub fn prepare_replication(
     tick: Res<TickCounter>,
     config: Res<ServerConfig>,
     peer_addrs: Res<PeerAddresses>,
+    mut incoming: ResMut<InboundQueue>,
     mut outbound: ResMut<OutboundReplication>,
     auth_query: Query<
         (
@@ -52,6 +52,9 @@ pub fn prepare_replication(
     outbound.cold_count = 0;
     outbound.per_peer.clear();
     outbound.full_snapshot = None;
+    outbound
+        .discovery
+        .refresh(tick.0, &peer_addrs, &mut incoming.peer_interests, &entities);
 
     let no_peers = peer_addrs.0.is_empty();
 
@@ -116,26 +119,56 @@ pub fn prepare_replication(
 
     // Resolve each peer's bounds, player positions and output once. Entity order per
     // peer is the query order, including the phase-spread bootstrap for unknown peers.
+    let bits: Vec<_> = entities
+        .iter()
+        .map(|e| {
+            let (x, z) = player_cell(e.position);
+            InterestMask::locations(x, z)
+        })
+        .collect();
     for &peer in peer_addrs.0.keys() {
+        let advertised = outbound.discovery.remote(peer);
         let bounds = peer_bounds.get(&peer);
         let players = peer_player_positions
             .get(&peer)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let grid = (players.len() >= 32).then(|| {
+            let mut grid = std::collections::HashMap::<_, Vec<Vec3>>::new();
+            for &p in players {
+                let group = grid.entry(player_cell(p)).or_default();
+                if group.last() != Some(&p) {
+                    group.push(p);
+                }
+            }
+            grid
+        });
         let mut selected = Vec::new();
         let mut hot = 0;
-        for entity in &entities {
-            let is_hot = players.iter().any(|p| {
-                let dx = entity.position.x - p.x;
-                let dz = entity.position.z - p.z;
-                dx * dx + dz * dz <= PEER_AOI_RADIUS_SQ
+        for (entity, &cell_bits) in entities.iter().zip(&bits) {
+            let in_bounds = bounds.is_some_and(|b| b.contains(entity.position));
+            let wanted = advertised.map_or(bounds.is_none() || in_bounds, |ad| {
+                ad.may_contain(cell_bits)
             });
+            if !wanted && !in_bounds {
+                continue;
+            }
+            let p = entity.position;
+            let is_hot = if let Some(grid) = &grid {
+                let (x, z) = player_cell(p);
+                (x.saturating_sub(1)..=x.saturating_add(1)).any(|i| {
+                    (z.saturating_sub(1)..=z.saturating_add(1)).any(|j| {
+                        grid.get(&(i, j))
+                            .is_some_and(|bucket| bucket.iter().any(|&q| near(p, q)))
+                    })
+                })
+            } else {
+                players.iter().any(|&q| near(p, q))
+            };
             if is_hot {
                 hot += 1;
                 selected.push(entity.clone());
-            } else if (entity.id.0.as_u128() % 4) as u64 == current_phase
-                && bounds.is_none_or(|b| b.contains(entity.position))
-            {
+            } else if wanted && (entity.id.0.as_u128() % 4) as u64 == current_phase {
                 selected.push(entity.clone());
             }
         }
@@ -206,6 +239,39 @@ mod tests {
         let eid = state.id;
         let entity = spawn_from_entity_state_direct(world, &state, false, Some((0, 0)));
         (entity, eid)
+    }
+
+    #[test]
+    fn advertised_new_island_bootstraps_beyond_existing_peer_shadows() {
+        let mut world = setup_world(1);
+        let addr = "127.0.0.1:17002".parse().unwrap();
+        world.resource_mut::<PeerAddresses>().0.insert(2, addr);
+        spawn_shadow_player(&mut world, Vec3::ZERO, 2);
+        let far = Vec3::new(90_000., 0., -69_100.);
+        let (_, id) = spawn_auth_npc_in_phase(&mut world, far, 1, 1, 1002);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_replication);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        assert!(world.resource::<OutboundReplication>().per_peer[&2].is_empty());
+        let (x, z) = player_cell(far);
+        let mut cells = Box::new(InterestMask::default());
+        cells.observe(x, z);
+        world.resource_mut::<InboundQueue>().peer_interests.insert(
+            2,
+            crate::peer_interest::Advert {
+                source: addr,
+                session: 7,
+                tick: 50,
+                cells,
+            },
+        );
+        world.resource_mut::<TickCounter>().0 = 5;
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<OutboundReplication>().per_peer[&2][0].id,
+            id
+        );
     }
 
     fn spawn_auth_npc_in_phase(

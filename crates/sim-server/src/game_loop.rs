@@ -303,7 +303,33 @@ pub async fn run_game_loop_ecs(
     // per-peer maps don't grow unbounded over the server's lifetime.
     active_peers: Arc<std::sync::RwLock<std::collections::HashSet<u16>>>,
 ) {
-    let mut worker = DemoWorker::with_peers(server_id, session_id, initial_npcs, cold_start, active_peers);
+    let mut worker = DemoWorker::with_peers(
+        server_id,
+        session_id,
+        initial_npcs,
+        cold_start,
+        active_peers,
+    );
+    if let Ok(value) = std::env::var("MESH_IDLE_SNAPSHOT_TICKS") {
+        worker
+            .world
+            .resource_mut::<ClientRegistry>()
+            .idle_snapshot_ticks = value
+            .parse::<u8>()
+            .ok()
+            .filter(|v| (1..=20).contains(v))
+            .expect("MESH_IDLE_SNAPSHOT_TICKS must be 1..20");
+    }
+    if let Ok(value) = std::env::var("MESH_SNAPSHOT_TICKS") {
+        worker
+            .world
+            .resource_mut::<ClientRegistry>()
+            .snapshot_every_ticks = value
+            .parse::<u8>()
+            .ok()
+            .filter(|v| (1..=20).contains(v))
+            .expect("MESH_SNAPSHOT_TICKS must be 1..20");
+    }
 
     // Wire the local session id into the metrics collector so /metrics can
     // expose it (WI-136). We do this once, right after resource insertion —
@@ -372,7 +398,9 @@ pub async fn run_game_loop_ecs(
 
         // -- Phase 2: Increment tick and run all ECS systems --
         let t1 = Instant::now();
+        let cpu_before = crate::cpu::thread_ns();
         worker.step();
+        let schedule_cpu = crate::cpu::thread_ns().saturating_sub(cpu_before);
         let world = &mut worker.world;
         let sim_dur = t1.elapsed();
 
@@ -538,6 +566,33 @@ pub async fn run_game_loop_ecs(
         let server_id_u16 = world.resource::<ServerConfig>().server_id;
         let session_id_u64 = world.resource::<SessionId>().0;
         let mut udp_bytes_out = 0;
+        if let Some(cells) = world
+            .resource::<OutboundReplication>()
+            .discovery
+            .advertisement()
+        {
+            let msg = PeerMessage::Interest {
+                server_id: server_id_u16,
+                session_id: session_id_u64,
+                tick: repl_tick,
+                cells: Box::new(cells.clone()),
+            };
+            if let Some(data) = serialize_versioned(&msg) {
+                let batch = world
+                    .resource::<PeerAddresses>()
+                    .0
+                    .values()
+                    .map(|&addr| (addr, data.clone()))
+                    .collect();
+                try_enqueue(
+                    &udp_repl_tx,
+                    UdpOutbound::Batch(batch),
+                    &mut udp_repl_drops,
+                    &mut udp_repl_closed,
+                    &mut udp_bytes_out,
+                );
+            }
+        }
 
         if let Some(entities) = &repl_full {
             // Full snapshot fallback: broadcast to all peers when filtering
@@ -644,6 +699,11 @@ pub async fn run_game_loop_ecs(
             m.udp_repl_drops = udp_repl_drops;
             m.udp_ctrl_drops = udp_ctrl_drops;
             m.udp_bytes_out = udp_bytes_out;
+            m.account_execution(
+                schedule_cpu,
+                udp_bytes_out,
+                world.resource::<ClientRegistry>().snapshot_queue_full,
+            );
             // Per-peer inbound health from receiver (WI-105)
             {
                 let active_peers: std::collections::HashSet<u16> = world

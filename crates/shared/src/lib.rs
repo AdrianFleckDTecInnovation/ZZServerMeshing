@@ -1,4 +1,5 @@
 pub mod entity;
+pub mod interest;
 pub mod protocol;
 pub mod spatial;
 pub mod tick;
@@ -10,7 +11,8 @@ pub mod tls;
 ///
 /// v2 (2026-04-17): PeerMessage variants gained a `session_id: u64` field to
 /// enable peer-restart detection (design 013).
-pub const PROTOCOL_VERSION: u16 = 2;
+/// v3 adds bounded peer interest advertisements for newly occupied regions.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// The native development launcher restricts its WS, HTTP and UDP listeners to
 /// loopback. Standalone board and cloud launchers retain their network interfaces.

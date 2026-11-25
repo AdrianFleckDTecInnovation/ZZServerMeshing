@@ -17,6 +17,10 @@ struct Args {
     #[arg(long, default_value_t = 7878)]
     port: u16,
 
+    /// JSON array of server-selected [x,y,z] locations for newly joined players.
+    #[arg(long)]
+    spawn_points: Option<PathBuf>,
+
     /// UDP port for peer server communication
     #[arg(long, default_value_t = 9101)]
     udp_port: u16,
@@ -77,6 +81,13 @@ struct Args {
 async fn main() {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    let spawn_points = args
+        .spawn_points
+        .as_deref()
+        .map(network::SpawnPoints::load)
+        .transpose()
+        .expect("invalid spawn points file")
+        .unwrap_or_default();
 
     let server_id = ServerId(args.server_id);
     let metrics_port = args.metrics_port.unwrap_or(8100 + args.server_id);
@@ -191,11 +202,12 @@ async fn main() {
     ));
 
     // Start WebSocket server for clients
-    let ws_handle = tokio::spawn(network::run_websocket_server(
+    let ws_handle = tokio::spawn(network::run_websocket_server_at(
         args.port,
         Arc::clone(&shared_inbound),
         Arc::clone(&auth_players),
         tls_acceptor,
+        spawn_points,
     ));
 
     // Start UDP receiver (incoming peer entity states)

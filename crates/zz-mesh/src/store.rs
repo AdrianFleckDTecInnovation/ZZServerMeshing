@@ -15,10 +15,15 @@ pub struct Store(Backend);
 
 #[derive(Clone)]
 enum Backend {
-    Local(Arc<Mutex<Connection>>),
+    Local(Arc<LocalStore>),
     Network(Arc<Remote>),
 }
 
+mod checkpoint_writer;
+struct LocalStore {
+    connection: Mutex<Connection>,
+    writer: Option<checkpoint_writer::Writer>,
+}
 const STORE_FORMAT: i64 = 1;
 
 fn has_current_format(c: &Connection) -> Result<bool> {
@@ -177,7 +182,15 @@ impl Store {
         }
         c.execute_batch("PRAGMA journal_mode=WAL;")?;
         c.execute_batch("CREATE TABLE IF NOT EXISTS draining_slots(slot INTEGER PRIMARY KEY)")?;
-        Ok(Self(Backend::Local(Arc::new(Mutex::new(c)))))
+        let writer = c
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(checkpoint_writer::Writer::open)
+            .transpose()?;
+        Ok(Self(Backend::Local(Arc::new(LocalStore {
+            connection: Mutex::new(c),
+            writer,
+        }))))
     }
     /// Connect a trusted worker to the authoritative volume via mutually authenticated TLS.
     pub fn connect(
@@ -246,7 +259,9 @@ impl Store {
         let Backend::Local(conn) = &self.0 else {
             return Err(invalid("operation requires the local authority store"));
         };
-        conn.lock().map_err(|_| invalid("storage mutex poisoned"))
+        conn.connection
+            .lock()
+            .map_err(|_| invalid("storage mutex poisoned"))
     }
     pub(crate) fn check_authority(
         &self,
@@ -260,6 +275,53 @@ impl Store {
         fence(&*self.lock()?, group, owner, writing)
     }
     /// Resolve a bounded peer batch against one consistent authority snapshot.
+    pub(crate) fn group_states(
+        &self,
+        ids: &[Id],
+        worker: Option<Worker>,
+    ) -> Result<BTreeMap<Id, (Authority, bool)>> {
+        if ids.len() > MAX_TARGETS {
+            return Err(Error::Busy("authority group batch"));
+        }
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::GroupStates(ids.to_vec(), worker));
+        }
+        let mut c = self.lock()?;
+        let tx = c.transaction()?;
+        if let Some(w) = worker {
+            live(&tx, w)?;
+        }
+        let mut states = BTreeMap::new();
+        {
+            let mut q =
+                tx.prepare_cached("SELECT slot,inc,gen,frozen IS NOT NULL FROM units WHERE id=?")?;
+            for id in ids {
+                let row = q
+                    .query_row([id], |r| {
+                        Ok((
+                            Authority {
+                                worker: Worker {
+                                    slot: r.get(0)?,
+                                    incarnation: r.get(1)?,
+                                },
+                                generation: r.get(2)?,
+                            },
+                            r.get(3)?,
+                        ))
+                    })
+                    .optional()?;
+                if let Some(state) = row {
+                    states.insert(*id, state);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(states)
+    }
+    /// Resolve object identities and owners against one consistent authority snapshot.
     pub(crate) fn authorities(&self, ids: &[Id]) -> Result<BTreeMap<Id, (Id, Authority)>> {
         if ids.len() > MAX_TARGETS {
             return Err(Error::Busy("authority batch"));
@@ -589,37 +651,19 @@ impl Store {
         if let Some(c) = self.remote_connection() {
             return c.call(Op::Checkpoint(g, a, base, records, claims.clone()));
         }
-        self.write(|c| {
-            let rev = fence(c, g, a, true)?;
-            if rev != base {
-                return Err(Error::Fenced);
-            }
-            if records.len() > MAX_TARGETS {
-                return Err(Error::Busy("checkpoint targets"));
-            }
-            let mut seen = BTreeSet::new();
-            for r in records {
-                if r.group != g || !seen.insert(r.id) {
-                    return Err(invalid("wrong group or repeated object"));
-                }
-                if let Some(manifests) = claims.get(&r.id) {
-                    if manifests.len() > MAX_TARGETS {
-                        return Err(Error::Busy("member datasets"));
-                    }
-                    c.execute("DELETE FROM member_data WHERE object=?", [r.id])?;
-                    for m in manifests {
-                        c.execute(
-                            "INSERT INTO member_data VALUES(?,?,?,?)",
-                            params![r.id, g, encode(&m.key)?, encode(m)?],
-                        )?;
-                    }
-                }
-                put(c, r, rev + 1)?;
-            }
-            c.prepare_cached("UPDATE units SET rev=rev+1 WHERE id=?")?
-                .execute([g])?;
-            Ok(rev + 1)
-        })
+        let Backend::Local(local) = &self.0 else {
+            unreachable!()
+        };
+        if let Some(writer) = &local.writer {
+            return writer.submit(checkpoint_writer::Checkpoint {
+                group: g,
+                authority: a,
+                base,
+                records,
+                claims: claims.clone(),
+            });
+        }
+        self.write(|c| apply_checkpoint(c, g, a, base, records, claims))
     }
     /// Atomically reassign an existing member and optionally its private data dependencies.
     /// Each participant supplies its expected generation and observed group revision.
@@ -700,6 +744,19 @@ impl Store {
     pub fn session(&self, session: Id, actor: Id) -> Result<()> {
         if let Some(c) = self.remote_connection() {
             return c.call(Op::Session(session, actor));
+        }
+        // Session bindings are immutable. Only the first claim needs a transaction.
+        let bound: Option<Id> = self
+            .lock()?
+            .prepare_cached("SELECT actor FROM sessions WHERE id=?")?
+            .query_row([session], |r| r.get(0))
+            .optional()?;
+        if let Some(bound) = bound {
+            return if bound == actor {
+                Ok(())
+            } else {
+                Err(Error::Denied)
+            };
         }
         self.write(|c| {
             c.execute(
@@ -843,12 +900,57 @@ pub(crate) fn accepting(c: &Connection, w: Worker) -> Result<()> {
     }
     Ok(())
 }
+pub(super) fn apply_checkpoint(
+    c: &Connection,
+    g: Id,
+    a: Authority,
+    base: u64,
+    records: Vec<Record>,
+    claims: &BTreeMap<Id, Vec<Manifest>>,
+) -> Result<u64> {
+    let rev = fence(c, g, a, true)?;
+    if rev != base {
+        return Err(Error::Fenced);
+    }
+    if records.len() > MAX_TARGETS {
+        return Err(Error::Busy("checkpoint targets"));
+    }
+    let mut seen = BTreeSet::new();
+    for r in records {
+        if r.group != g || !seen.insert(r.id) {
+            return Err(invalid("wrong group or repeated object"));
+        }
+        if let Some(manifests) = claims.get(&r.id) {
+            if manifests.len() > MAX_TARGETS {
+                return Err(Error::Busy("member datasets"));
+            }
+            c.execute("DELETE FROM member_data WHERE object=?", [r.id])?;
+            for m in manifests {
+                c.execute(
+                    "INSERT INTO member_data VALUES(?,?,?,?)",
+                    params![r.id, g, encode(&m.key)?, encode(m)?],
+                )?;
+            }
+        }
+        put(c, r, rev + 1)?;
+    }
+    c.prepare_cached("UPDATE units SET rev=rev+1 WHERE id=?")?
+        .execute([g])?;
+    Ok(rev + 1)
+}
+
 fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
     if r.fields.len() > 128 || r.fields.values().any(|f| f.bytes.len() > MAX_FIELD) {
         return Err(Error::Busy("record fields"));
     }
-    match record(c, r.id)? {
-        Some(old) if old.deleted || old.group != r.group || old.revision != r.revision => {
+    let prior: Option<(Id, u64, bool)> = c
+        .prepare_cached("SELECT unit,rev,deleted FROM documents WHERE id=?")?
+        .query_row([r.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .optional()?;
+    match prior {
+        Some((group, revision, deleted))
+            if deleted || group != r.group || revision != r.revision =>
+        {
             return Err(Error::Fenced)
         }
         None => {

@@ -1,6 +1,84 @@
 use bevy::prelude::{Component, With};
 use infinite_stars::{data::*, prediction::*, *};
 use zz_mesh::*;
+
+#[test]
+fn concurrent_durable_checkpoints_isolate_rejections_and_are_visible_after_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checkpoints.sqlite");
+    let db = Store::open(&path).unwrap();
+    let w = db.start_worker(1).unwrap();
+    let groups: Vec<_> = (0..12)
+        .map(|i| {
+            let id = Id::numbered(100 + i);
+            (id, db.create_group(id, w).unwrap())
+        })
+        .collect();
+    let start = std::sync::Barrier::new(groups.len());
+    std::thread::scope(|scope| {
+        for (i, &(group, owner)) in groups.iter().enumerate() {
+            let (db, start) = (&db, &start);
+            scope.spawn(move || {
+                start.wait();
+                let valid = Record::new(group, group);
+                if i % 2 == 0 {
+                    assert!(db
+                        .checkpoint(group, owner, 0, vec![valid.clone(), valid])
+                        .is_err());
+                } else {
+                    assert_eq!(db.checkpoint(group, owner, 0, vec![valid]).unwrap(), 1);
+                    assert!(matches!(db.lookup(group).unwrap(), Lookup::Present(_)));
+                }
+            });
+        }
+    });
+    drop(db);
+    let restored = Store::open(path).unwrap();
+    for (i, (group, _)) in groups.into_iter().enumerate() {
+        let snapshot = restored.snapshot(group).unwrap();
+        assert_eq!(snapshot.revision, (i % 2) as u64);
+        assert_eq!(snapshot.records.len(), i % 2);
+    }
+}
+
+#[test]
+fn input_batch_checks_each_sample_and_fences_a_cached_session_after_restart() {
+    let (db, a, _, mut app, _) = setup();
+    let i = Input {
+        session: Id::new(),
+        sequence: 1,
+        at_ms: 1000,
+        axes: [100, 0, 0],
+    };
+    let stale = Input {
+        at_ms: 0,
+        ..i.clone()
+    };
+    let wrong = Input {
+        session: Id::new(),
+        ..i.clone()
+    };
+    db.session(wrong.session, Id::new()).unwrap();
+    let batch = [(ACTOR, i.clone()), (ACTOR, stale), (ACTOR, wrong)];
+    let replies = apply_inputs(app.world_mut(), &batch, 1000).unwrap();
+    assert!(matches!(
+        replies.as_slice(),
+        [
+            Ok(InputAck { sequence: 1, .. }),
+            Err(Error::Invalid(_)),
+            Err(Error::Denied)
+        ]
+    ));
+    db.start_worker(a.slot).unwrap();
+    assert!(matches!(
+        apply_inputs(app.world_mut(), &[(ACTOR, i.clone())], 1000),
+        Err(Error::Fenced)
+    ));
+    assert!(matches!(
+        apply_input(app.world_mut(), ACTOR, &i, 1000),
+        Err(Error::Fenced)
+    ));
+}
 #[test]
 fn first_boot_resumes_an_empty_group_and_never_reseeds_a_retired_player() {
     let db = Store::open(":memory:").unwrap();

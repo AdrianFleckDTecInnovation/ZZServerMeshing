@@ -7,6 +7,37 @@ use zz_mesh::{prepare_world, Error, Worker};
 #[derive(Component, Serialize, Deserialize)]
 struct Energy(u32);
 
+#[test]
+fn periodic_checkpoints_spread_groups_and_save_all_within_twenty_ticks() {
+    let db = Store::open(":memory:").unwrap();
+    let worker = db.start_worker(1).unwrap();
+    let mut app = game(&db, worker);
+    let mut objects = Vec::new();
+    for n in [4, 13] {
+        let id = Id::numbered(n);
+        let entity = app
+            .world_mut()
+            .spawn((Managed::new(id, id), Energy(1)))
+            .id();
+        objects.push((id, entity));
+    }
+    app.update();
+    for (_, e) in &objects {
+        app.world_mut().get_mut::<Energy>(*e).unwrap().0 = 2;
+    }
+    let version = |a: &App, id| a.world().resource::<zz_mesh::MeshState>().version(id);
+    let base = version(&app, objects[0].0);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(version(&app, objects[0].0) > base);
+    assert_eq!(version(&app, objects[1].0), base);
+    for _ in 0..17 {
+        app.update();
+    }
+    assert!(version(&app, objects[1].0) > base);
+}
+
 fn game(store: &Store, worker: Worker) -> App {
     let mut app = App::new();
     app.add_plugins(MeshPlugin::persistent(store.clone(), worker));

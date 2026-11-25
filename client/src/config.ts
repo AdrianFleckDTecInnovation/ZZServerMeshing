@@ -67,7 +67,7 @@ export const RENDERING = {
   /** AoI ring geometry segments */
   AOI_RING_SEGMENTS: 64,
   /** Ground plane size (should be WORLD_EXTENT * 2). MUST MATCH: crates/shared/src/spatial.rs WORLD_EXTENT */
-  GROUND_SIZE: 10000,
+  GROUND_SIZE: 2 * Number(import.meta.env?.VITE_MESH_WORLD_EXTENT ?? 5000),
   /** Grid subdivision count */
   GRID_DIVISIONS: 20,
   /** Y offset for player entities (stacking visibility) */

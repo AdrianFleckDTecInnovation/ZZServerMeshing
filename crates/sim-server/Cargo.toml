@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["full"] }
 # self-signed cert from --tls-cert). Pulled in via rustls-tls-webpki-roots for
 # platform-independent build; the actual client config we build ignores webpki
 # roots and trusts only the explicit cert file.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,3 +27,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
 rustls-pki-types = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

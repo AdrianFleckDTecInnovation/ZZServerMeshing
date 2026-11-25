@@ -8,6 +8,35 @@ fn w(n: u32) -> Worker {
 }
 
 #[test]
+fn cached_islands_follow_contact_activity_deletion_and_frame_changes() {
+    let mut d = Directory::default();
+    let frame = Id::numbered(910);
+    let bounds = |x| Box3::new(frame, [x, 0, 0], [x + 10, 10, 10]).unwrap();
+    let mut a = area(1, 1, bounds(-10));
+    let mut b = area(2, 1, bounds(1));
+    d.register_area(a.clone()).unwrap();
+    d.register_area(b.clone()).unwrap();
+    assert_eq!(d.island_groups().len(), 2);
+    b.bounds = bounds(0);
+    d.register_area(b.clone()).unwrap();
+    assert_eq!(d.island_groups().len(), 1);
+    b.bounds = bounds(1);
+    b.velocity = [-10, 0, 0];
+    b.ahead = 5;
+    d.register_area(b.clone()).unwrap();
+    assert_eq!(d.island_groups().len(), 2);
+    a.activity = false;
+    d.register_area(a.clone()).unwrap();
+    assert_eq!(d.island_groups(), &[vec![b.id]]);
+    a.activity = true;
+    a.bounds.frame = Id::numbered(999);
+    d.register_area(a.clone()).unwrap();
+    assert_eq!(d.island_groups().len(), 2);
+    d.remove_area(b.id);
+    assert_eq!(d.island_groups(), &[vec![a.id]]);
+}
+
+#[test]
 fn moving_faces_match_exhaustive_hysteresis_through_repeated_crossings() {
     let mut directory = Directory::default();
     let mut areas: Vec<_> = (0..12)

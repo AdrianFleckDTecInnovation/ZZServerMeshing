@@ -94,6 +94,7 @@ pub struct Percentiles {
 
 #[derive(Debug, Serialize)]
 pub struct MetricsSnapshot {
+    pub process_cpu_ns: u64,
     pub server_id: u16,
     /// Local sim-server session id (WI-136). Unique per sim-server process;
     /// changes across restarts so peers and operators can detect a restart.
@@ -141,6 +142,9 @@ pub struct PhaseMetrics {
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct TickWork {
     pub total_us: u64,
+    pub schedule_cpu_ns: u64,
+    pub udp_queued_bytes: u64,
+    pub snapshot_queue_full: u64,
     pub client_snapshot_us: u64,
 }
 
@@ -194,6 +198,16 @@ impl MetricsCollector {
         }
         self.ring.push_back(timings);
     }
+    pub(crate) fn account_execution(
+        &mut self,
+        schedule_cpu_ns: u64,
+        udp_bytes: u64,
+        snapshot_queue_full: u64,
+    ) {
+        self.work.snapshot_queue_full = snapshot_queue_full;
+        self.work.schedule_cpu_ns = self.work.schedule_cpu_ns.saturating_add(schedule_cpu_ns);
+        self.work.udp_queued_bytes = self.work.udp_queued_bytes.saturating_add(udp_bytes);
+    }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
         let tick_budget_ms = 50.0; // TICK_DURATION_MS
@@ -202,6 +216,7 @@ impl MetricsCollector {
         let tick_budget_pct = (total_p95 / tick_budget_ms) * 100.0;
 
         MetricsSnapshot {
+            process_cpu_ns: crate::cpu::process_ns(),
             server_id: self.server_id,
             session_id: self.session_id,
             tick: self.current_tick,

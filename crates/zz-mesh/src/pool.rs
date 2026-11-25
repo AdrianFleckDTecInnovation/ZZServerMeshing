@@ -22,6 +22,15 @@ pub struct SpatialProfile {
 pub struct SpatialRule(pub fn(&World, Entity) -> Option<SpatialProfile>);
 #[derive(Resource, Default)]
 pub struct GroupTimings(pub BTreeMap<Id, u64>);
+/// Completed portions of a local pool tick. A stage can finish once per worker.
+#[derive(Clone, Copy, Debug)]
+pub enum TickStage {
+    Simulation,
+    Spatial,
+    Routes,
+    Publish,
+    Placement,
+}
 #[derive(Clone, Copy, Debug, Resource)]
 pub struct BalancePolicy {
     pub every: u64,
@@ -135,6 +144,10 @@ impl Pool {
             .ok_or_else(|| Error::Missing("worker".into()))
     }
     pub fn step(&mut self) -> Result<()> {
+        self.step_observed(|_| {})
+    }
+    /// Run the normal tick, reporting coarse stage boundaries to an optional profiler.
+    pub fn step_observed(&mut self, mut finished: impl FnMut(TickStage)) -> Result<()> {
         self.tick += 1;
         let mut dirty = vec![];
         let spatial = self.directory.batch(|directory| {
@@ -144,6 +157,7 @@ impl Pool {
                 node.last_tick = start.elapsed();
                 let us = node.last_tick.as_micros() as u64;
                 node.smoothed_us = (7 * node.smoothed_us + us) / 8;
+                finished(TickStage::Simulation);
                 let mut changed =
                     std::mem::take(&mut node.app.world_mut().resource_mut::<MeshState>().dirty)
                         .into_iter();
@@ -172,9 +186,11 @@ impl Pool {
                         directory.remove_owned(worker, id);
                     }
                 }
+                finished(TickStage::Spatial);
             }
             Ok(())
         });
+        finished(TickStage::Spatial);
         let mut touched = BTreeSet::new();
         for c in self.directory.changes() {
             touched.insert(c.to);
@@ -226,6 +242,7 @@ impl Pool {
                 .changed(&self.directory, id, self.tick);
         }
         spatial?;
+        finished(TickStage::Routes);
         for (&worker, n) in &mut self.nodes {
             let w = n.app.world();
             let batches = n.publisher.flush(w, &self.directory, self.tick, |id| {
@@ -256,6 +273,7 @@ impl Pool {
                 }
             }
         }
+        finished(TickStage::Publish);
         if let Some(mut m) = self.balancing.take() {
             match self.poll(&mut m) {
                 Ok(Some(_)) => {
@@ -275,6 +293,7 @@ impl Pool {
         } else if self.policy.every > 0 && self.tick % self.policy.every == 0 {
             self.rebalance()?;
         }
+        finished(TickStage::Placement);
         Ok(())
     }
     pub fn rebalance(&mut self) -> Result<()> {
@@ -368,8 +387,11 @@ impl Pool {
         self.deliver_with_ack(msg, true)
     }
     pub fn deliver_with_ack(&mut self, msg: Delivery, send_ack: bool) -> Result<bool> {
-        let u = &msg.update;
         let owner = self.store.owner(msg.group)?;
+        self.apply_delivery(msg, send_ack, owner)
+    }
+    fn apply_delivery(&mut self, msg: Delivery, send_ack: bool, owner: Authority) -> Result<bool> {
+        let u = &msg.update;
         if owner.worker != msg.from || owner.generation != u.generation {
             return Ok(false);
         }
@@ -403,8 +425,23 @@ impl Pool {
     }
     pub fn deliver_all(&mut self) -> Result<usize> {
         let mut n = 0;
-        while let Some(m) = self.messages.pop_front() {
-            n += usize::from(self.deliver(m)?);
+        let mut groups = Vec::with_capacity(self.messages.len().min(MAX_TARGETS));
+        while !self.messages.is_empty() {
+            let count = self.messages.len().min(MAX_TARGETS);
+            groups.clear();
+            groups.extend(self.messages.iter().take(count).map(|m| m.group));
+            groups.sort_unstable();
+            groups.dedup();
+            let owners = self.store.group_states(&groups, None)?;
+            for _ in 0..count {
+                let group = self.messages.front().unwrap().group;
+                let owner = owners
+                    .get(&group)
+                    .ok_or_else(|| Error::Missing(format!("unit {group}")))?
+                    .0;
+                let m = self.messages.pop_front().unwrap();
+                n += usize::from(self.apply_delivery(m, true, owner)?);
+            }
         }
         Ok(n)
     }

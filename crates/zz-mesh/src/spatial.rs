@@ -2,6 +2,7 @@ use crate::octree::{Boundaries, Index};
 use crate::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::OnceLock;
 
 /// Inclusive integer millimetres in a named local reference frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +102,8 @@ pub struct Directory {
     object_index: Index,
     area_faces: Boundaries,
     object_faces: Boundaries,
+    activity_faces: Boundaries,
+    islands: OnceLock<Vec<Vec<Id>>>,
     area_objects: BTreeMap<Id, BTreeSet<Id>>,
     object_areas: BTreeMap<Id, BTreeSet<Id>>,
     subs: BTreeMap<Id, BTreeMap<Recipient, Subscription>>,
@@ -253,7 +256,12 @@ impl Directory {
         let to = area.to;
         let needed = area.needed();
         let retained = area.retained();
+        let physical = area.activity.then_some(area.bounds);
         let old = self.areas.insert(id, area);
+        self.update_activity(
+            old.as_ref().filter(|a| a.activity).map(|a| a.bounds),
+            physical,
+        );
         if old.as_ref().map(|a| a.to) != Some(to) {
             if let Some(previous) = &old {
                 self.remove_recipient_area(previous.to);
@@ -264,12 +272,20 @@ impl Directory {
         self.area_faces
             .replace(old.as_ref().map(Area::needed), Some(needed));
         self.area_faces.replace(old_retained, Some(retained));
-        if old_retained != Some(retained) {
-            if let Some(b) = old_retained {
-                self.area_index.remove(id, b);
-            }
-            self.area_index.insert(id, retained);
+        self.area_index.replace(id, old_retained, retained);
+    }
+    fn update_activity(&mut self, old: Option<Box3>, new: Option<Box3>) {
+        if old == new {
+            return;
         }
+        if self.islands.get().is_some()
+            && !old
+                .zip(new)
+                .is_some_and(|(a, b)| self.activity_faces.stable(a, b))
+        {
+            self.islands.take();
+        }
+        self.activity_faces.replace(old, new);
     }
     fn remove_recipient_area(&mut self, to: Recipient) {
         let count = self
@@ -283,6 +299,7 @@ impl Directory {
     }
     pub fn remove_area(&mut self, id: Id) {
         if let Some(a) = self.areas.remove(&id) {
+            self.update_activity(a.activity.then_some(a.bounds), None);
             self.remove_recipient_area(a.to);
             self.area_faces.replace(Some(a.needed()), None);
             self.area_faces.replace(Some(a.retained()), None);
@@ -349,10 +366,7 @@ impl Directory {
         let new = p.predicted();
         if old != Some(new) {
             self.object_faces.replace(old, Some(new));
-            if let Some(b) = old {
-                self.object_index.remove(p.id, b);
-            }
-            self.object_index.insert(p.id, new);
+            self.object_index.replace(p.id, old, new);
         }
         self.objects.insert(p.id, p);
     }
@@ -492,6 +506,13 @@ impl Directory {
     }
     /// Connected components of physical activity only. A shared worker is not an edge.
     pub fn islands(&self) -> Vec<Vec<Id>> {
+        self.island_groups().to_vec()
+    }
+    /// Borrow physical connected components until the next edit to the directory.
+    pub fn island_groups(&self) -> &[Vec<Id>] {
+        self.islands.get_or_init(|| self.build_islands())
+    }
+    fn build_islands(&self) -> Vec<Vec<Id>> {
         // A dense island can have quadratically many overlapping area pairs.
         // Only placement and diagnostics ask for its connected components. Visit
         // each discovered area once, removing it from the remaining spatial index.

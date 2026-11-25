@@ -98,6 +98,20 @@ impl Node {
             }
         }
     }
+    fn relocate(&mut self, id: Id, old_center: [i128; 3], new_center: [i128; 3], b: Box3) -> bool {
+        if !self.cube.fits(b) || !self.cube.contains_center(new_center) {
+            return false;
+        }
+        if let Some(entry) = self.entries.get_mut(&id) {
+            *entry = b;
+            return true;
+        }
+        let index = self.cube.octant(old_center);
+        index == self.cube.octant(new_center)
+            && self.children[index]
+                .as_mut()
+                .is_some_and(|c| c.relocate(id, old_center, new_center, b))
+    }
     fn empty(&self) -> bool {
         self.entries.is_empty() && self.children.iter().all(Option::is_none)
     }
@@ -120,6 +134,21 @@ impl Node {
 #[derive(Default)]
 pub(crate) struct Index(BTreeMap<Id, Node>);
 impl Index {
+    pub fn replace(&mut self, id: Id, old: Option<Box3>, new: Box3) {
+        if let Some(old) = old {
+            if old == new
+                || (old.frame == new.frame
+                    && self
+                        .0
+                        .get_mut(&old.frame)
+                        .is_some_and(|r| r.relocate(id, center(old), center(new), new)))
+            {
+                return;
+            }
+            self.remove(id, old);
+        }
+        self.insert(id, new);
+    }
     pub fn insert(&mut self, id: Id, b: Box3) {
         let p = center(b);
         let root = self
@@ -261,9 +290,7 @@ mod tests {
         let mut tree = Index::default();
         for turn in 0..3000 {
             let id = Id::numbered((random() % 120) as u128);
-            if let Some(b) = items.remove(&id) {
-                tree.remove(id, b);
-            }
+            let old = items.remove(&id);
             let frame = frames[(random() >> 63) as usize];
             let p: [i64; 3] = std::array::from_fn(|_| match random() % 7 {
                 0 => i64::MIN,
@@ -279,8 +306,10 @@ mod tests {
             )
             .unwrap();
             if turn % 7 != 0 {
-                tree.insert(id, b);
+                tree.replace(id, old, b);
                 items.insert(id, b);
+            } else if let Some(old) = old {
+                tree.remove(id, old);
             }
             for q in [
                 b,

@@ -37,10 +37,14 @@ pub fn cells_within_radius(center: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
 
 /// Clamp a position to the world bounds.
 pub fn clamp_to_world(pos: Vec3) -> Vec3 {
+    clamp_to_extent(pos, WORLD_EXTENT)
+}
+
+pub fn clamp_to_extent(pos: Vec3, half_extent: f32) -> Vec3 {
     Vec3::new(
-        pos.x.clamp(-WORLD_EXTENT, WORLD_EXTENT),
+        pos.x.clamp(-half_extent, half_extent),
         pos.y,
-        pos.z.clamp(-WORLD_EXTENT, WORLD_EXTENT),
+        pos.z.clamp(-half_extent, half_extent),
     )
 }
 

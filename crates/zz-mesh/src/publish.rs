@@ -20,13 +20,12 @@ struct Link {
     epoch: u64,
     serial: u64,
     acked: u64,
-    revision: u64,
     generation: u64,
-    last: BTreeMap<u32, Option<Field>>,
     sampled: BTreeMap<u32, Option<Field>>,
     due: BTreeMap<u32, u64>,
     dirty: BTreeSet<u32>,
-    pending: Option<Update>,
+    /// Revision of the latest unacknowledged sample. Retries send its full projection.
+    pending_revision: Option<u64>,
 }
 /// Each dirty object touches only its current recipients. Due times are kept per field.
 /// The transport queues one replaceable frame per edge, with an acknowledged base.
@@ -115,12 +114,8 @@ impl Publisher {
         if l.epoch != epoch {
             return;
         }
-        if l.pending.as_ref().is_some_and(|p| p.serial == serial) {
-            let p = l.pending.take().unwrap();
-            if p.base.is_none() {
-                l.last.clear();
-            }
-            l.last.extend(p.fields);
+        if l.pending_revision.is_some() && l.serial == serial {
+            l.pending_revision = None;
             l.acked = serial;
         }
     }
@@ -152,13 +147,16 @@ impl Publisher {
             let mut next = None;
             let revision = w.resource::<MeshState>().version(id);
             if l.generation != generation {
-                l.last.clear();
                 l.acked = 0;
                 l.sampled.clear();
                 l.due.clear();
                 l.dirty.extend(sub.components.keys());
-                l.pending = None;
+                l.pending_revision = None;
             }
+            // After ACK, sampled is precisely the acknowledged base. With an
+            // outstanding serial the receiver may have lost its delta: send full.
+            let full = l.acked == 0 || l.pending_revision.is_some();
+            let mut fields = BTreeMap::new();
             let mut sampled = false;
             for (&schema, dem) in &sub.components {
                 if !l.dirty.contains(&schema) {
@@ -179,21 +177,25 @@ impl Publisher {
                 };
                 let val = project_component(w, id, schema, view)?;
                 self.encodes += 1;
-                sampled |= l.sampled.get(&schema) != Some(&val);
-                l.sampled.insert(schema, val);
+                if l.sampled.get(&schema) != Some(&val) {
+                    sampled = true;
+                    if !full {
+                        fields.insert(schema, val.clone());
+                    }
+                    l.sampled.insert(schema, val);
+                }
                 l.dirty.remove(&schema);
                 l.due.insert(schema, tick + u64::from(dem.period.max(1)));
             }
-            let full = l.acked == 0 || l.pending.is_some();
-            let fields: BTreeMap<_, _> = l
-                .sampled
-                .iter()
-                .filter(|(k, v)| full || l.last.get(k) != Some(v))
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-            if sampled && !fields.is_empty() {
+            if sampled {
                 l.serial += 1;
-                let u = Update {
+                l.pending_revision = Some(revision);
+            }
+            if let Some(revision) = l.pending_revision {
+                if full {
+                    fields = l.sampled.clone();
+                }
+                batches.entry(to).or_default().push(Update {
                     object: id,
                     epoch: l.epoch,
                     generation,
@@ -202,23 +204,10 @@ impl Publisher {
                     base: if full { None } else { Some(l.acked) },
                     fields,
                     deleted: false,
-                };
-                l.pending = Some(u);
-            }
-            if !sampled {
-                if let Some(u) = &mut l.pending {
-                    if u.base.is_some() {
-                        u.base = None;
-                        u.fields = l.sampled.clone();
-                    }
-                }
-            }
-            if let Some(u) = &l.pending {
-                batches.entry(to).or_default().push(u.clone());
+                });
             }
             l.generation = generation;
-            l.revision = revision;
-            if l.pending.is_some() {
+            if l.pending_revision.is_some() {
                 let delay = tick + 4;
                 next = Some(next.map_or(delay, |v| v.min(delay)));
             }
