@@ -133,11 +133,11 @@ impl Publisher {
     ) -> Result<BTreeMap<Recipient, Vec<Update>>> {
         let mut ready = BTreeSet::new();
         while self.work.first_key_value().is_some_and(|(t, _)| *t <= tick) {
-            let (_, set) = self.work.pop_first().unwrap();
-            for k in set {
-                self.scheduled.remove(&k);
-                ready.insert(k);
+            let (_, mut set) = self.work.pop_first().unwrap();
+            for k in &set {
+                self.scheduled.remove(k);
             }
+            ready.append(&mut set);
         }
         let mut batches: BTreeMap<Recipient, Vec<Update>> = BTreeMap::new();
         for (to, id) in ready {

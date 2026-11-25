@@ -534,7 +534,7 @@ fn pull(w: &mut World) {
             if let Some((old, base)) = base {
                 if old == a {
                     if let Ok((rev, records)) = db.since(g, base) {
-                        apply_records(w, &records, true)?;
+                        apply_records(w, records, true)?;
                         w.resource_mut::<MeshState>().groups.insert(g, (a, rev));
                         return Ok(());
                     }
@@ -570,9 +570,13 @@ pub(crate) fn demote(w: &mut World, group: Id) {
     w.resource_mut::<MeshState>().groups.remove(&group);
     w.resource_mut::<MeshState>().pins.remove(&group);
 }
-pub(crate) fn apply_records(w: &mut World, records: &[Record], active: bool) -> Result<()> {
+pub(crate) fn apply_records(
+    w: &mut World,
+    records: impl AsRef<[Record]> + IntoIterator<Item = Record>,
+    active: bool,
+) -> Result<()> {
     w.resource_scope(|w, mut state: Mut<MeshState>| -> Result<()> {
-        for r in records {
+        for r in records.as_ref() {
             if r.deleted {
                 if state
                     .entities
@@ -603,7 +607,7 @@ pub(crate) fn apply_records(w: &mut World, records: &[Record], active: bool) -> 
             }
         }
         w.resource_scope(|w, reg: Mut<Schemas>| -> Result<()> {
-            for r in records.iter().filter(|r| !r.deleted) {
+            for r in records.into_iter().filter(|r| !r.deleted) {
                 let e = state.entities[&r.id];
                 if w.get::<Managed>(e).is_some_and(|m| m.group != r.group) {
                     w.entity_mut(e).insert(Managed::new(r.id, r.group));
@@ -632,7 +636,7 @@ pub(crate) fn apply_records(w: &mut World, records: &[Record], active: bool) -> 
                 for rebuild in &reg.rebuild {
                     rebuild(w, e)?;
                 }
-                state.saved.insert(r.id, r.fields.clone());
+                state.saved.insert(r.id, r.fields);
                 state.versions.insert(r.id, r.revision);
                 if active {
                     state.dirty.insert(r.id);

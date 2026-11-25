@@ -372,14 +372,18 @@ impl Pool {
                 apply_view(n.app.world_mut(), &mut n.views, msg.group, u)?
             }
         };
-        let duplicate = match msg.to {
-            Recipient::Client(id) => self.clients.get(&id).is_some_and(|v| v.already_applied(u)),
-            Recipient::Worker(w) => self
-                .nodes
-                .get(&w)
-                .is_some_and(|n| n.views.already_applied(u)),
-        };
-        if send_ack && (ok || duplicate) {
+        if send_ack
+            && (ok
+                || match msg.to {
+                    Recipient::Client(id) => {
+                        self.clients.get(&id).is_some_and(|v| v.already_applied(u))
+                    }
+                    Recipient::Worker(w) => self
+                        .nodes
+                        .get(&w)
+                        .is_some_and(|n| n.views.already_applied(u)),
+                })
+        {
             if let Some(n) = self.nodes.get_mut(&msg.from) {
                 n.publisher.ack(msg.to, u.object, u.epoch, u.serial);
             }
@@ -638,7 +642,7 @@ pub(crate) fn apply_view(w: &mut World, views: &mut Views, group: Id, u: &Update
             fields: fields.clone(),
             deleted: false,
         };
-        let result = crate::bevy_runtime::apply_records(w, &[r], false);
+        let result = crate::bevy_runtime::apply_records(w, [r], false);
         if result.is_err() {
             unload(w, u.object);
         }

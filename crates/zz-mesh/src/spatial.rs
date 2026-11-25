@@ -1,5 +1,5 @@
 use crate::*;
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{primitives::CachedEnvelope, RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -22,6 +22,9 @@ impl Box3 {
         self.frame == b.frame && (0..3).all(|i| self.lo[i] <= b.hi[i] && b.lo[i] <= self.hi[i])
     }
     pub fn sweep(self, velocity: [i64; 3], ticks: u16, padding: u32) -> Self {
+        if padding == 0 && (ticks == 0 || velocity == [0; 3]) {
+            return self;
+        }
         let mut b = self;
         for (i, v) in velocity.iter().enumerate() {
             let d = v.saturating_mul(i64::from(ticks));
@@ -50,14 +53,17 @@ impl RTreeObject for Entry {
     }
 }
 #[derive(Default)]
-struct Index(BTreeMap<Id, RTree<Entry>>);
+struct Index(BTreeMap<Id, RTree<CachedEnvelope<Entry>>>);
 impl Index {
     fn insert(&mut self, id: Id, b: Box3) {
-        self.0.entry(b.frame).or_default().insert(Entry(id, b));
+        self.0
+            .entry(b.frame)
+            .or_default()
+            .insert(CachedEnvelope::new(Entry(id, b)));
     }
     fn remove(&mut self, id: Id, b: Box3) {
         if let Some(tree) = self.0.get_mut(&b.frame) {
-            tree.remove(&Entry(id, b));
+            tree.remove(&CachedEnvelope::new(Entry(id, b)));
             if tree.size() == 0 {
                 self.0.remove(&b.frame);
             }
@@ -496,16 +502,19 @@ impl Views {
             self.active.remove(&u.object);
             return Ok(true);
         }
-        let mut candidate = if u.base.is_none() {
-            BTreeMap::new()
-        } else {
-            fields.clone()
-        };
+        let mut candidate = BTreeMap::new();
+        if u.base.is_some() {
+            // Keep only untouched fields from the acknowledged base. Updates replace
+            // their old bytes, and omissions in a full frame clear the previous view.
+            for (&id, value) in fields.iter() {
+                if !u.fields.contains_key(&id) {
+                    candidate.insert(id, value.clone());
+                }
+            }
+        }
         for (&id, value) in &u.fields {
             if let Some(value) = value {
                 candidate.insert(id, value.clone());
-            } else {
-                candidate.remove(&id);
             }
         }
         install(Some(&candidate))?;
