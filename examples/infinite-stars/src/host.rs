@@ -120,21 +120,25 @@ pub fn service(db: &Store, w: Worker) -> Arc<Service> {
 }
 pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
     let worker = db.start_worker(slot)?;
-    if slot == 1 {
-        match db.owner(GROUP) {
-            Err(mesh::Error::Missing(_)) => {
-                // Persist the initial records, then use the same rebuild path as a restart.
-                seed(&mut world(db, worker))?;
-                db.owner(GROUP)?;
-            }
-            result => {
-                result?;
-            }
-        }
-    }
     let mut app = world(db, worker);
     for group in db.owned(slot)? {
         mesh::restore_group(app.world_mut(), group)?;
+    }
+    if slot == 1 && matches!(db.lookup(ACTOR)?, Lookup::Unknown) {
+        let empty = match db.owner(GROUP) {
+            Ok(owner) => owner.worker == worker && db.snapshot(GROUP)?.records.is_empty(),
+            Err(mesh::Error::Missing(_)) => true,
+            Err(err) => return Err(err),
+        };
+        if empty {
+            seed(&mut app)?;
+            checkpoint_group(app.world_mut(), GROUP)?;
+            if !matches!(db.lookup(ACTOR)?, Lookup::Present(_)) {
+                return Err(invalid("initial player checkpoint missing"));
+            }
+            // Resolve local Entity references and install the verified blueprint on first boot.
+            load_group(&mut app, db, GROUP, worker)?;
+        }
     }
     Ok((worker, app))
 }

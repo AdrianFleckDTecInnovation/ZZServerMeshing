@@ -1,6 +1,36 @@
 use bevy::prelude::{Component, With};
 use infinite_stars::{data::*, prediction::*, *};
 use zz_mesh::*;
+#[test]
+fn first_boot_resumes_an_empty_group_and_never_reseeds_a_retired_player() {
+    let db = Store::open(":memory:").unwrap();
+    let interrupted = db.start_worker(1).unwrap();
+    db.create_group(GROUP, interrupted).unwrap();
+    let (_, mut app) = host::start_node(&db, 1).unwrap();
+    assert_eq!(db.snapshot(GROUP).unwrap().records.len(), 4);
+    let assembly = app.world().resource::<MeshState>().entities[&PLANET_ID.child(88)];
+    assert_eq!(
+        app.world()
+            .get::<Assembly>(assembly)
+            .unwrap()
+            .local_pieces
+            .len(),
+        1
+    );
+
+    let player = app.world().resource::<MeshState>().entities[&ACTOR];
+    app.world_mut().despawn(player);
+    app.update();
+    drop(app);
+    let (_, restarted) = host::start_node(&db, 1).unwrap();
+    assert_eq!(db.lookup(ACTOR).unwrap(), Lookup::Deleted);
+    assert!(!restarted
+        .world()
+        .resource::<MeshState>()
+        .entities
+        .contains_key(&ACTOR));
+}
+
 fn setup() -> (Store, Worker, Worker, bevy::prelude::App, Id) {
     let db = Store::open(":memory:").unwrap();
     let a = db.start_worker(1).unwrap();

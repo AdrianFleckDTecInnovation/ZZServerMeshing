@@ -34,14 +34,15 @@ fn main() -> zz_mesh::Result<()> {
 
     let reactor = Id::numbered(1);
     let group = Id::numbered(2);
+    for owned in store.owned(worker.slot)? {
+        restore_group(app.world_mut(), owned)?;
+    }
     match store.lookup(reactor)? {
         zz_mesh::Lookup::Unknown => {
             app.world_mut()
                 .spawn((Managed::new(reactor, group), Energy(0)));
         }
-        zz_mesh::Lookup::Present(_) => {
-            restore_group(app.world_mut(), group)?;
-        }
+        zz_mesh::Lookup::Present(_) => {}
         zz_mesh::Lookup::Deleted => return Err(zz_mesh::invalid("reactor was retired")),
     }
     app.update();
