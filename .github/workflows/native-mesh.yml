@@ -54,14 +54,8 @@ jobs:
       - run: npm run setup
       - run: cargo fmt -p zz-mesh -p infinite-stars --check
       - run: npm test
-      - name: Verify a saved game across two processes
-        shell: bash
-        run: |
-          world=target/ci-persistent-game.sqlite
-          first=$(cargo run --locked -q -p zz-mesh --example persistent_game -- "$world")
-          second=$(cargo run --locked -q -p zz-mesh --example persistent_game -- "$world")
-          test "$first" = "reactor=00000000-0000-0000-0000-000000000001 energy=1"
-          test "$second" = "reactor=00000000-0000-0000-0000-000000000001 energy=2"
+      - name: Import the committed library from a separate game and restart it
+        run: npm run test:game
       - run: cargo run --locked -p infinite-stars --example survey_probe
       - run: cargo run --locked -p infinite-stars -- demo target/ci-stars
       - run: npm run smoke
