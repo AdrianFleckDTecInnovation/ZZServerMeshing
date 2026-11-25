@@ -292,7 +292,7 @@ fn travel(a: [i64; 3], b: [i64; 3], t: usize) -> [i64; 3] {
 // Same actors, writers, update rates and worker worlds. Only the positions change.
 fn compare_layouts(ticks: usize) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
-    for players in [16, 32, 64, 128, 256, 384, 512, 768] {
+    for players in [16, 32, 64, 128, 256, 384, 512, 768, 1024] {
         let mut scene = Scene::new(4, players / 4, 8)?;
         let separate = scene.segment("separated", ticks, |_, m| site(m.origin))?;
         for _ in 0..6 {
