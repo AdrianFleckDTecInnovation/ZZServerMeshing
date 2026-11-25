@@ -6,6 +6,60 @@ fn w(n: u32) -> Worker {
         incarnation: 1,
     }
 }
+
+#[test]
+fn moving_faces_match_exhaustive_hysteresis_through_repeated_crossings() {
+    let mut directory = Directory::default();
+    let mut areas: Vec<_> = (0..12)
+        .map(|i| area(i + 1, i as u32 + 1, bounds(i as i64 * 4, 0, 0, 5)))
+        .collect();
+    let mut objects: Vec<_> = (0..12)
+        .map(|i| obj(i + 50, bounds(i as i64 * 4, 0, 0, 2)))
+        .collect();
+    let mut memberships = [[false; 12]; 12];
+    for a in &areas {
+        directory.register_area(a.clone()).unwrap();
+    }
+    for p in &objects {
+        directory.upsert(*p).unwrap();
+    }
+    let mut seed = 743u64;
+    for step in 0..500 {
+        for (i, p) in objects.iter().enumerate() {
+            let actual: BTreeSet<_> = directory.subscribers(p.id).map(|(r, _)| *r).collect();
+            for (j, a) in areas.iter().enumerate() {
+                let pad = if memberships[i][j] { a.hysteresis } else { 0 };
+                memberships[i][j] = a
+                    .bounds
+                    .sweep(a.velocity, a.ahead, pad)
+                    .intersects(p.bounds.sweep(p.velocity, p.ahead, 0));
+                assert_eq!(
+                    actual.contains(&a.to),
+                    memberships[i][j],
+                    "step {step} object {i} area {j}"
+                );
+            }
+        }
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let j = ((seed >> 32) % 12) as usize;
+        let x = ((seed >> 48) % 58) as i64 - 8;
+        let frame = Id::numbered(if step % 7 == 0 { 2 } else { 1 });
+        if step % 3 == 0 {
+            let a = &mut areas[j];
+            a.bounds = bounds(x, j as i64, 0, 5);
+            a.bounds.frame = frame;
+            a.velocity = [((seed >> 20) % 5) as i64 - 2, 0, 0];
+            a.ahead = 3;
+            directory.register_area(a.clone()).unwrap();
+        } else {
+            let p = &mut objects[j];
+            p.bounds = bounds(x, j as i64, 0, 2);
+            p.bounds.frame = frame;
+            directory.upsert(*p).unwrap();
+        }
+        directory.changes();
+    }
+}
 fn bounds(x: i64, y: i64, z: i64, r: i64) -> Box3 {
     let p = [x, y, z];
     Box3::new(Id::numbered(1), p.map(|v| v - r), p.map(|v| v + r)).unwrap()

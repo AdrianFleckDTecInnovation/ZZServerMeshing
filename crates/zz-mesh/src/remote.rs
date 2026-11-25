@@ -112,16 +112,17 @@ pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>
     )
 }
 fn allowed(service: &Service, role: Role, t: Handoff) -> Result<()> {
-    let Role::Worker(w) = role else {
-        return Err(Error::Denied);
-    };
-    if (w != t.source.worker && w != t.target)
-        || (service.worker != t.source.worker && service.worker != t.target)
-    {
+    if service.worker != t.source.worker && service.worker != t.target {
         return Err(Error::Denied);
     }
-    crate::store::live(&*service.store.lock()?, w)?;
-    crate::store::live(&*service.store.lock()?, service.worker)
+    match role {
+        Role::Worker(w) if w == t.source.worker || w == t.target => {
+            service.store.check_worker(w)?
+        }
+        Role::Operator => (),
+        _ => return Err(Error::Denied),
+    }
+    service.store.check_worker(service.worker)
 }
 impl WorkerEndpoint {
     fn bulk(&self, t: Handoff, c: &Command) -> Result<Option<Answer>> {
@@ -351,7 +352,11 @@ impl WorkerLoop {
                     _ => Err(Error::Denied),
                 },
                 Request::Diagnostics => match role {
-                    Role::Worker(caller) => {
+                    Role::Worker(_) | Role::Operator => {
+                        let caller = match role {
+                            Role::Worker(w) => w,
+                            _ => self.service.worker,
+                        };
                         self.service.store.check_worker(caller).and_then(|_| {
                             let p = self
                                 .peers

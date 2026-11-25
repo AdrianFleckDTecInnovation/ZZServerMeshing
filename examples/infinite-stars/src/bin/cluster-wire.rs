@@ -1,6 +1,7 @@
 //! Barrier-driven convergence across separate processes using the game's authenticated TCP adapter.
 //! Stdin carries benchmark positions and queries. Replicas and directory reports only use mTLS.
 use infinite_stars::{
+    deployment,
     host::{identity, init_tls, provision_worker, service, worker_name},
     world, Inventory, Player, Position, PLANET_ID, STONE,
 };
@@ -10,6 +11,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{atomic::Ordering::Relaxed, mpsc, Arc, Mutex},
@@ -59,13 +61,22 @@ struct Status {
     incoming: BTreeMap<u32, u64>,
     tls_tx: u64,
     tls_rx: u64,
+    store_tx: u64,
+    store_rx: u64,
     frames_out: u64,
     applied: u64,
 }
-fn worker(dir: &Path, slot: u32) -> Result<()> {
-    let db = Store::open(dir.join("world.sqlite"))?;
-    let w = db.start_worker(slot)?;
-    provision_worker(dir, &db, w)?;
+fn worker(dir: &Path, slot: u32, authority: Option<SocketAddr>) -> Result<()> {
+    let (db, w, cred) = if let Some(addr) = authority {
+        deployment::connect_worker(dir, addr)?
+    } else {
+        let db = Store::open(dir.join("world.sqlite"))?;
+        let w = db.start_worker(slot)?;
+        provision_worker(dir, &db, w)?;
+        (db, w, identity(dir, &worker_name(w))?)
+    };
+    assert_eq!(w.slot, slot);
+    let store_traffic = db.network_traffic().unwrap_or_default();
     let mut app = world(&db, w);
     let mut entities = vec![];
     for i in 0..MEMBERS {
@@ -96,10 +107,14 @@ fn worker(dir: &Path, slot: u32) -> Result<()> {
     let traffic = listener.traffic.clone();
     let (endpoint, mut pump) =
         remote::worker(service(&db, w), app.world().resource::<BlobCache>().clone());
-    let cred = identity(dir, &worker_name(w))?;
     let registry = db.clone();
     pump.peers = Some(network_mesh::PeerMesh::new(db, w, move |to| {
-        Client::connect(registry.address(to)?, "localhost", &ca, &cred)
+        let name = if authority.is_some() {
+            deployment::worker_dns(to.slot)
+        } else {
+            "localhost".into()
+        };
+        Client::connect(registry.address(to)?, &name, &ca, &cred)
     }));
     let incoming = Arc::new(Mutex::new(BTreeMap::new()));
     let counted = Arc::new(CountPush {
@@ -159,6 +174,8 @@ fn worker(dir: &Path, slot: u32) -> Result<()> {
                     incoming: incoming.lock().unwrap().clone(),
                     tls_rx: traffic.received.load(Relaxed),
                     tls_tx: traffic.sent.load(Relaxed),
+                    store_rx: store_traffic.received.load(Relaxed),
+                    store_tx: store_traffic.sent.load(Relaxed),
                     frames_out: p.frames_out,
                     applied: p.frames_in,
                 };
@@ -189,11 +206,12 @@ impl Drop for Node {
     }
 }
 impl Node {
-    fn start(dir: &Path, slot: usize) -> Result<Self> {
+    fn start(dir: &Path, slot: usize, authority: Option<SocketAddr>) -> Result<Self> {
         let mut child = Command::new(std::env::current_exe()?)
             .arg("--worker")
             .arg(dir)
             .arg(slot.to_string())
+            .args(authority.map(|a| a.to_string()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -241,13 +259,15 @@ fn read(nodes: &mut [Node]) -> Result<Vec<Status>> {
         .map(|n| serde_json::from_str(&n.line()?).map_err(|e| invalid(e.to_string())))
         .collect()
 }
-fn totals(states: &[Status]) -> [u64; 5] {
-    let mut sum = [0; 5];
+fn totals(states: &[Status]) -> [u64; 7] {
+    let mut sum = [0; 7];
     for (to, s) in states.iter().enumerate() {
         sum[0] += s.tls_tx;
         sum[1] += s.tls_rx;
         sum[2] += s.frames_out;
         sum[3] += s.applied;
+        sum[5] += s.store_tx;
+        sum[6] += s.store_rx;
         sum[4] += s
             .incoming
             .iter()
@@ -343,7 +363,7 @@ fn segment(
         times.push(ms);
         after = totals(&states);
     }
-    let diff = std::array::from_fn::<_, 5, _>(|i| after[i] - before[i]);
+    let diff = std::array::from_fn::<_, 7, _>(|i| after[i] - before[i]);
     if name == "isolated" {
         assert_eq!(diff[4], 0);
         assert!(diff[2] > 0 && diff[3] > 0);
@@ -353,16 +373,58 @@ fn segment(
     Ok(
         json!({"phase":name,"barriers":count,"convergence_ms":times,"p50_ms":order[count.div_ceil(2)-1],
         "p95_ms":order[(count*95).div_ceil(100)-1],"tls_tx":diff[0],"tls_rx":diff[1],
-        "queued_frames":diff[2],"applied_frames":diff[3],"incoming_foreign_home_frames":diff[4]}),
+        "queued_frames":diff[2],"applied_frames":diff[3],"incoming_foreign_home_frames":diff[4],
+        "authority_tls_tx":diff[5],"authority_tls_rx":diff[6]}),
     )
 }
 fn lerp(a: Point, b: Point, n: usize) -> Point {
     std::array::from_fn(|k| a[k] + (b[k] - a[k]) * n as i64 / 8)
 }
-fn scene(dir: &Path, sites: usize) -> Result<Value> {
-    init_tls(dir)?;
+struct AuthorityProcess(Child);
+impl Drop for AuthorityProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn scene(dir: &Path, sites: usize, distributed: bool) -> Result<Value> {
+    let control = dir.join("authority");
+    let _authority;
+    let address = if distributed {
+        for slot in 1..=sites * 2 {
+            deployment::provision(&control, &dir.join(slot.to_string()), Some(slot as u32))?;
+        }
+        let ready = dir.join("authority-ready");
+        let child = Command::new(std::env::current_exe()?)
+            .arg("--authority")
+            .arg(&control)
+            .arg(&ready)
+            .stdout(Stdio::null())
+            .spawn()?;
+        _authority = AuthorityProcess(child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(addr) = fs::read_to_string(&ready).ok().and_then(|s| s.parse().ok()) {
+                break Some(addr);
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid("authority startup timed out"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        init_tls(dir)?;
+        None
+    };
     let mut nodes = (1..=sites * 2)
-        .map(|slot| Node::start(dir, slot))
+        .map(|slot| {
+            let home = if distributed {
+                dir.join(slot.to_string())
+            } else {
+                dir.to_path_buf()
+            };
+            Node::start(&home, slot, address)
+        })
         .collect::<Result<Vec<_>>>()?;
     let mut step = 1;
     measure(&mut nodes, step, |s, _| site(s))?;
@@ -381,14 +443,15 @@ fn scene(dir: &Path, sites: usize) -> Result<Value> {
         let start = Instant::now();
         thread::sleep(Duration::from_millis(5500));
         let idle_after = totals(&read(&mut nodes)?);
-        assert_eq!(&idle_after[2..], &idle_before[2..]);
+        assert_eq!(&idle_after[2..5], &idle_before[2..5]);
         let (tx, rx) = (
             idle_after[0] - idle_before[0],
             idle_after[1] - idle_before[1],
         );
         assert!(tx > 0 && rx > 0);
         rows.push(json!({"phase":"idle","seconds":start.elapsed().as_secs_f64(),
-            "tls_tx":tx,"tls_rx":rx,"applied_frames":0,"queued_frames":0,"incoming_foreign_home_frames":0}));
+            "tls_tx":tx,"tls_rx":rx,"applied_frames":0,"queued_frames":0,"incoming_foreign_home_frames":0,
+            "authority_tls_tx":idle_after[5]-idle_before[5],"authority_tls_rx":idle_after[6]-idle_before[6]}));
         let mut centers = (0..4).map(site).collect::<Vec<_>>();
         for (group, join) in [
             (1, true),
@@ -451,14 +514,36 @@ fn run() -> Result<()> {
             .next()
             .and_then(|s| s.to_str()?.parse().ok())
             .ok_or_else(|| invalid("worker slot"))?;
-        return worker(&dir, slot);
+        let authority = args
+            .next()
+            .map(|s| {
+                s.to_string_lossy()
+                    .parse()
+                    .map_err(|_| invalid("authority address"))
+            })
+            .transpose()?;
+        return worker(&dir, slot, authority);
     }
+    if out == Path::new("--authority") {
+        let dir = PathBuf::from(args.next().ok_or_else(|| invalid("authority directory"))?);
+        let ready = PathBuf::from(args.next().ok_or_else(|| invalid("authority ready file"))?);
+        return deployment::serve(&dir, "127.0.0.1:0".parse().unwrap(), Some(ready));
+    }
+    let distributed = match args.next() {
+        None => false,
+        Some(x) if x == "--separate-volumes" => true,
+        _ => return Err(invalid("expected --separate-volumes")),
+    };
     let temp = tempfile::tempdir()?;
     let mut scenes = vec![];
     for sites in [1, 2, 4] {
-        scenes.push(scene(&temp.path().join(format!("sites-{sites}")), sites)?);
+        scenes.push(scene(
+            &temp.path().join(format!("sites-{sites}")),
+            sites,
+            distributed,
+        )?);
     }
-    fs::write(out,serde_json::to_vec_pretty(&json!({"version":1,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"scenes":scenes})).map_err(|e|invalid(e.to_string()))?)?;
+    fs::write(out,serde_json::to_vec_pretty(&json!({"version":2,"separate_volumes":distributed,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"scenes":scenes})).map_err(|e|invalid(e.to_string()))?)?;
     Ok(())
 }
 fn main() {

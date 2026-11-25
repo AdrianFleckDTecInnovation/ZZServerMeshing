@@ -1,3 +1,4 @@
+use crate::authority_store::Operation as Op;
 use crate::store::{authority, fence, live, snapshot};
 use crate::*;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -53,6 +54,9 @@ fn frozen_snapshot(c: &Connection, t: Handoff) -> Result<Snapshot> {
 }
 impl Store {
     pub fn begin_handoff(&self, t: Handoff) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Begin(t));
+        }
         self.write(|c|{if let Ok(p)=status(c,t){return if p==Phase::Aborted{Err(Error::Fenced)}else{Ok(())}}
             if t.source.worker==t.target{return Err(invalid("handoff to same worker"))}
             fence(c,t.group,t.source,true)?;live(c,t.target)?;
@@ -60,6 +64,9 @@ impl Store {
             c.execute("INSERT INTO handoffs(ticket,unit,source,target,phase) VALUES(?,?,?,?,0)",params![t.id,t.group,encode(&t.source)?,encode(&t.target)?])?;Ok(())})
     }
     pub fn frozen(&self, t: Handoff) -> Result<Snapshot> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Frozen(t));
+        }
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         if !matches!(status(&tx, t)?, Phase::Frozen | Phase::Ready) {
@@ -70,6 +77,9 @@ impl Store {
         Ok(s)
     }
     pub fn handoff_phase(&self, t: Handoff) -> Result<Phase> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Phase(t));
+        }
         status(&*self.lock()?, t)
     }
     /// Freeze only the base observed by the simulation. The caller retries preparation on a race.
@@ -83,6 +93,9 @@ impl Store {
         canonical: &[Record],
         checkpoint: &[Record],
     ) -> Result<Snapshot> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Freeze(t, base, canonical.to_vec(), checkpoint.to_vec()));
+        }
         self.write(|c| {
             match status(c, t)? {
                 Phase::Frozen | Phase::Ready => return frozen_snapshot(c, t),
@@ -137,6 +150,12 @@ impl Store {
         })
     }
     pub fn acknowledge(&self, t: Handoff, target: Worker, staged: &Prepared) -> Result<()> {
+        self.acknowledge_hash(t, target, staged.hash())
+    }
+    pub(crate) fn acknowledge_hash(&self, t: Handoff, target: Worker, hash: Digest) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Ready(t, target, hash));
+        }
         self.write(|c| {
             if target != t.target {
                 return Err(Error::Denied);
@@ -147,7 +166,7 @@ impl Store {
             }
             let matched = c.execute(
                 "UPDATE handoffs SET phase=2 WHERE ticket=? AND manifest=?",
-                params![t.id, staged.hash().0.as_slice()],
+                params![t.id, hash.0.as_slice()],
             )?;
             if matched == 0 {
                 return Err(Error::Fenced);
@@ -156,6 +175,9 @@ impl Store {
         })
     }
     pub fn switch(&self, t: Handoff) -> Result<Authority> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Switch(t));
+        }
         self.write(|c|{match status(c,t)?{
             Phase::Switched=>return Ok(Authority{worker:t.target,generation:t.source.generation+1}),Phase::Ready=>{},_=>return Err(Error::Fenced)}
             fence(c,t.group,t.source,false)?;live(c,t.target)?;
@@ -167,6 +189,9 @@ impl Store {
     }
     /// Resolves an ambiguous acknowledgement against the same serialized durable decision.
     pub fn abort_handoff(&self, t: Handoff) -> Result<Phase> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Abort(t));
+        }
         self.write(|c| {
             match status(c, t)? {
                 Phase::Switched => return Ok(Phase::Switched),

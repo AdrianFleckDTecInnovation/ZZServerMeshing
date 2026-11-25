@@ -24,6 +24,7 @@ pub mod prelude {
         MeshState, Replica, Rules, Simulated, Staged, Store, Visibility,
     };
 }
+pub mod authority_store;
 mod bevy_runtime;
 mod bulk;
 mod store;
@@ -31,6 +32,7 @@ mod types;
 mod voxel_wire;
 pub use voxel_wire::*;
 mod handoff;
+mod octree;
 mod placement;
 mod pool;
 mod spatial;

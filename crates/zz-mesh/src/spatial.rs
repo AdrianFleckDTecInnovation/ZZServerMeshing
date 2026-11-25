@@ -1,10 +1,9 @@
+use crate::octree::{Boundaries, Index};
 use crate::*;
-use rstar::{primitives::CachedEnvelope, RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// Millimetres in a named local reference frame. The broad phase rounds outwards;
-/// final intersection tests use integers, including well beyond f64's exact range.
+/// Inclusive integer millimetres in a named local reference frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Box3 {
     pub frame: Id,
@@ -27,56 +26,13 @@ impl Box3 {
         }
         let mut b = self;
         for (i, v) in velocity.iter().enumerate() {
-            let d = v.saturating_mul(i64::from(ticks));
-            b.lo[i] = b.lo[i]
-                .saturating_add(d.min(0))
-                .saturating_sub(i64::from(padding));
-            b.hi[i] = b.hi[i]
-                .saturating_add(d.max(0))
-                .saturating_add(i64::from(padding));
+            let d = i128::from(*v) * i128::from(ticks);
+            let lo = i128::from(b.lo[i]) + d.min(0) - i128::from(padding);
+            let hi = i128::from(b.hi[i]) + d.max(0) + i128::from(padding);
+            b.lo[i] = lo.max(i128::from(i64::MIN)) as i64;
+            b.hi[i] = hi.min(i128::from(i64::MAX)) as i64;
         }
         b
-    }
-    fn envelope(self) -> AABB<[f64; 3]> {
-        AABB::from_corners(
-            self.lo.map(|v| (v as f64).next_down()),
-            self.hi.map(|v| (v as f64).next_up()),
-        )
-    }
-}
-#[derive(Clone, Debug, PartialEq)]
-struct Entry(Id, Box3);
-impl RTreeObject for Entry {
-    type Envelope = AABB<[f64; 3]>;
-    fn envelope(&self) -> Self::Envelope {
-        self.1.envelope()
-    }
-}
-#[derive(Default)]
-struct Index(BTreeMap<Id, RTree<CachedEnvelope<Entry>>>);
-impl Index {
-    fn insert(&mut self, id: Id, b: Box3) {
-        self.0
-            .entry(b.frame)
-            .or_default()
-            .insert(CachedEnvelope::new(Entry(id, b)));
-    }
-    fn remove(&mut self, id: Id, b: Box3) {
-        if let Some(tree) = self.0.get_mut(&b.frame) {
-            tree.remove(&CachedEnvelope::new(Entry(id, b)));
-            if tree.size() == 0 {
-                self.0.remove(&b.frame);
-            }
-        }
-    }
-    fn query(&self, b: Box3) -> Vec<Id> {
-        self.0
-            .get(&b.frame)
-            .into_iter()
-            .flat_map(|tree| tree.locate_in_envelope_intersecting(b.envelope()))
-            .filter(|e| e.1.intersects(b))
-            .map(|e| e.0)
-            .collect()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -143,6 +99,8 @@ pub struct Directory {
     objects: BTreeMap<Id, Presence>,
     area_index: Index,
     object_index: Index,
+    area_faces: Boundaries,
+    object_faces: Boundaries,
     area_objects: BTreeMap<Id, BTreeSet<Id>>,
     object_areas: BTreeMap<Id, BTreeSet<Id>>,
     subs: BTreeMap<Id, BTreeMap<Recipient, Subscription>>,
@@ -189,6 +147,15 @@ impl Directory {
             .areas
             .get(&id)
             .is_some_and(|old| old.to != a.to || old.components != a.components);
+        if !demand_changed
+            && self.areas.get(&id).is_some_and(|old| {
+                self.object_faces.stable(old.needed(), needed)
+                    && self.object_faces.stable(old.retained(), retained)
+            })
+        {
+            self.index_area(a);
+            return Ok(());
+        }
         // Moving an area inside a dense crowd usually leaves all memberships intact.
         // Only changed memberships or demands require re-aggregating an object's peers.
         let mut touched = BTreeSet::new();
@@ -225,18 +192,32 @@ impl Directory {
                 }
             }
         }
-        if let Some(old) = self.areas.get(&id) {
-            self.area_index.remove(id, old.retained());
-        }
-        self.area_index.insert(id, retained);
-        self.areas.insert(id, a);
+        self.index_area(a);
         for object in touched {
             self.refresh(object);
         }
         Ok(())
     }
+    fn index_area(&mut self, area: Area) {
+        let id = area.id;
+        let needed = area.needed();
+        let retained = area.retained();
+        let old = self.areas.insert(id, area);
+        let old_retained = old.as_ref().map(Area::retained);
+        self.area_faces
+            .replace(old.as_ref().map(Area::needed), Some(needed));
+        self.area_faces.replace(old_retained, Some(retained));
+        if old_retained != Some(retained) {
+            if let Some(b) = old_retained {
+                self.area_index.remove(id, b);
+            }
+            self.area_index.insert(id, retained);
+        }
+    }
     pub fn remove_area(&mut self, id: Id) {
         if let Some(a) = self.areas.remove(&id) {
+            self.area_faces.replace(Some(a.needed()), None);
+            self.area_faces.replace(Some(a.retained()), None);
             self.area_index.remove(id, a.retained());
         }
         for object in self.area_objects.remove(&id).unwrap_or_default() {
@@ -249,6 +230,15 @@ impl Directory {
             return Ok(());
         }
         let predicted = p.predicted();
+        let previous = self.objects.get(&p.id).copied();
+        let identity_changed =
+            previous.is_none_or(|old| old.owner != p.owner || old.principal != p.principal);
+        if !identity_changed
+            && previous.is_some_and(|old| self.area_faces.stable(old.predicted(), predicted))
+        {
+            self.index_object(previous, p);
+            return Ok(());
+        }
         let candidates = self.area_index.query(predicted);
         if self
             .changes
@@ -259,34 +249,41 @@ impl Directory {
         {
             return Err(Error::Busy("drain pending interest changes"));
         }
-        let previous = self.objects.insert(p.id, p);
-        let identity_changed =
-            previous.is_none_or(|old| old.owner != p.owner || old.principal != p.principal);
-        if let Some(old) = previous {
-            self.object_index.remove(p.id, old.predicted());
-            if identity_changed {
-                if let Some(routes) = self.subs.remove(&p.id) {
-                    for (to, _) in routes {
-                        self.clock += 1;
-                        self.changes.insert(
-                            (to, p.id),
-                            InterestChange {
-                                object: p.id,
-                                to,
-                                epoch: self.clock,
-                                subscription: None,
-                            },
-                        );
-                    }
+        self.index_object(previous, p);
+        if previous.is_some() && identity_changed {
+            if let Some(routes) = self.subs.remove(&p.id) {
+                for (to, _) in routes {
+                    self.clock += 1;
+                    self.changes.insert(
+                        (to, p.id),
+                        InterestChange {
+                            object: p.id,
+                            to,
+                            epoch: self.clock,
+                            subscription: None,
+                        },
+                    );
                 }
             }
         }
-        self.object_index.insert(p.id, predicted);
         self.refresh_candidates(p.id, candidates, identity_changed);
         Ok(())
     }
+    fn index_object(&mut self, previous: Option<Presence>, p: Presence) {
+        let old = previous.map(Presence::predicted);
+        let new = p.predicted();
+        if old != Some(new) {
+            self.object_faces.replace(old, Some(new));
+            if let Some(b) = old {
+                self.object_index.remove(p.id, b);
+            }
+            self.object_index.insert(p.id, new);
+        }
+        self.objects.insert(p.id, p);
+    }
     pub fn remove(&mut self, id: Id) {
         if let Some(p) = self.objects.remove(&id) {
+            self.object_faces.replace(Some(p.predicted()), None);
             self.object_index.remove(id, p.predicted());
         }
         self.refresh(id);

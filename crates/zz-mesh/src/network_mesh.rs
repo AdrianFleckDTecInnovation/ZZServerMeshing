@@ -135,8 +135,8 @@ impl Broker {
         let Role::Worker(from) = role else {
             return Err(Error::Denied);
         };
-        crate::store::live(&*self.db.lock()?, self.here)?;
-        crate::store::live(&*self.db.lock()?, from)?;
+        self.db.check_worker(self.here)?;
+        self.db.check_worker(from)?;
         let empty = Routes {
             directory: self.here,
             sequence: 0,
@@ -171,6 +171,13 @@ impl Broker {
         }
         let seq = *self.seq.get(&from).unwrap_or(&0);
         if seq + 1 == r.sequence {
+            let ids: Vec<_> = r
+                .changes
+                .iter()
+                .filter(|(_, d)| d.is_some())
+                .map(|(id, _)| *id)
+                .collect();
+            let owners = self.db.authorities(&ids)?;
             for (id, d) in r.changes {
                 if let Some(d) = d {
                     if d.presence.owner != from
@@ -178,8 +185,9 @@ impl Broker {
                         || d.area.as_ref().is_some_and(|a| {
                             a.id != id || a.worker != from || a.to != Recipient::Worker(from)
                         })
-                        || self.db.group_of(id)? != Some(d.group)
-                        || self.db.owner(d.group)?.worker != from
+                        || !owners
+                            .get(&id)
+                            .is_some_and(|(g, a)| *g == d.group && a.worker == from)
                     {
                         continue;
                     }
@@ -555,19 +563,24 @@ impl PeerMesh {
         let Role::Worker(from) = role else {
             return Err(Error::Denied);
         };
-        crate::store::live(&*self.db.lock()?, from)?;
+        self.db.check_worker(from)?;
         if updates.len() > MAX_TARGETS {
             return Err(Error::Busy("peer update batch"));
         }
         let mut ack = vec![];
+        let ids: Vec<_> = updates
+            .iter()
+            .filter(|u| self.views.interested(u.object, u.epoch))
+            .map(|u| u.object)
+            .collect();
+        let owners = self.db.authorities(&ids)?;
         for u in updates {
             if !self.views.interested(u.object, u.epoch) {
                 continue;
             }
-            let Some(group) = self.db.group_of(u.object)? else {
+            let Some(&(group, owner)) = owners.get(&u.object) else {
                 continue;
             };
-            let owner = self.db.owner(group)?;
             if owner.worker != from || owner.generation != u.generation {
                 continue;
             }

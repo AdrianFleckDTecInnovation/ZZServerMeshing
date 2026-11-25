@@ -13,7 +13,7 @@ use zz_mesh::{
 };
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | abort DIR SLOT | status DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | abort DIR SLOT | status DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {
@@ -36,6 +36,26 @@ fn run() -> Result<()> {
     fs::create_dir_all(&dir)?;
     match mode.as_str() {
         "demo" => demo(&dir),
+        "authority" => deployment::serve(
+            &dir,
+            argument(args.next(), "authority listen address")?,
+            args.next().map(PathBuf::from),
+        ),
+        "provision" => {
+            let slot = argument(args.next(), "worker slot")?;
+            let dest: PathBuf = argument(args.next(), "new credential directory")?;
+            deployment::provision(&dir, &dest, Some(slot))
+        }
+        "provision-client" => {
+            let dest: PathBuf = argument(args.next(), "new credential directory")?;
+            deployment::provision(&dir, &dest, None)
+        }
+        "worker" => deployment::worker(
+            dir,
+            argument(args.next(), "authority address")?,
+            argument(args.next(), "worker listen address")?,
+            args.next().map(PathBuf::from),
+        ),
         "serve" => {
             let slot = argument(args.next().or_else(|| Some("1".into())), "worker slot")?;
             let addr = argument(args.next().or_else(|| Some(LOCAL.into())), "listen address")?;
@@ -90,9 +110,14 @@ fn print_cost(cost: MigrationCost) {
     );
 }
 fn connect(dir: &Path, addr: SocketAddr, credential: &str) -> Result<Client> {
+    let name = if dir.join("server-name").is_file() || credential == "operator" {
+        deployment::GAME_DNS
+    } else {
+        "localhost"
+    };
     Client::connect(
         addr,
-        "localhost",
+        name,
         &fs::read(dir.join("ca.der"))?,
         &identity(dir, credential)?,
     )
@@ -136,7 +161,7 @@ fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Res
         forget(&control, t)?;
         return Ok(());
     }
-    let key = worker_name(t.source.worker);
+    let key = controller_credential(dir, t);
     let mut from = connect(dir, source, &key)?;
     let mut to = connect(dir, target, &key)?;
     let cost = zz_mesh::remote::migrate(&mut from, &mut to, t, 16 << 20)?;
@@ -162,16 +187,28 @@ fn abort(dir: &Path, slot: u32) -> Result<()> {
     );
     for worker in [t.source.worker, t.target] {
         if let Ok(addr) = db.address(worker) {
-            if let Ok(mut peer) = connect(dir, addr, &worker_name(t.source.worker)) {
+            if let Ok(mut peer) = connect(dir, addr, &controller_credential(dir, t)) {
                 let _ = peer.call(&Request::Control(t, zz_mesh::remote::Command::Abort));
             }
         }
     }
     forget(&control, t)
 }
+fn controller_credential(dir: &Path, t: Handoff) -> String {
+    if dir.join("operator.key").is_file() {
+        "operator".into()
+    } else {
+        worker_name(t.source.worker)
+    }
+}
 fn status(dir: &Path, addr: SocketAddr) -> Result<()> {
     let db = Store::open(dir.join("world.sqlite"))?;
-    let mut worker = connect(dir, addr, &worker_name(db.worker(1)?))?;
+    let credential = if dir.join("operator.key").is_file() {
+        "operator".into()
+    } else {
+        worker_name(db.worker(1)?)
+    };
+    let mut worker = connect(dir, addr, &credential)?;
     let Response::Diagnostics {
         views,
         sent,

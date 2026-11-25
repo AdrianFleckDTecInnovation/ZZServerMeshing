@@ -1,3 +1,4 @@
+use crate::authority_store::{Connection as Remote, Operation as Op};
 use crate::*;
 use bevy_ecs::prelude::Resource;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -10,7 +11,12 @@ use std::{
 };
 
 #[derive(Clone, Resource)]
-pub struct Store(pub(crate) Arc<Mutex<Connection>>);
+pub struct Store(Arc<Backend>);
+
+enum Backend {
+    Local(Mutex<Connection>),
+    Network(Remote),
+}
 
 const STORE_FORMAT: i64 = 1;
 
@@ -63,7 +69,7 @@ impl Snapshot {
         Ok(Digest(hash.finish().as_ref().try_into().unwrap()))
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lookup {
     Unknown,
     Deleted,
@@ -169,10 +175,79 @@ impl Store {
             tx.commit()?;
         }
         c.execute_batch("PRAGMA journal_mode=WAL;")?;
-        Ok(Self(Arc::new(Mutex::new(c))))
+        Ok(Self(Arc::new(Backend::Local(Mutex::new(c)))))
+    }
+    /// Connect a trusted worker to the authoritative volume via mutually authenticated TLS.
+    pub fn connect(
+        addr: std::net::SocketAddr,
+        server_name: String,
+        ca: Vec<u8>,
+        credential: wire::Identity,
+    ) -> Self {
+        Self(Arc::new(Backend::Network(Remote::new(
+            addr,
+            server_name,
+            ca,
+            credential,
+        ))))
+    }
+    pub(crate) fn remote_connection(&self) -> Option<&Remote> {
+        match &*self.0 {
+            Backend::Network(c) => Some(c),
+            Backend::Local(_) => None,
+        }
+    }
+    /// Cumulative TLS and payload counters for this worker's authority link, including reconnects.
+    pub fn network_traffic(&self) -> Option<Arc<wire::Traffic>> {
+        self.remote_connection().map(|c| c.traffic.clone())
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.0.lock().map_err(|_| invalid("storage mutex poisoned"))
+        let Backend::Local(conn) = &*self.0 else {
+            return Err(invalid("operation requires the local authority store"));
+        };
+        conn.lock().map_err(|_| invalid("storage mutex poisoned"))
+    }
+    pub(crate) fn check_authority(
+        &self,
+        group: Id,
+        owner: Authority,
+        writing: bool,
+    ) -> Result<u64> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Fence(group, owner, writing));
+        }
+        fence(&*self.lock()?, group, owner, writing)
+    }
+    /// Resolve a bounded peer batch against one consistent authority snapshot.
+    pub(crate) fn authorities(&self, ids: &[Id]) -> Result<BTreeMap<Id, (Id, Authority)>> {
+        if ids.len() > MAX_TARGETS {
+            return Err(Error::Busy("authority batch"));
+        }
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Authorities(ids.to_vec()));
+        }
+        let conn = self.lock()?;
+        let params = vec!["?"; ids.len()].join(",");
+        let mut stmt = conn.prepare_cached(&format!("SELECT n.id,u.id,u.slot,u.inc,u.gen FROM names n JOIN units u ON u.id=n.unit WHERE n.id IN ({params})"))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+            Ok((
+                row.get(0)?,
+                (
+                    row.get(1)?,
+                    Authority {
+                        worker: Worker {
+                            slot: row.get(2)?,
+                            incarnation: row.get(3)?,
+                        },
+                        generation: row.get(4)?,
+                    },
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.lock()?;
@@ -184,15 +259,29 @@ impl Store {
     /// Start the next incarnation of a one-based slot, fencing its previous writer.
     /// Call this once per worker process and reuse the returned identity.
     pub fn start_worker(&self, slot: u32) -> Result<Worker> {
+        self.start_slot(slot, None)
+    }
+    /// Bind the new process certificate and fence the previous one in the same transaction.
+    pub fn start_authenticated(&self, slot: u32, certificate: Digest) -> Result<Worker> {
+        self.start_slot(slot, Some(certificate))
+    }
+    fn start_slot(&self, slot: u32, certificate: Option<Digest>) -> Result<Worker> {
         if slot == 0 {
             return Err(invalid("worker slots start at one"));
         }
         self.write(|c| {
             let incarnation=c.query_row("INSERT INTO workers VALUES(?,1) ON CONFLICT(slot) DO UPDATE SET incarnation=incarnation+1 RETURNING incarnation",[slot],|r|r.get(0))?;
+            if let Some(cert) = certificate {
+                c.execute("INSERT OR REPLACE INTO credentials VALUES(?,?,?)",
+                    params![slot, incarnation, cert.0.as_slice()])?;
+            }
             Ok(Worker{slot,incarnation})
         })
     }
     pub fn advertise(&self, w: Worker, addr: std::net::SocketAddr) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Advertise(w, addr));
+        }
         self.write(|c| {
             live(c, w)?;
             c.execute(
@@ -203,6 +292,9 @@ impl Store {
         })
     }
     pub fn address(&self, w: Worker) -> Result<std::net::SocketAddr> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Address(w));
+        }
         let c = self.lock()?;
         live(&c, w)?;
         let address: String = c
@@ -218,6 +310,9 @@ impl Store {
             .map_err(|_| invalid("stored worker address"))
     }
     pub fn worker(&self, slot: u32) -> Result<Worker> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Worker(slot));
+        }
         Ok(Worker {
             slot,
             incarnation: self.lock()?.query_row(
@@ -228,6 +323,9 @@ impl Store {
         })
     }
     pub fn owned(&self, slot: u32) -> Result<Vec<Id>> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Owned(slot));
+        }
         let c = self.lock()?;
         let mut q = c.prepare("SELECT id FROM units WHERE slot=? ORDER BY id")?;
         let rows = q
@@ -236,6 +334,9 @@ impl Store {
         Ok(rows)
     }
     pub fn check_worker(&self, w: Worker) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Live(w));
+        }
         live(&*self.lock()?, w)
     }
     pub fn bind_identity(&self, worker: Worker, cert: Digest) -> Result<()> {
@@ -249,6 +350,9 @@ impl Store {
         })
     }
     pub fn authenticated_worker(&self, cert: Digest) -> Result<Worker> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Authenticated(cert));
+        }
         let c = self.lock()?;
         let w = c
             .query_row(
@@ -267,6 +371,9 @@ impl Store {
         Ok(w)
     }
     pub fn create_group(&self, g: Id, w: Worker) -> Result<Authority> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Create(g, w));
+        }
         self.write(|c| {
             live(c, w)?;
             c.execute(
@@ -277,9 +384,15 @@ impl Store {
         })
     }
     pub fn owner(&self, g: Id) -> Result<Authority> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Owner(g));
+        }
         authority(&*self.lock()?, g)
     }
     pub fn group_of(&self, id: Id) -> Result<Option<Id>> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Group(id));
+        }
         Ok(self
             .lock()?
             .prepare_cached("SELECT unit FROM names WHERE id=?")?
@@ -287,8 +400,11 @@ impl Store {
             .optional()?)
     }
     pub(crate) fn notices(&self, w: Worker, since: u64) -> Result<Vec<(u64, Id, Authority, u64)>> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Notices(w, since));
+        }
         let c = self.lock()?;
-        let mut q=c.prepare_cached("SELECT n.mark,u.id,u.slot,u.inc,u.gen,u.rev FROM notices n JOIN units u ON u.id=n.unit WHERE n.slot=? AND n.mark>? ORDER BY n.mark")?;
+        let mut q=c.prepare_cached("SELECT n.mark,u.id,u.slot,u.inc,u.gen,u.rev FROM notices n JOIN units u ON u.id=n.unit WHERE n.slot=? AND n.mark>? ORDER BY n.mark LIMIT 128")?;
         let rows = q.query_map(params![w.slot, since], |r| {
             Ok((
                 r.get(0)?,
@@ -306,8 +422,20 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub(crate) fn since(&self, g: Id, base: u64) -> Result<(u64, Vec<Record>)> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Since(g, base));
+        }
+        self.since_for(g, base, None)
+    }
+    pub(crate) fn since_for(
+        &self,
+        g: Id,
+        base: u64,
+        reader: Option<Worker>,
+    ) -> Result<(u64, Vec<Record>)> {
         let mut c = self.lock()?;
         let tx = c.transaction()?;
+        check_reader(&tx, g, reader)?;
         let (rev, floor): (u64, u64) =
             tx.query_row("SELECT rev,floor FROM units WHERE id=?", [g], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -341,6 +469,9 @@ impl Store {
     }
     /// A restarted process may recover its own slot. An active transfer is cancelled atomically.
     pub fn recover(&self, g: Id, w: Worker) -> Result<Authority> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Recover(g, w));
+        }
         self.write(|c| {
             live(c, w)?;
             let old = authority(c, g)?;
@@ -359,8 +490,19 @@ impl Store {
         })
     }
     pub fn lookup(&self, id: Id) -> Result<Lookup> {
-        let c = self.lock()?;
-        Ok(match record(&c, id)? {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Lookup(id));
+        }
+        self.lookup_for(id, None)
+    }
+    pub(crate) fn lookup_for(&self, id: Id, reader: Option<Worker>) -> Result<Lookup> {
+        let mut conn = self.lock()?;
+        let c = conn.transaction()?;
+        let result = match record(&c, id)? {
+            Some(r) if !r.deleted && reader.is_some() => {
+                check_reader(&c, r.group, reader)?;
+                Lookup::Present(r)
+            }
             Some(r) if !r.deleted => Lookup::Present(r),
             Some(_) => Lookup::Deleted,
             None => {
@@ -372,11 +514,20 @@ impl Store {
                     Lookup::Unknown
                 }
             }
-        })
+        };
+        c.commit()?;
+        Ok(result)
     }
     pub fn snapshot(&self, g: Id) -> Result<Snapshot> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Snapshot(g));
+        }
+        self.snapshot_for(g, None)
+    }
+    pub(crate) fn snapshot_for(&self, g: Id, reader: Option<Worker>) -> Result<Snapshot> {
         let mut c = self.lock()?;
         let tx = c.transaction()?;
+        check_reader(&tx, g, reader)?;
         let s = snapshot(&tx, g)?;
         tx.commit()?;
         Ok(s)
@@ -393,6 +544,9 @@ impl Store {
         records: Vec<Record>,
         claims: &BTreeMap<Id, Vec<Manifest>>,
     ) -> Result<u64> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Checkpoint(g, a, base, records, claims.clone()));
+        }
         self.write(|c| {
             let rev = fence(c, g, a, true)?;
             if rev != base {
@@ -434,6 +588,9 @@ impl Store {
         to: (Id, Authority, u64),
         datasets: &[DataKey],
     ) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Regroup(id, from, to, datasets.to_vec()));
+        }
         self.write(|c| {
             if from.0 == to.0 || datasets.len() > MAX_TARGETS {
                 return Err(invalid("regroup participants or data count"));
@@ -488,6 +645,9 @@ impl Store {
         })
     }
     pub fn compact(&self, g: Id, a: Authority, through: u64) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Compact(g, a, through));
+        }
         self.write(|c|{let rev=fence(c,g,a,true)?;if through>rev{return Err(Error::Fenced)}
             c.execute("DELETE FROM documents WHERE unit=? AND deleted=1 AND rev<=?",params![g,through])?;
             c.execute("DELETE FROM departures WHERE unit=? AND rev<=?",params![g,through])?;
@@ -496,6 +656,9 @@ impl Store {
         })
     }
     pub fn session(&self, session: Id, actor: Id) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Session(session, actor));
+        }
         self.write(|c| {
             c.execute(
                 "INSERT OR IGNORE INTO sessions(id,actor) VALUES(?,?)",
@@ -512,6 +675,9 @@ impl Store {
         })
     }
     pub fn progress(&self, session: Id, actor: Id, group: Id, a: Authority) -> Result<(u64, u64)> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Progress(session, actor, group, a));
+        }
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let base = fence(&tx, group, a, false)?;
@@ -527,10 +693,16 @@ impl Store {
         Ok((base, seq))
     }
     pub fn requires(&self, group: Id, m: &Manifest) -> Result<bool> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Requires(group, m.clone()));
+        }
         let c = self.lock()?;
         Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM requirements WHERE unit=?1 AND key=?2 AND manifest=?3 UNION ALL SELECT 1 FROM member_data WHERE unit=?1 AND key=?2 AND manifest=?3)",params![group,encode(&m.key)?,encode(m)?],|r|r.get(0))?)
     }
     pub fn requirements(&self, g: Id, a: Authority, base: u64, items: &[Manifest]) -> Result<u64> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Requirements(g, a, base, items.to_vec()));
+        }
         if items.len() > MAX_TARGETS {
             return Err(Error::Busy("required datasets"));
         }
@@ -551,6 +723,9 @@ impl Store {
     }
     /// The remote writer endorses this exact operation at its current revision.
     pub fn approve(&self, g: Id, a: Authority, intent: &Intent) -> Result<()> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Approve(g, a, intent.clone()));
+        }
         self.write(|c| {
             let rev = fence(c, g, a, true)?;
             let fingerprint = digest(&encode(intent)?);
@@ -594,6 +769,9 @@ impl Store {
         now: u64,
         batch: &[Intent],
     ) -> Result<Vec<Reply>> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::Execute(principal, writer, now, batch.to_vec()));
+        }
         if batch.len() > MAX_BATCH || encode(&batch)?.len() > MAX_FRAME {
             return Err(Error::Busy("action batch"));
         }
@@ -605,6 +783,15 @@ impl Store {
             Ok(replies)
         })
     }
+}
+fn check_reader(c: &Connection, group: Id, reader: Option<Worker>) -> Result<()> {
+    if let Some(w) = reader {
+        live(c, w)?;
+        if authority(c, group)?.worker != w {
+            return Err(Error::Denied);
+        }
+    }
+    Ok(())
 }
 fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
     if r.fields.len() > 128 || r.fields.values().any(|f| f.bytes.len() > MAX_FIELD) {

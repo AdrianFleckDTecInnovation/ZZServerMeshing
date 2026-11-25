@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use zz_mesh::{self as mesh, *};
 pub mod data;
+pub mod deployment;
 pub mod host;
 pub mod movement;
 pub mod prediction;

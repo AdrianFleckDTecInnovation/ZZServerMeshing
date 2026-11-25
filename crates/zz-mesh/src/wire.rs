@@ -22,6 +22,9 @@ pub const WIRE_VERSION: u16 = 1;
 pub enum Role {
     Player(Id),
     Worker(Worker),
+    /// Restricted to signing a fresh worker credential for this provisioned slot.
+    Enrolment(u32, Digest),
+    Operator,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
@@ -46,6 +49,10 @@ pub enum Request {
         limit: u32,
     },
     Push(Vec<Update>),
+    Storage(crate::authority_store::Operation),
+    Join {
+        public_key: Vec<u8>,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -76,6 +83,11 @@ pub enum Response {
     },
     Applied(Vec<(Id, u64, u64)>),
     Error(String),
+    Stored(std::result::Result<Vec<u8>, crate::authority_store::Failure>),
+    Joined {
+        worker: Worker,
+        certificate: Vec<u8>,
+    },
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -91,6 +103,7 @@ pub struct Service {
 impl Endpoint for Service {
     fn dispatch(&self, role: Role, r: Request) -> Result<Response> {
         match r {
+            Request::Storage(_) | Request::Join { .. } => Err(Error::Denied),
             Request::Sync { .. }
             | Request::Diagnostics
             | Request::Spatial(_)
@@ -146,7 +159,7 @@ impl Endpoint for Service {
                 let Role::Worker(caller) = role else {
                     return Err(Error::Denied);
                 };
-                crate::store::live(&*self.store.lock()?, caller)?;
+                self.store.check_worker(caller)?;
                 Ok(Response::Owner(self.store.owner(g)?))
             }
             Request::Approval { group, intent } => {
@@ -165,10 +178,11 @@ impl Endpoint for Service {
                 offset,
                 limit,
             } => {
-                let Role::Worker(caller) = role else {
-                    return Err(Error::Denied);
-                };
-                crate::store::live(&*self.store.lock()?, caller)?;
+                match role {
+                    Role::Worker(caller) => self.store.check_worker(caller)?,
+                    Role::Operator => (),
+                    _ => return Err(Error::Denied),
+                }
                 if limit == 0 || limit as usize > BLOCK || offset > manifest.length {
                     return Err(invalid("invalid bulk range"));
                 }
@@ -297,6 +311,7 @@ fn receive<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<T>
         .fetch_add(thread_cpu_ns().saturating_sub(now), Ordering::Relaxed);
     Ok(v)
 }
+#[derive(Clone)]
 pub struct Identity {
     pub cert: Vec<u8>,
     pub key: Vec<u8>,
@@ -328,6 +343,15 @@ pub struct Client {
 }
 impl Client {
     pub fn connect(addr: SocketAddr, name: &str, ca: &[u8], id: &Identity) -> Result<Self> {
+        Self::connect_counted(addr, name, ca, id, Arc::default())
+    }
+    pub(crate) fn connect_counted(
+        addr: SocketAddr,
+        name: &str,
+        ca: &[u8],
+        id: &Identity,
+        traffic: Arc<Traffic>,
+    ) -> Result<Self> {
         let (cert, key) = id.parts();
         let cfg = ClientConfig::builder()
             .with_root_certificates(roots(ca)?)
@@ -340,7 +364,6 @@ impl Client {
         .map_err(|e| invalid(e.to_string()))?;
         let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(4))?;
         timeout(&tcp)?;
-        let traffic = Arc::new(Traffic::default());
         Ok(Self {
             stream: StreamOwned::new(client, Counted(tcp, traffic.clone())),
             traffic,
@@ -447,7 +470,7 @@ impl Listener {
                     Ok(())
                 };
                 if let Err(e) = run() {
-                    if !matches!(&e,Error::Io(err) if matches!(err.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
+                    if !matches!(&e,Error::Io(err) if matches!(err.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe|std::io::ErrorKind::TimedOut|std::io::ErrorKind::WouldBlock))
                     {
                         eprintln!("mesh connection closed: {e}");
                     }

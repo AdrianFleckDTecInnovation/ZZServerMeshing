@@ -382,3 +382,178 @@ fn persistent_cli_outbox_routes_through_the_bootstrap_after_migration() {
     };
     assert_eq!(r.get::<Inventory>(INVENTORY, 1).unwrap().0[&STONE], 8);
 }
+
+#[test]
+fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let authority = root.join("authority");
+    let first = root.join("worker-a");
+    let second = root.join("worker-b");
+    let player = root.join("player");
+    let exe = env!("CARGO_BIN_EXE_infinite-stars");
+    let run = |verb: &str, dir: &Path, args: &[&str]| {
+        let p = Command::new(exe)
+            .arg(verb)
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            p.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&p.stderr)
+        );
+        String::from_utf8(p.stdout).unwrap()
+    };
+    let start = |verb: &str, dir: &Path, args: &[&str], label: &str| {
+        let marker = root.join(label);
+        let mut p = OwnedChild(
+            Command::new(exe)
+                .arg(verb)
+                .arg(dir)
+                .args(args)
+                .arg(&marker)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let addr = wait(&marker, &mut p);
+        (p, addr)
+    };
+    run("provision", &authority, &["1", first.to_str().unwrap()]);
+    run("provision", &authority, &["2", second.to_str().unwrap()]);
+    run("provision-client", &authority, &[player.to_str().unwrap()]);
+    let any = "127.0.0.1:0";
+    let (control, store_addr) = start("authority", &authority, &[any], "store1");
+    let (_a, aa) = start("worker", &first, &[&store_addr, any], "a");
+    let (_b, ba) = start("worker", &second, &[&store_addr, any], "b");
+    let db = Store::open(authority.join("world.sqlite")).unwrap();
+    let observer = root.join("observer");
+    run("provision", &authority, &["3", observer.to_str().unwrap()]);
+    let (unrelated, _, _) =
+        deployment::connect_worker(&observer, store_addr.parse().unwrap()).unwrap();
+    assert!(matches!(
+        unrelated.lookup(ACTOR),
+        Err(zz_mesh::Error::Denied)
+    ));
+    assert!(matches!(
+        unrelated.snapshot(GROUP),
+        Err(zz_mesh::Error::Denied)
+    ));
+    assert!(run("client", &player, &[&aa]).contains("sequence 1"));
+    let session = Id::new();
+    let action = Request::Actions(vec![Intent::typed(
+        ActionKey { session, seq: 1 },
+        GROUP,
+        &DropItems(vec![Stack {
+            kind: STONE,
+            count: 1,
+        }]),
+    )
+    .unwrap()]);
+    let connect_player = |addr: &str| {
+        Client::connect(
+            addr.parse().unwrap(),
+            deployment::GAME_DNS,
+            &fs::read(player.join("ca.der")).unwrap(),
+            &identity(&player, "player").unwrap(),
+        )
+        .unwrap()
+    };
+    let mut client = connect_player(&aa);
+    // Sync creates the actor-bound logical session. It survives every process below.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let answer = client
+            .call(&Request::Sync {
+                session,
+                group: GROUP,
+            })
+            .unwrap();
+        match answer {
+            Response::Confirmed { .. } => break,
+            Response::Error(ref msg)
+                if msg.contains("waiting for confirmed world revision")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => panic!("initial sync: {answer:?}"),
+        }
+    }
+    let Response::Actions(receipt) = client.call(&action).unwrap() else {
+        panic!("drop refused")
+    };
+    assert!(matches!(
+        receipt.as_slice(),
+        [Reply::Decided(Receipt {
+            outcome: Outcome::Committed(_),
+            ..
+        })]
+    ));
+    assert!(matches!(
+        client
+            .call(&Request::Storage(
+                zz_mesh::authority_store::Operation::Snapshot(GROUP)
+            ))
+            .unwrap(),
+        Response::Error(_)
+    ));
+    let ca = fs::read(player.join("ca.der")).unwrap();
+    let mut bad = Client::connect(
+        store_addr.parse().unwrap(),
+        "authority.mesh.internal",
+        &ca,
+        &identity(&player, "player").unwrap(),
+    )
+    .unwrap();
+    assert!(bad
+        .call(&Request::Storage(
+            zz_mesh::authority_store::Operation::Snapshot(GROUP)
+        ))
+        .is_err());
+    drop(control);
+    let (_control, _) = start("authority", &authority, &[&store_addr], "store2");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Response::Actions(v)) = client.call(&action) {
+            assert_eq!(v, receipt);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "durable action could not be recovered"
+        );
+        client = connect_player(&aa);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    run("migrate", &authority, &[&aa, &ba, "2"]);
+    let before = db.owner(GROUP).unwrap();
+    assert_eq!(before.worker.slot, 2);
+    let (_replacement, newer) = start("worker", &second, &[&store_addr, any], "b2");
+    let after = db.owner(GROUP).unwrap();
+    assert!(
+        after.generation > before.generation
+            && after.worker.incarnation > before.worker.incarnation
+    );
+    assert!(!matches!(
+        connect_player(&ba).call(&action),
+        Ok(Response::Actions(_))
+    ));
+    assert!(
+        matches!(connect_player(&newer).call(&action), Ok(Response::Actions(v)) if v == receipt)
+    );
+    assert!(run("client", &player, &[&aa]).contains("sequence 2"));
+    let Lookup::Present(r) = db.lookup(ACTOR).unwrap() else {
+        panic!("actor missing")
+    };
+    assert_eq!(r.get::<Inventory>(INVENTORY, 1).unwrap().0[&STONE], 7);
+    for dir in [&first, &second, &player] {
+        for file in ["world.sqlite", "issuer.pem", "operator.key", "store.key"] {
+            assert!(!dir.join(file).exists());
+        }
+    }
+    assert!(!first.join("player.key").exists());
+    assert!(!player.join("enrol.key").exists());
+}

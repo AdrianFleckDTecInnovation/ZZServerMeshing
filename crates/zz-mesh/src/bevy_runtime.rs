@@ -184,7 +184,7 @@ pub fn apply_input(w: &mut World, actor: Id, input: &Input, now: u64) -> Result<
     if owner.worker != n.1 || w.get::<Simulated>(e).is_none() {
         return Err(Error::Fenced);
     }
-    crate::store::fence(&*n.0.lock()?, managed.group, owner, true)?;
+    n.0.check_authority(managed.group, owner, true)?;
     let handler = w
         .get_resource::<InputHandler>()
         .ok_or_else(|| invalid("game input handler missing"))?
@@ -271,7 +271,7 @@ pub fn restore_group(w: &mut World, group: Id) -> Result<Authority> {
         .ok_or_else(|| invalid("restore_group requires MeshPlugin"))?;
     let owner = db.recover(group, worker)?;
     if w.resource::<MeshState>().authority(group) == Some(owner) {
-        crate::store::fence(&*db.lock()?, group, owner, true)?;
+        db.check_authority(group, owner, true)?;
         return Ok(owner);
     }
     let snapshot = db.snapshot(group)?;
@@ -427,9 +427,19 @@ impl MeshApp for App {
         self
     }
 }
+#[derive(Component)]
+struct AwaitingGrant;
+
 fn discover(
     w: &mut World,
-    added: &mut QueryState<(Entity, &Managed), (Added<Managed>, Without<Replica>, Without<Staged>)>,
+    added: &mut QueryState<
+        (Entity, &Managed),
+        (
+            Or<(Added<Managed>, With<AwaitingGrant>)>,
+            Without<Replica>,
+            Without<Staged>,
+        ),
+    >,
 ) {
     let fresh: Vec<_> = added.iter(w).map(|(e, m)| (e, *m)).collect();
     if fresh.is_empty() {
@@ -461,7 +471,7 @@ fn discover(
             if owner.worker != *worker {
                 return Err(Error::Fenced);
             }
-            let base = crate::store::fence(&*db.lock()?, m.group, owner, true)?;
+            let base = db.check_authority(m.group, owner, true)?;
             Ok(Some((owner, base)))
         })();
         match grant {
@@ -474,9 +484,18 @@ fn discover(
                 if let Some((a, rev)) = grant {
                     st.groups.entry(m.group).or_insert((a, rev));
                 }
-                w.entity_mut(entity).insert(Simulated);
+                w.entity_mut(entity)
+                    .remove::<AwaitingGrant>()
+                    .insert(Simulated);
             }
-            Err(e) => w.resource_mut::<MeshState>().report(e.to_string()),
+            Err(e) => {
+                if matches!(e, Error::Io(_) | Error::Busy(_)) {
+                    w.entity_mut(entity).insert(AwaitingGrant);
+                } else {
+                    w.entity_mut(entity).remove::<AwaitingGrant>();
+                }
+                w.resource_mut::<MeshState>().report(e.to_string());
+            }
         }
     }
 }
@@ -926,8 +945,7 @@ impl Prepared {
         if self.world != w.id() {
             return Err(invalid("use the world that prepared this group"));
         }
-        let validation = db.lock().and_then(|conn| {
-            let rev = crate::store::fence(&conn, self.group, owner, true)?;
+        let validation = db.check_authority(self.group, owner, true).and_then(|rev| {
             if rev != self.revision {
                 return Err(Error::Fenced);
             }

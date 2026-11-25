@@ -12,6 +12,7 @@
     "bench:compare": "node scripts/compare-mesh.mjs",
     "bench:clusters": "cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json",
     "bench:cluster-wire": "cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/cluster-wire.json",
+    "bench:distributed": "cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/distributed-wire.json --separate-volumes",
     "test:game": "node scripts/test-game-integration.mjs",
     "sdk:ingest": "node scripts/sdk-rag.mjs ingest sdkcache/",
     "test": "cargo test --workspace --locked && npm --prefix tools test && npm --prefix client run build"

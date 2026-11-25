@@ -55,9 +55,17 @@ pub fn prepare_client_snapshot(
     );
 
     // Authoritative entities first (take precedence)
-    let mut seen_ids = std::collections::HashSet::with_capacity(entities.capacity());
+    let mut origins = std::collections::HashMap::<EntityId, Vec3>::with_capacity(entities.capacity());
+    let mut remember = |id, position| {
+        if let std::collections::hash_map::Entry::Vacant(entry) = origins.entry(id) {
+            entry.insert(position);
+            true
+        } else {
+            false
+        }
+    };
     for (nid, pos, vel, kind, auth, seq) in auth_query.iter() {
-        if !seen_ids.insert(nid.0) {
+        if !remember(nid.0, pos.0) {
             continue;
         }
         entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
@@ -68,7 +76,7 @@ pub fn prepare_client_snapshot(
     // source's client view before the target starts broadcasting it as a shadow.
     // Clients see the entity continuously -- it just changes authority color.
     for (nid, pos, vel, kind, outbound, seq) in transfer_query.iter() {
-        if !seen_ids.insert(nid.0) {
+        if !remember(nid.0, pos.0) {
             continue;
         }
         let state = to_entity_state(
@@ -84,33 +92,8 @@ pub fn prepare_client_snapshot(
 
     // Shadow entities (skip if already seen as authoritative or transfer-outbound)
     for (nid, pos, vel, kind, auth, seq) in shadow_query.iter() {
-        if seen_ids.insert(nid.0) {
+        if remember(nid.0, pos.0) {
             entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
-        }
-    }
-
-    // Build player -> position map from the entity list.
-    // Only need positions for connected clients' player entities.
-    let mut player_positions: std::collections::HashMap<EntityId, Vec3> =
-        std::collections::HashMap::new();
-    for (_client_id, handle) in registry.clients.iter() {
-        if let Some(pid) = handle.player_id {
-            let mut found = false;
-            for e in &entities {
-                if e.id == pid {
-                    player_positions.insert(pid, e.position);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                tracing::debug!(
-                    client_id = _client_id,
-                    player_id = %pid,
-                    entity_count = entities.len(),
-                    "AoI: player entity not found in entities vec, sending unfiltered"
-                );
-            }
         }
     }
 
@@ -130,7 +113,7 @@ pub fn prepare_client_snapshot(
         // The player's own entity is always included regardless of distance.
         // If the client has no player or the player position is unknown, send everything.
         let client_entities: Vec<EntityState> = if let Some(pid) = handle.player_id {
-            if let Some(&player_pos) = player_positions.get(&pid) {
+            if let Some(&player_pos) = origins.get(&pid) {
                 entities
                     .iter()
                     .filter(|e| e.id == pid || in_aoi(player_pos, e.position))

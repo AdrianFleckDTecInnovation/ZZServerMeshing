@@ -61,8 +61,9 @@ jobs:
       - run: npm run smoke
       - run: npm run bench -- --servers 3 --npcs 300 --seconds 10
       - run: cargo run --locked --release -p infinite-stars --bin mesh-bench -- target/stars-benchmark.json
-      - run: cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json
+      - run: cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json --quick
       - run: cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/cluster-wire.json
+      - run: npm run bench:distributed
       - uses: actions/upload-artifact@v4
         with:
           name: stars-benchmark-${{ matrix.os }}
@@ -70,5 +71,6 @@ jobs:
             target/stars-benchmark.json
             target/cluster-players.json
             target/cluster-wire.json
+            target/distributed-wire.json
       - run: npm --prefix mcp-oracle ci
       - run: npm --prefix mcp-oracle run build

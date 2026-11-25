@@ -7,7 +7,7 @@ use std::{
 };
 use zz_mesh::wire::{Identity, Role, Service};
 
-fn keyfile(path: &Path, data: &[u8]) -> mesh::Result<()> {
+pub(crate) fn keyfile(path: &Path, data: &[u8]) -> mesh::Result<()> {
     let mut opts = fs::OpenOptions::new();
     opts.create_new(true).write(true);
     #[cfg(unix)]
@@ -21,7 +21,7 @@ fn keyfile(path: &Path, data: &[u8]) -> mesh::Result<()> {
     f.sync_all()?;
     Ok(())
 }
-fn issuer_params() -> mesh::Result<CertificateParams> {
+pub(crate) fn issuer_params() -> mesh::Result<CertificateParams> {
     let mut p = CertificateParams::new(vec![]).map_err(|e| invalid(e.to_string()))?;
     p.distinguished_name
         .push(rcgen::DnType::CommonName, "Infinite Stars development CA");
@@ -120,11 +120,15 @@ pub fn service(db: &Store, w: Worker) -> Arc<Service> {
 }
 pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
     let worker = db.start_worker(slot)?;
+    Ok((worker, resume_node(db, worker)?))
+}
+pub(crate) fn resume_node(db: &Store, worker: Worker) -> mesh::Result<App> {
+    let slot = worker.slot;
     let mut app = world(db, worker);
     for group in db.owned(slot)? {
         mesh::restore_group(app.world_mut(), group)?;
     }
-    if slot == 1 && matches!(db.lookup(ACTOR)?, Lookup::Unknown) {
+    if slot == 1 && db.group_of(ACTOR)?.is_none() {
         let empty = match db.owner(GROUP) {
             Ok(owner) => owner.worker == worker && db.snapshot(GROUP)?.records.is_empty(),
             Err(mesh::Error::Missing(_)) => true,
@@ -140,7 +144,7 @@ pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
             load_group(&mut app, db, GROUP, worker)?;
         }
     }
-    Ok((worker, app))
+    Ok(app)
 }
 pub fn load_group(app: &mut App, db: &Store, group: Id, w: Worker) -> mesh::Result<()> {
     let owner = db.owner(group)?;
@@ -159,9 +163,27 @@ pub fn listen(
 ) -> mesh::Result<()> {
     init_tls(&dir)?;
     let db = Store::open(dir.join("world.sqlite"))?;
-    let (w, mut app) = start_node(&db, slot)?;
+    let (w, app) = start_node(&db, slot)?;
     provision_worker(&dir, &db, w)?;
+    let cred = identity(&dir, &worker_name(w))?;
+    run_node(dir, db, w, app, cred, addr, ready)
+}
+pub(crate) fn run_node(
+    dir: PathBuf,
+    db: Store,
+    w: Worker,
+    mut app: App,
+    cred: Identity,
+    addr: std::net::SocketAddr,
+    ready: Option<PathBuf>,
+) -> mesh::Result<()> {
     let player = digest(&fs::read(dir.join("player.der"))?);
+    let distributed = dir.join("enrol.der").exists();
+    let operator = if distributed {
+        Some(digest(&fs::read(dir.join("operator.der"))?))
+    } else {
+        None
+    };
     let registry = db.clone();
     let listener = zz_mesh::wire::Listener::bind_resolved(
         addr,
@@ -170,13 +192,26 @@ pub fn listen(
         move |fingerprint| {
             if fingerprint == player {
                 Ok(Role::Player(ACTOR))
+            } else if Some(fingerprint) == operator {
+                Ok(Role::Operator)
             } else {
                 registry.authenticated_worker(fingerprint).map(Role::Worker)
             }
         },
     )?;
     let address = listener.address()?;
-    db.advertise(w, address)?;
+    let advertised = match fs::read_to_string(dir.join("advertise.txt")) {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .map_err(|_| invalid("invalid advertised socket address"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => address,
+        Err(e) => return Err(e.into()),
+    };
+    if distributed && (advertised.ip().is_unspecified() || advertised.port() == 0) {
+        return Err(invalid("set advertise.txt to the reachable IP and port"));
+    }
+    db.advertise(w, advertised)?;
     if let Some(path) = ready {
         fs::write(path, address.to_string())?;
     }
@@ -187,16 +222,21 @@ pub fn listen(
     let (svc, mut event_loop) =
         mesh::remote::worker(service(&db, w), app.world().resource::<BlobCache>().clone());
     let ca = fs::read(dir.join("ca.der"))?;
-    let cred = identity(&dir, &worker_name(w))?;
     let registry = db.clone();
     event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(
         db.clone(),
         w,
         move |target| {
-            mesh::wire::Client::connect(registry.address(target)?, "localhost", &ca, &cred)
+            let name = if distributed {
+                crate::deployment::worker_dns(target.slot)
+            } else {
+                "localhost".into()
+            };
+            mesh::wire::Client::connect(registry.address(target)?, &name, &ca, &cred)
         },
     ));
-    let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), 16));
+    let connections = if distributed { 256 } else { 16 };
+    let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), connections));
     let mut next = std::time::Instant::now();
     while !thread.is_finished() {
         if std::time::Instant::now() >= next {

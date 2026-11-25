@@ -204,6 +204,7 @@ impl Scene {
             let world = self.pool.app(w)?.world();
             let state = world.resource::<MeshState>();
             assert!(state.diagnostics.is_empty(), "{:?}", state.diagnostics);
+            let local: Vec<_> = self.members.iter().filter(|p| p.owner == w).collect();
             for m in &self.members {
                 let e = state.entities.get(&m.id).copied();
                 if m.owner == w {
@@ -216,10 +217,8 @@ impl Scene {
                     assert_eq!(state.authority(m.id).unwrap().generation, 1);
                     continue;
                 }
-                let distance = self
-                    .members
+                let distance = local
                     .iter()
-                    .filter(|p| p.owner == w)
                     .map(|p| (0..3).map(|k| p.mm[k].abs_diff(m.mm[k])).max().unwrap())
                     .min()
                     .unwrap();
@@ -428,6 +427,19 @@ fn run() -> Result<()> {
         "merge_split":merge,"exchange":switches});
     if quick {
         report["matched_layouts"] = json!(compare_layouts(separated_ticks)?);
+        let mut rows = Vec::new();
+        for sites in [1, 4, 16, 32] {
+            let mut scene = Scene::new(sites, 32, sites * 2)?;
+            let row = scene.segment("separated", 16, |_, m| site(m.origin))?;
+            assert_eq!(row["end_islands"], sites);
+            assert_eq!(row["end_pairs"], sites * 2);
+            assert_eq!(row["frames"], sites * 32 * 16);
+            assert_eq!(row["first_worker_frames"], 16 * 16);
+            assert_eq!(row["foreign_home_frames"], 0);
+            assert_eq!(row["new_baselines"], 0);
+            rows.push(row);
+        }
+        report["island_scaling"] = json!(rows);
     }
     std::fs::write(
         path,
