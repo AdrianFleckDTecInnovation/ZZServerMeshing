@@ -60,37 +60,42 @@ pub fn drain_inbound_events(world: &mut World) {
         std::mem::take(&mut world.resource_mut::<InboundQueue>().forwarded_removes);
 
     // -- Process peer updates (shadow entities) --
+    let mut shadows = world.query_filtered::<(
+        &mut Shadow,
+        Option<&mut Position>,
+        Option<&mut Velocity>,
+        Option<&mut AuthorityServer>,
+        Option<&mut LastInputSeq>,
+    ), Without<Authoritative>>();
     for update in peer_updates {
         for entity_state in &update.entities {
             let eid = entity_state.id;
 
             if let Some(&bevy_entity) = world.resource::<EntityLookup>().0.get(&eid) {
-                // Entity already exists
-                if world.get::<Authoritative>(bevy_entity).is_some() {
-                    // Don't overwrite our authoritative entity
-                    continue;
-                }
-                if let Some(mut shadow) = world.get_mut::<Shadow>(bevy_entity) {
+                if let Ok((mut shadow, pos, vel, auth, seq)) = shadows.get_mut(world, bevy_entity) {
                     // Update existing shadow if tick is newer
                     if update.tick < shadow.last_peer_tick {
                         continue; // stale packet
                     }
                     shadow.last_peer_tick = update.tick;
                     shadow.last_local_tick = local_tick;
-                    if let Some(mut pos) = world.get_mut::<Position>(bevy_entity) {
+                    if let Some(mut pos) = pos {
                         pos.0 = entity_state.position;
                     }
-                    if let Some(mut vel) = world.get_mut::<Velocity>(bevy_entity) {
+                    if let Some(mut vel) = vel {
                         vel.0 = entity_state.velocity;
                     }
-                    if let Some(mut auth) = world.get_mut::<AuthorityServer>(bevy_entity) {
+                    if let Some(mut auth) = auth {
                         auth.0 = entity_state.authority_server;
                     }
                     // Propagate last_input_seq for player shadows so
                     // client snapshots reflect the authority's ack
-                    if let Some(mut seq) = world.get_mut::<LastInputSeq>(bevy_entity) {
+                    if let Some(mut seq) = seq {
                         seq.0 = entity_state.last_input_seq;
                     }
+                    continue;
+                }
+                if world.get::<Authoritative>(bevy_entity).is_some() {
                     continue;
                 }
             }

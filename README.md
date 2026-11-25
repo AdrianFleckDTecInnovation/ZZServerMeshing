@@ -1,5 +1,10 @@
 # Server Meshing Prototype
 
+The reusable Rust library and the standalone Infinite Stars game target Bevy 0.15. Run `cargo run -p infinite-stars` for a persistent two-worker handoff or `cargo run -p infinite-stars --example survey_probe` to try adding a new game type. Development, restart and benchmark commands are in the [Infinite Stars guide](docs/infinite-stars.md).
+
+## Browser demo
+
+
 A working implementation of true server meshing -- multiple game servers sharing authority over the same spatial area, distributing entities across servers at the entity level rather than by zones. This is the architecture Star Citizen is pursuing for large-scale multiplayer.
 
 Launch 3 servers, open a browser, spawn entities, and watch them move and rebalance across servers in real time. The mesh also runs entirely on embedded hardware (3 Arduino UNO Q boards + a Raspberry Pi Zero W2).
@@ -96,6 +101,8 @@ npm test
 npm run smoke
 npm run bench -- --servers 3 --npcs 3000 --seconds 20
 ```
+
+The [player-cluster benchmarks](docs/cluster-performance.md) cover isolated groups, increasing player density, players switching groups, progressive merges and splits, and a side-by-side run of the original browser demo.
 
 See the [benchmark results and methodology](docs/benchmark.md). The extended suite includes spawn bursts, crash recovery, authority transfers, input latency, spatial hotspots and multi-client consistency. The older Bash, Docker and board entry points target their respective environments.
 

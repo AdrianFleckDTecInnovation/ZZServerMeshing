@@ -175,7 +175,6 @@ export class NetworkClient {
         const pid = this.pendingClaim;
         console.log(`Claiming player ${pid.substring(0, 8)}...`);
         this.send({ type: 'ClaimPlayer', player_id: pid });
-        this.pendingClaim = null;
       }
     };
 
@@ -334,6 +333,7 @@ export class NetworkClient {
           if (msg.type === 'WorldSnapshot') {
             this.worldView.applySnapshot(msg as WorldSnapshot);
           } else if (msg.type === 'PlayerAssigned') {
+            this.pendingClaim = null;
             this.playerId = msg.player_id;
             this.worldView.localPlayerId = msg.player_id;
             console.log('Assigned player:', msg.player_id);
@@ -380,6 +380,10 @@ export class NetworkClient {
     setTimeout(async () => {
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, NETCODE.RECONNECT_MAX_DELAY_MS);
 
+      if (this.pendingClaim && !this.serverDirectedUrl) {
+        this.connect();
+        return;
+      }
       if (this.serverDirectedUrl) {
         // Server-directed URL takes precedence over /assign for exactly one
         // reconnect cycle. Used by Batch 4 player migration.

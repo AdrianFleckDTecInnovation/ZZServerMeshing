@@ -1,0 +1,2029 @@
+{
+  "version": 1,
+  "reference": "3ef0d789196aa6c16de4fa12be394bdf7f8ea835",
+  "binary_sha256": {
+    "reference": {
+      "sim-server": "7073f5fda75aef10da4b43301e15f87fe27bba6df596f94a86f3ae76c8dbe1db",
+      "coordinator": "4e87debfcb9dc2a90a580b109f237d8ab3d92576c8f3ee3e134c47b0efdb356a"
+    },
+    "candidate": {
+      "sim-server": "025fc233c8946f7a3a9f1736cf7628e6bbd5e5f4707ccdaa7598bcaa1fa7adb9",
+      "coordinator": "64bfc6f1e0a9d7306ebd0ec14ca168417eac293f4822a816041f51661b945a42"
+    }
+  },
+  "runs": [
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.017,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.983,
+          "snapshot_hz": 19.983,
+          "snapshot_KiB_s": 30.794,
+          "tick_p50_ms": 0.221,
+          "tick_p95_ms": 0.412,
+          "tick_p99_ms": 0.616,
+          "p95_budget_pct": 0.824,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.144,
+            "transfers_ms": 0.007,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.412
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.164,
+            "transfers_ms": 0.012,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.616
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.983,
+          "snapshot_hz": 19.983,
+          "snapshot_KiB_s": 29.165,
+          "tick_p50_ms": 0.215,
+          "tick_p95_ms": 0.456,
+          "tick_p99_ms": 0.67,
+          "p95_budget_pct": 0.911,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.134,
+            "transfers_ms": 0.009,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.456
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.205,
+            "transfers_ms": 0.018,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.67
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.033,
+          "snapshot_hz": 20.033,
+          "snapshot_KiB_s": 30.871,
+          "tick_p50_ms": 0.233,
+          "tick_p95_ms": 0.462,
+          "tick_p99_ms": 0.536,
+          "p95_budget_pct": 0.924,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.118,
+            "transfers_ms": 0.009,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.462
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.186,
+            "transfers_ms": 0.014,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.536
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.016,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.984,
+          "snapshot_hz": 19.984,
+          "snapshot_KiB_s": 29.61,
+          "tick_p50_ms": 0.088,
+          "tick_p95_ms": 0.166,
+          "tick_p99_ms": 0.221,
+          "p95_budget_pct": 0.332,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.125,
+            "transfers_ms": 0.025,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.166
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.205,
+            "transfers_ms": 0.036,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.221
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.984,
+          "snapshot_hz": 19.984,
+          "snapshot_KiB_s": 27.427,
+          "tick_p50_ms": 0.092,
+          "tick_p95_ms": 0.16,
+          "tick_p99_ms": 0.362,
+          "p95_budget_pct": 0.32,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.117,
+            "transfers_ms": 0.024,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.16
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.007,
+            "simulation_ms": 0.33,
+            "transfers_ms": 0.038,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.362
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.984,
+          "snapshot_hz": 19.984,
+          "snapshot_KiB_s": 29.64,
+          "tick_p50_ms": 0.093,
+          "tick_p95_ms": 0.146,
+          "tick_p99_ms": 0.494,
+          "p95_budget_pct": 0.292,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.11,
+            "transfers_ms": 0.025,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.146
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.466,
+            "transfers_ms": 0.042,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.494
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.02,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.03,
+          "snapshot_hz": 20.03,
+          "snapshot_KiB_s": 2502.699,
+          "tick_p50_ms": 1.894,
+          "tick_p95_ms": 3.11,
+          "tick_p99_ms": 4.612,
+          "p95_budget_pct": 6.221,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.995,
+            "transfers_ms": 0.131,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.11
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 2.531,
+            "transfers_ms": 0.191,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.612
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.98,
+          "snapshot_hz": 19.98,
+          "snapshot_KiB_s": 2648.235,
+          "tick_p50_ms": 1.668,
+          "tick_p95_ms": 2.681,
+          "tick_p99_ms": 3.753,
+          "p95_budget_pct": 5.363,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.6,
+            "transfers_ms": 0.107,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.681
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 2.221,
+            "transfers_ms": 0.138,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.753
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.98,
+          "snapshot_hz": 19.98,
+          "snapshot_KiB_s": 2672.704,
+          "tick_p50_ms": 1.956,
+          "tick_p95_ms": 3.482,
+          "tick_p99_ms": 4.37,
+          "p95_budget_pct": 6.963,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 2.017,
+            "transfers_ms": 0.135,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.482
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.025,
+            "simulation_ms": 2.41,
+            "transfers_ms": 0.201,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.37
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.013,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.037,
+          "snapshot_hz": 20.037,
+          "snapshot_KiB_s": 2690.649,
+          "tick_p50_ms": 1.371,
+          "tick_p95_ms": 1.699,
+          "tick_p99_ms": 1.854,
+          "p95_budget_pct": 3.398,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.151,
+            "transfers_ms": 0.16,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.699
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.453,
+            "transfers_ms": 0.32,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.854
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.987,
+          "snapshot_hz": 19.987,
+          "snapshot_KiB_s": 2506.082,
+          "tick_p50_ms": 1.269,
+          "tick_p95_ms": 1.715,
+          "tick_p99_ms": 2.873,
+          "p95_budget_pct": 3.43,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.18,
+            "transfers_ms": 0.186,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.715
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 2.245,
+            "transfers_ms": 0.284,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.873
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.987,
+          "snapshot_hz": 19.987,
+          "snapshot_KiB_s": 2670.506,
+          "tick_p50_ms": 1.337,
+          "tick_p95_ms": 1.63,
+          "tick_p99_ms": 1.984,
+          "p95_budget_pct": 3.26,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.331,
+            "transfers_ms": 0.163,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.63
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 1.509,
+            "transfers_ms": 0.34,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.984
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.007,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.993,
+          "snapshot_hz": 20.043,
+          "snapshot_KiB_s": 6934.668,
+          "tick_p50_ms": 4.406,
+          "tick_p95_ms": 5.364,
+          "tick_p99_ms": 5.957,
+          "p95_budget_pct": 10.728,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.369,
+            "transfers_ms": 0.293,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.364
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 4.925,
+            "transfers_ms": 0.342,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.957
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.993,
+          "snapshot_hz": 19.993,
+          "snapshot_KiB_s": 7091.066,
+          "tick_p50_ms": 4.058,
+          "tick_p95_ms": 5.233,
+          "tick_p99_ms": 5.617,
+          "p95_budget_pct": 10.467,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 4.168,
+            "transfers_ms": 0.249,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.233
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 4.768,
+            "transfers_ms": 0.283,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.617
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.993,
+          "snapshot_hz": 19.993,
+          "snapshot_KiB_s": 7419.373,
+          "tick_p50_ms": 4.182,
+          "tick_p95_ms": 5.31,
+          "tick_p99_ms": 6.098,
+          "p95_budget_pct": 10.619,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 4.248,
+            "transfers_ms": 0.281,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.31
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 4.81,
+            "transfers_ms": 0.372,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.098
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 7456.204,
+          "tick_p50_ms": 3.224,
+          "tick_p95_ms": 4.206,
+          "tick_p99_ms": 7.004,
+          "p95_budget_pct": 8.411,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.549,
+            "transfers_ms": 0.359,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.206
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 5.91,
+            "transfers_ms": 0.426,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.004
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 7153.848,
+          "tick_p50_ms": 3.013,
+          "tick_p95_ms": 4.11,
+          "tick_p99_ms": 5.987,
+          "p95_budget_pct": 8.221,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.533,
+            "transfers_ms": 0.298,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.11
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 5.215,
+            "transfers_ms": 0.416,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.987
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.996,
+          "snapshot_hz": 20.046,
+          "snapshot_KiB_s": 7670.702,
+          "tick_p50_ms": 2.978,
+          "tick_p95_ms": 4.322,
+          "tick_p99_ms": 5.125,
+          "p95_budget_pct": 8.643,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.631,
+            "transfers_ms": 0.313,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.322
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.526,
+            "transfers_ms": 0.414,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.125
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.009,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 29.86,
+          "tick_p50_ms": 0.077,
+          "tick_p95_ms": 0.177,
+          "tick_p99_ms": 0.233,
+          "p95_budget_pct": 0.354,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.14,
+            "transfers_ms": 0.023,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.177
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.209,
+            "transfers_ms": 0.032,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.233
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 27.73,
+          "tick_p50_ms": 0.075,
+          "tick_p95_ms": 0.185,
+          "tick_p99_ms": 0.229,
+          "p95_budget_pct": 0.37,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.137,
+            "transfers_ms": 0.023,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.185
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.026,
+            "simulation_ms": 0.212,
+            "transfers_ms": 0.033,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.229
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.041,
+          "snapshot_hz": 20.041,
+          "snapshot_KiB_s": 29.935,
+          "tick_p50_ms": 0.079,
+          "tick_p95_ms": 0.158,
+          "tick_p99_ms": 0.252,
+          "p95_budget_pct": 0.317,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.131,
+            "transfers_ms": 0.019,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.158
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.225,
+            "transfers_ms": 0.205,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.252
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.009,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 30.807,
+          "tick_p50_ms": 0.234,
+          "tick_p95_ms": 0.397,
+          "tick_p99_ms": 0.721,
+          "p95_budget_pct": 0.795,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.142,
+            "transfers_ms": 0.01,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.397
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.176,
+            "transfers_ms": 0.018,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.721
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.991,
+          "snapshot_hz": 20.041,
+          "snapshot_KiB_s": 29.966,
+          "tick_p50_ms": 0.211,
+          "tick_p95_ms": 0.344,
+          "tick_p99_ms": 0.59,
+          "p95_budget_pct": 0.687,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.128,
+            "transfers_ms": 0.005,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.344
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.015,
+            "simulation_ms": 0.166,
+            "transfers_ms": 0.02,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.59
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 30.807,
+          "tick_p50_ms": 0.227,
+          "tick_p95_ms": 0.396,
+          "tick_p99_ms": 0.686,
+          "p95_budget_pct": 0.792,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.1,
+            "transfers_ms": 0.009,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.396
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 0.168,
+            "transfers_ms": 0.017,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.686
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.011,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.989,
+          "snapshot_hz": 19.989,
+          "snapshot_KiB_s": 2666.65,
+          "tick_p50_ms": 1.326,
+          "tick_p95_ms": 1.79,
+          "tick_p99_ms": 2.307,
+          "p95_budget_pct": 3.581,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.278,
+            "transfers_ms": 0.165,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.79
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 1.796,
+            "transfers_ms": 0.377,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.307
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.989,
+          "snapshot_hz": 19.989,
+          "snapshot_KiB_s": 2491.771,
+          "tick_p50_ms": 1.287,
+          "tick_p95_ms": 1.817,
+          "tick_p99_ms": 2.691,
+          "p95_budget_pct": 3.635,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.321,
+            "transfers_ms": 0.177,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.817
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 2.253,
+            "transfers_ms": 0.389,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.691
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.039,
+          "snapshot_hz": 20.039,
+          "snapshot_KiB_s": 2655.529,
+          "tick_p50_ms": 1.32,
+          "tick_p95_ms": 1.755,
+          "tick_p99_ms": 2.143,
+          "p95_budget_pct": 3.511,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.403,
+            "transfers_ms": 0.121,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.755
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 1.928,
+            "transfers_ms": 0.135,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.143
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.022,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.028,
+          "snapshot_hz": 20.028,
+          "snapshot_KiB_s": 2681.652,
+          "tick_p50_ms": 1.983,
+          "tick_p95_ms": 2.607,
+          "tick_p99_ms": 3.473,
+          "p95_budget_pct": 5.214,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.672,
+            "transfers_ms": 0.127,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.607
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 2.226,
+            "transfers_ms": 0.171,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.473
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.028,
+          "snapshot_hz": 20.028,
+          "snapshot_KiB_s": 2504.971,
+          "tick_p50_ms": 1.806,
+          "tick_p95_ms": 2.405,
+          "tick_p99_ms": 3.428,
+          "p95_budget_pct": 4.81,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.472,
+            "transfers_ms": 0.114,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.405
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 2.218,
+            "transfers_ms": 0.314,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.428
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.978,
+          "snapshot_hz": 19.978,
+          "snapshot_KiB_s": 2587.909,
+          "tick_p50_ms": 1.629,
+          "tick_p95_ms": 2.155,
+          "tick_p99_ms": 2.87,
+          "p95_budget_pct": 4.31,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.366,
+            "transfers_ms": 0.098,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.155
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 1.816,
+            "transfers_ms": 0.14,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.87
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.007,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.993,
+          "snapshot_hz": 19.993,
+          "snapshot_KiB_s": 7213.716,
+          "tick_p50_ms": 3.038,
+          "tick_p95_ms": 4.063,
+          "tick_p99_ms": 4.591,
+          "p95_budget_pct": 8.126,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.403,
+            "transfers_ms": 0.308,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.063
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 4.031,
+            "transfers_ms": 0.372,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.591
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.993,
+          "snapshot_hz": 19.993,
+          "snapshot_KiB_s": 7186.919,
+          "tick_p50_ms": 3.083,
+          "tick_p95_ms": 3.919,
+          "tick_p99_ms": 4.307,
+          "p95_budget_pct": 7.838,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.343,
+            "transfers_ms": 0.315,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.919
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.014,
+            "simulation_ms": 3.694,
+            "transfers_ms": 0.391,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.307
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.043,
+          "snapshot_hz": 20.043,
+          "snapshot_KiB_s": 7455.048,
+          "tick_p50_ms": 3.048,
+          "tick_p95_ms": 3.935,
+          "tick_p99_ms": 4.329,
+          "p95_budget_pct": 7.87,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 3.339,
+            "transfers_ms": 0.304,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.935
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 3.636,
+            "transfers_ms": 0.344,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.329
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.013,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.987,
+          "snapshot_hz": 19.987,
+          "snapshot_KiB_s": 7175.665,
+          "tick_p50_ms": 4.232,
+          "tick_p95_ms": 5.39,
+          "tick_p99_ms": 5.799,
+          "p95_budget_pct": 10.78,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.407,
+            "transfers_ms": 0.283,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.39
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.018,
+            "simulation_ms": 4.721,
+            "transfers_ms": 0.314,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.799
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 400,
+          "tick_hz": 20.037,
+          "snapshot_hz": 19.987,
+          "snapshot_KiB_s": 7078.78,
+          "tick_p50_ms": 4.159,
+          "tick_p95_ms": 5.061,
+          "tick_p99_ms": 5.375,
+          "p95_budget_pct": 10.121,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.098,
+            "transfers_ms": 0.286,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.061
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 4.333,
+            "transfers_ms": 0.348,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.375
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.987,
+          "snapshot_hz": 20.037,
+          "snapshot_KiB_s": 7238.252,
+          "tick_p50_ms": 4.215,
+          "tick_p95_ms": 5.316,
+          "tick_p99_ms": 5.915,
+          "p95_budget_pct": 10.631,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 4.3,
+            "transfers_ms": 0.295,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.316
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 4.745,
+            "transfers_ms": 0.352,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.915
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.011,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.989,
+          "snapshot_hz": 19.989,
+          "snapshot_KiB_s": 28.556,
+          "tick_p50_ms": 0.219,
+          "tick_p95_ms": 0.423,
+          "tick_p99_ms": 0.736,
+          "p95_budget_pct": 0.845,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.137,
+            "transfers_ms": 0.015,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.423
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.175,
+            "transfers_ms": 0.029,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.736
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.989,
+          "snapshot_hz": 19.989,
+          "snapshot_KiB_s": 26.37,
+          "tick_p50_ms": 0.204,
+          "tick_p95_ms": 0.376,
+          "tick_p99_ms": 0.657,
+          "p95_budget_pct": 0.752,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.146,
+            "transfers_ms": 0.008,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.376
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 0.192,
+            "transfers_ms": 0.017,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.657
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.039,
+          "snapshot_hz": 20.039,
+          "snapshot_KiB_s": 28.597,
+          "tick_p50_ms": 0.225,
+          "tick_p95_ms": 0.412,
+          "tick_p99_ms": 0.781,
+          "p95_budget_pct": 0.825,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.137,
+            "transfers_ms": 0.007,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.412
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.003,
+            "simulation_ms": 0.195,
+            "transfers_ms": 0.016,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.781
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.009,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 30.776,
+          "tick_p50_ms": 0.072,
+          "tick_p95_ms": 0.159,
+          "tick_p99_ms": 0.2,
+          "p95_budget_pct": 0.318,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.135,
+            "transfers_ms": 0.017,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.159
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.17,
+            "transfers_ms": 0.027,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.2
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 28.525,
+          "tick_p50_ms": 0.07,
+          "tick_p95_ms": 0.127,
+          "tick_p99_ms": 0.194,
+          "p95_budget_pct": 0.254,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.101,
+            "transfers_ms": 0.017,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.127
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 0.164,
+            "transfers_ms": 0.03,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.194
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.041,
+          "snapshot_hz": 20.041,
+          "snapshot_KiB_s": 30.853,
+          "tick_p50_ms": 0.071,
+          "tick_p95_ms": 0.116,
+          "tick_p99_ms": 0.237,
+          "p95_budget_pct": 0.232,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.089,
+            "transfers_ms": 0.02,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.116
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.223,
+            "transfers_ms": 0.034,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.237
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.018,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.032,
+          "snapshot_hz": 20.032,
+          "snapshot_KiB_s": 2674.687,
+          "tick_p50_ms": 1.844,
+          "tick_p95_ms": 2.513,
+          "tick_p99_ms": 3.228,
+          "p95_budget_pct": 5.026,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.592,
+            "transfers_ms": 0.109,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.513
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 2.301,
+            "transfers_ms": 0.14,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.228
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.982,
+          "snapshot_hz": 19.982,
+          "snapshot_KiB_s": 2489.884,
+          "tick_p50_ms": 1.763,
+          "tick_p95_ms": 2.271,
+          "tick_p99_ms": 2.745,
+          "p95_budget_pct": 4.543,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.401,
+            "transfers_ms": 0.109,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.271
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 1.622,
+            "transfers_ms": 0.17,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.745
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.982,
+          "snapshot_hz": 19.982,
+          "snapshot_KiB_s": 2641.358,
+          "tick_p50_ms": 1.627,
+          "tick_p95_ms": 2.112,
+          "tick_p99_ms": 2.385,
+          "p95_budget_pct": 4.225,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.363,
+            "transfers_ms": 0.105,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.112
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.612,
+            "transfers_ms": 0.122,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.385
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.009,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 2669.737,
+          "tick_p50_ms": 1.298,
+          "tick_p95_ms": 1.708,
+          "tick_p99_ms": 1.907,
+          "p95_budget_pct": 3.415,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.245,
+            "transfers_ms": 0.166,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.708
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.471,
+            "transfers_ms": 0.242,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.907
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.041,
+          "snapshot_hz": 20.041,
+          "snapshot_KiB_s": 2498.256,
+          "tick_p50_ms": 1.393,
+          "tick_p95_ms": 1.776,
+          "tick_p99_ms": 1.963,
+          "p95_budget_pct": 3.552,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.222,
+            "transfers_ms": 0.237,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.776
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.433,
+            "transfers_ms": 0.384,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.963
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 2582.988,
+          "tick_p50_ms": 1.379,
+          "tick_p95_ms": 1.666,
+          "tick_p99_ms": 1.887,
+          "p95_budget_pct": 3.332,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.153,
+            "transfers_ms": 0.199,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.666
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 1.345,
+            "transfers_ms": 0.391,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.887
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.01,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 400,
+          "tick_hz": 20.04,
+          "snapshot_hz": 19.99,
+          "snapshot_KiB_s": 7195.12,
+          "tick_p50_ms": 4.245,
+          "tick_p95_ms": 5.435,
+          "tick_p99_ms": 6.621,
+          "p95_budget_pct": 10.87,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 4.339,
+            "transfers_ms": 0.294,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.435
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 5.16,
+            "transfers_ms": 0.343,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.621
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.99,
+          "snapshot_hz": 19.99,
+          "snapshot_KiB_s": 6906.715,
+          "tick_p50_ms": 4.034,
+          "tick_p95_ms": 5.365,
+          "tick_p99_ms": 8.887,
+          "p95_budget_pct": 10.73,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.405,
+            "transfers_ms": 0.283,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.365
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 6.988,
+            "transfers_ms": 0.347,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 8.887
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.99,
+          "snapshot_hz": 20.04,
+          "snapshot_KiB_s": 7696.666,
+          "tick_p50_ms": 4.232,
+          "tick_p95_ms": 5.432,
+          "tick_p99_ms": 7.44,
+          "p95_budget_pct": 10.864,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.538,
+            "transfers_ms": 0.275,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.432
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.026,
+            "simulation_ms": 6.173,
+            "transfers_ms": 0.327,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.44
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.009,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 7356.453,
+          "tick_p50_ms": 3.102,
+          "tick_p95_ms": 4.139,
+          "tick_p99_ms": 6.308,
+          "p95_budget_pct": 8.278,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.603,
+            "transfers_ms": 0.318,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.139
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 5.341,
+            "transfers_ms": 0.452,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.308
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.041,
+          "snapshot_hz": 20.041,
+          "snapshot_KiB_s": 7183.462,
+          "tick_p50_ms": 2.951,
+          "tick_p95_ms": 4.295,
+          "tick_p99_ms": 7.563,
+          "p95_budget_pct": 8.59,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.645,
+            "transfers_ms": 0.319,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.295
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.008,
+            "simulation_ms": 6.448,
+            "transfers_ms": 0.462,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.563
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.991,
+          "snapshot_hz": 19.991,
+          "snapshot_KiB_s": 7597.633,
+          "tick_p50_ms": 3.011,
+          "tick_p95_ms": 4.246,
+          "tick_p99_ms": 7.474,
+          "p95_budget_pct": 8.492,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.664,
+            "transfers_ms": 0.338,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.246
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 6.189,
+            "transfers_ms": 0.446,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.474
+          }
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "npcs": 30,
+      "variant": "reference",
+      "slowest_p50_ms": 0.233,
+      "slowest_p95_ms": 0.423,
+      "slowest_p99_ms": 0.721,
+      "min_tick_hz": 19.989,
+      "min_snapshot_hz": 19.989
+    },
+    {
+      "npcs": 30,
+      "variant": "candidate",
+      "slowest_p50_ms": 0.079,
+      "slowest_p95_ms": 0.166,
+      "slowest_p99_ms": 0.252,
+      "min_tick_hz": 19.991,
+      "min_snapshot_hz": 19.991
+    },
+    {
+      "npcs": 3000,
+      "variant": "reference",
+      "slowest_p50_ms": 1.956,
+      "slowest_p95_ms": 2.607,
+      "slowest_p99_ms": 3.473,
+      "min_tick_hz": 19.98,
+      "min_snapshot_hz": 19.98
+    },
+    {
+      "npcs": 3000,
+      "variant": "candidate",
+      "slowest_p50_ms": 1.371,
+      "slowest_p95_ms": 1.776,
+      "slowest_p99_ms": 2.691,
+      "min_tick_hz": 19.989,
+      "min_snapshot_hz": 19.989
+    },
+    {
+      "npcs": 9000,
+      "variant": "reference",
+      "slowest_p50_ms": 4.245,
+      "slowest_p95_ms": 5.39,
+      "slowest_p99_ms": 6.098,
+      "min_tick_hz": 19.99,
+      "min_snapshot_hz": 19.99
+    },
+    {
+      "npcs": 9000,
+      "variant": "candidate",
+      "slowest_p50_ms": 3.102,
+      "slowest_p95_ms": 4.295,
+      "slowest_p99_ms": 7.004,
+      "min_tick_hz": 19.993,
+      "min_snapshot_hz": 19.993
+    }
+  ],
+  "comparison": [
+    {
+      "npcs": 30,
+      "p50_delta_ms": -0.154,
+      "p50_delta_pct": -66.1,
+      "p95_delta_ms": -0.257,
+      "p95_delta_pct": -60.8,
+      "p99_delta_ms": -0.469,
+      "p99_delta_pct": -65
+    },
+    {
+      "npcs": 3000,
+      "p50_delta_ms": -0.585,
+      "p50_delta_pct": -29.9,
+      "p95_delta_ms": -0.831,
+      "p95_delta_pct": -31.9,
+      "p99_delta_ms": -0.782,
+      "p99_delta_pct": -22.5
+    },
+    {
+      "npcs": 9000,
+      "p50_delta_ms": -1.143,
+      "p50_delta_pct": -26.9,
+      "p95_delta_ms": -1.095,
+      "p95_delta_pct": -20.3,
+      "p99_delta_ms": 0.906,
+      "p99_delta_pct": 14.9
+    }
+  ],
+  "reference_lockfile": "a2c478bf8f6e048fd370d9fda85e96aeeba133aa",
+  "windows_reference_entry_points_from": "a2c478bf8f6e048fd370d9fda85e96aeeba133aa"
+}

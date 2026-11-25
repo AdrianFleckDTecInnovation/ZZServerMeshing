@@ -8,14 +8,7 @@ use shared::entity::{EntityState, EntityType};
 
 /// Build the outbound replication plan for the tick.
 ///
-/// **WI-221 (design 016, Batch 6):** single-pass classifier. The old three-
-/// path implementation (no-shadows bootstrap, per-peer tiered loop, and a
-/// second bootstrap append for peers that got nothing) did three allocations
-/// per peer and encoded its phase filter in three places. This rewrite walks
-/// each authoritative entity exactly once, and for every `peer_addrs` peer
-/// decides on the spot whether the entity belongs in its outbound list. The
-/// classification is behavior-equivalent to the old logic:
-///
+/// Compute the shadow bounds once, then classify the authoritative entities for each peer.
 /// - **Hot tier**: the peer has at least one Player shadow AND the entity is
 ///   within `PEER_AOI_RADIUS` of any of them. Every tick (20Hz).
 /// - **Cold tier**: the entity's phase (UUID `% 4`) matches `tick % 4` AND
@@ -121,87 +114,36 @@ pub fn prepare_replication(
         }
     }
 
-    // Pre-seed an empty entity list for every peer that has shadows AND has
-    // valid bounds. This preserves the pre-WI-221 invariant that such peers
-    // always appear in `per_peer` even when no entities match the per-tick
-    // phase filter — downstream code relies on the key presence to signal
-    // "peer known, nothing to send this tick" (vs. "peer unknown").
-    //
-    // Peers with shadows but no bounds (degenerate: collapsed positions) are
-    // intentionally skipped, matching the pre-refactor `continue` on missing
-    // bounds. Shadowless peers get the bootstrap tier instead and only land
-    // in `per_peer` if at least one phase-matched entity is sent.
-    for &peer_id in peer_addrs.0.keys() {
-        let has_any_shadows = peer_all_positions
-            .get(&peer_id)
-            .is_some_and(|p| !p.is_empty());
-        if has_any_shadows && peer_bounds.contains_key(&peer_id) {
-            outbound.per_peer.entry(peer_id).or_default();
-        }
-    }
-
-    // Single pass over entities. For each entity, for each peer, decide
-    // hot / cold / bootstrap inclusion in one place. `peer_addrs.0.keys()` is
-    // authoritative — entities are replicated to ALL registered peers, not
-    // just the ones with shadows (shadowless peers get the bootstrap tier).
-    let peer_ids: Vec<u16> = peer_addrs.0.keys().copied().collect();
-
-    for entity in &entities {
-        let phase_match = (entity.id.0.as_u128() % 4) as u64 == current_phase;
-
-        for &peer_id in &peer_ids {
-            let has_any_shadows = peer_all_positions
-                .get(&peer_id)
-                .is_some_and(|p| !p.is_empty());
-
-            if has_any_shadows {
-                // Shadowed peer: hot + cold classification.
-                let mut is_hot = false;
-                if let Some(players) = peer_player_positions.get(&peer_id) {
-                    is_hot = players.iter().any(|pp| {
-                        let dx = entity.position.x - pp.x;
-                        let dz = entity.position.z - pp.z;
-                        (dx * dx + dz * dz) <= PEER_AOI_RADIUS_SQ
-                    });
-                }
-
-                if is_hot {
-                    outbound
-                        .per_peer
-                        .entry(peer_id)
-                        .or_default()
-                        .push(entity.clone());
-                    outbound.hot_count += 1;
-                    continue;
-                }
-
-                // Cold: phase-matched AND within peer bounds.
-                if phase_match {
-                    if let Some(bounds) = peer_bounds.get(&peer_id) {
-                        if bounds.contains(entity.position) {
-                            outbound
-                                .per_peer
-                                .entry(peer_id)
-                                .or_default()
-                                .push(entity.clone());
-                            outbound.cold_count += 1;
-                        }
-                    }
-                }
-            } else {
-                // Bootstrap: peer is registered but has no shadows from us.
-                // Send phase-matched entities so it can re-hydrate at 5Hz.
-                // Matches the pre-WI-221 "no shadows anywhere" and "some peers
-                // have no shadows on this server" bootstrap paths.
-                if phase_match {
-                    outbound
-                        .per_peer
-                        .entry(peer_id)
-                        .or_default()
-                        .push(entity.clone());
-                    outbound.cold_count += 1;
-                }
+    // Resolve each peer's bounds, player positions and output once. Entity order per
+    // peer is the query order, including the phase-spread bootstrap for unknown peers.
+    for &peer in peer_addrs.0.keys() {
+        let bounds = peer_bounds.get(&peer);
+        let players = peer_player_positions
+            .get(&peer)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut selected = Vec::new();
+        let mut hot = 0;
+        for entity in &entities {
+            let is_hot = players.iter().any(|p| {
+                let dx = entity.position.x - p.x;
+                let dz = entity.position.z - p.z;
+                dx * dx + dz * dz <= PEER_AOI_RADIUS_SQ
+            });
+            if is_hot {
+                hot += 1;
+                selected.push(entity.clone());
+            } else if (entity.id.0.as_u128() % 4) as u64 == current_phase
+                && bounds.is_none_or(|b| b.contains(entity.position))
+            {
+                selected.push(entity.clone());
             }
+        }
+        outbound.hot_count += hot;
+        outbound.cold_count += selected.len() - hot;
+        // An empty list for a known peer distinguishes filtered from bootstrap traffic.
+        if bounds.is_some() || !selected.is_empty() {
+            outbound.per_peer.insert(peer, selected);
         }
     }
 }
@@ -1215,8 +1157,12 @@ mod tests {
             assert_eq!(p2.len(), 2, "tick 1: peer 2 gets A,B (hot)");
             let p3 = &outbound.per_peer[&3];
             assert_eq!(p3.len(), 1, "tick 1: peer 3 gets C (hot)");
-            for e in p2 { p2_seen.insert(e.id); }
-            for e in p3 { p3_seen.insert(e.id); }
+            for e in p2 {
+                p2_seen.insert(e.id);
+            }
+            for e in p3 {
+                p3_seen.insert(e.id);
+            }
         }
 
         // -- Tick 2 (phase 2): C matches cold phase --
@@ -1230,12 +1176,24 @@ mod tests {
         {
             let outbound = world.resource::<OutboundReplication>();
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(p2.len(), 2, "tick 2: peer 2 gets A,B (hot only, C outside peer 2 bounds)");
+            assert_eq!(
+                p2.len(),
+                2,
+                "tick 2: peer 2 gets A,B (hot only, C outside peer 2 bounds)"
+            );
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(p3.len(), 1, "tick 2: peer 3 gets C (cold-phase, within bounds)");
+            assert_eq!(
+                p3.len(),
+                1,
+                "tick 2: peer 3 gets C (cold-phase, within bounds)"
+            );
             assert_eq!(p3[0].id, eid_c);
-            for e in p2 { p2_seen.insert(e.id); }
-            for e in p3 { p3_seen.insert(e.id); }
+            for e in p2 {
+                p2_seen.insert(e.id);
+            }
+            for e in p3 {
+                p3_seen.insert(e.id);
+            }
         }
 
         // -- Tick 3 (phase 3): A,B match cold phase --
@@ -1247,11 +1205,23 @@ mod tests {
         {
             let outbound = world.resource::<OutboundReplication>();
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(p2.len(), 2, "tick 3: peer 2 gets A,B (cold-phase 3, within bounds)");
+            assert_eq!(
+                p2.len(),
+                2,
+                "tick 3: peer 2 gets A,B (cold-phase 3, within bounds)"
+            );
             let p3 = &outbound.per_peer[&3];
-            assert_eq!(p3.len(), 1, "tick 3: peer 3 gets C (hot), A,B outside peer 3 bounds");
-            for e in p2 { p2_seen.insert(e.id); }
-            for e in p3 { p3_seen.insert(e.id); }
+            assert_eq!(
+                p3.len(),
+                1,
+                "tick 3: peer 3 gets C (hot), A,B outside peer 3 bounds"
+            );
+            for e in p2 {
+                p2_seen.insert(e.id);
+            }
+            for e in p3 {
+                p3_seen.insert(e.id);
+            }
         }
 
         // -- Tick 4 (phase 0): D matches cold phase --
@@ -1265,11 +1235,19 @@ mod tests {
             let outbound = world.resource::<OutboundReplication>();
             assert!(outbound.full_snapshot.is_none());
             let p2 = &outbound.per_peer[&2];
-            assert_eq!(p2.len(), 2, "tick 4: peer 2 gets A,B (hot), D outside bounds");
+            assert_eq!(
+                p2.len(),
+                2,
+                "tick 4: peer 2 gets A,B (hot), D outside bounds"
+            );
             let p3 = &outbound.per_peer[&3];
             assert_eq!(p3.len(), 1, "tick 4: peer 3 gets C (hot), D outside bounds");
-            for e in p2 { p2_seen.insert(e.id); }
-            for e in p3 { p3_seen.insert(e.id); }
+            for e in p2 {
+                p2_seen.insert(e.id);
+            }
+            for e in p3 {
+                p3_seen.insert(e.id);
+            }
         }
 
         // With AoI-filtered cold, each peer only sees entities within its bounds:

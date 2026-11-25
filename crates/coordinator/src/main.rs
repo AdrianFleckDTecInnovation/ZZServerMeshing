@@ -114,7 +114,7 @@ async fn main() {
     // the coordinator control channel unencrypted even in the UNO Q TLS
     // deployment. Mac-local dev is unchanged — no --tls-cert means no
     // acceptor means plain WS as before.
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
+    let listener = TcpListener::bind(shared::listen_addr(args.port))
         .await
         .expect("Failed to bind coordinator port");
     let ws_scheme = if tls_acceptor.is_some() { "wss" } else { "ws" };
@@ -593,7 +593,7 @@ async fn run_assignment_server(
     static_dir: Option<PathBuf>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+    let listener = TcpListener::bind(shared::listen_addr(port))
         .await
         .expect("Failed to bind HTTP assignment port");
     let static_dir = static_dir.map(Arc::new);

@@ -3,13 +3,48 @@ name: Native mesh
 on: [push, pull_request, workflow_dispatch]
 
 jobs:
+  compare-original:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: rustup default stable
+      - run: npm run bench:compare -- --max-growth-percent 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-original-comparison-${{ matrix.os }}
+          path: target/browser-comparison.json
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo install cargo-audit --locked --version 0.23.0
+      - run: cargo audit --file Cargo.lock
+      - run: npm audit && npm --prefix client audit && npm --prefix tools audit && npm --prefix mcp-oracle audit
+
   verify:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,8 +52,21 @@ jobs:
           node-version: 22
       - run: rustup default stable
       - run: npm run setup
+      - run: cargo fmt -p zz-mesh -p infinite-stars --check
       - run: npm test
+      - run: cargo run --locked -p infinite-stars --example survey_probe
+      - run: cargo run --locked -p infinite-stars -- demo target/ci-stars
       - run: npm run smoke
       - run: npm run bench -- --servers 3 --npcs 300 --seconds 10
+      - run: cargo run --locked --release -p infinite-stars --bin mesh-bench -- target/stars-benchmark.json
+      - run: cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json
+      - run: cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/cluster-wire.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stars-benchmark-${{ matrix.os }}
+          path: |
+            target/stars-benchmark.json
+            target/cluster-players.json
+            target/cluster-wire.json
       - run: npm --prefix mcp-oracle ci
       - run: npm --prefix mcp-oracle run build

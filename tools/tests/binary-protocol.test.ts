@@ -5,6 +5,7 @@
  * Run: npx tsx tools/tests/binary-protocol.test.ts
  */
 import assert from 'node:assert/strict';
+import { decodeBinaryFrame as decodeClientFrame } from '../../client/src/binary-protocol.ts';
 
 // ── Re-implement types and decoder (extracted from client/src/) to avoid THREE dependency ──
 
@@ -688,6 +689,21 @@ test('frame type 0x03 returns null', () => {
   const buf = Buffer.alloc(64); // plenty of bytes, but unknown type
   buf[0] = 0x03;
   assert.equal(decodeBinaryFrame(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length)), null);
+});
+
+test('production client validates full snapshot length before decoding', () => {
+  const valid = buildFullSnapshot(42, [], defaultMetrics);
+  assert.equal(decodeClientFrame(valid)?.tick, 42);
+  assert.equal(decodeClientFrame(valid.slice(0, 9)), null);
+  new DataView(valid).setUint32(9, 1, true);
+  assert.equal(decodeClientFrame(valid), null);
+});
+
+test('production client checks the complete delta removal payload', () => {
+  const valid = buildDeltaFrame(43, [], [TEST_UUID], defaultMetrics);
+  assert.equal(decodeClientFrame(valid)?.removals.length, 1);
+  assert.equal(decodeClientFrame(valid.slice(0, 15)), null);
+  assert.equal(decodeClientFrame(valid.slice(0, -1)), null);
 });
 
 // ── Summary ──

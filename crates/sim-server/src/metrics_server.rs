@@ -7,7 +7,7 @@ const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
 
 /// Minimal HTTP server that serves a dashboard at `/` and metrics JSON at `/metrics`.
 pub async fn run_metrics_server(port: u16, collector: Arc<std::sync::Mutex<MetricsCollector>>) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")).await {
+    let listener = match TcpListener::bind(shared::listen_addr(port)).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("Failed to bind metrics port {port}: {e}");

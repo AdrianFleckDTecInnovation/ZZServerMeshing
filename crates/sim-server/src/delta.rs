@@ -62,31 +62,51 @@ pub fn compute_delta(
     current: &[EntityState],
     baseline: &HashMap<EntityId, EntityState>,
 ) -> DeltaResult {
-    let mut updates = Vec::new();
-    let mut current_ids = HashSet::with_capacity(current.len());
+    select_delta_inner(current, baseline, usize::MAX, false).expect("unlimited delta")
+}
 
+/// Input contains one state per visible network identity. If every previous ID is
+/// still visible, skip building the removal set. A dense update can stop as soon
+/// as its count requires a full snapshot, before doing any removal work.
+pub(crate) fn select_delta(
+    current: &[EntityState],
+    baseline: &HashMap<EntityId, EntityState>,
+    limit: usize,
+) -> Option<DeltaResult> {
+    select_delta_inner(current, baseline, limit, true)
+}
+
+fn select_delta_inner(
+    current: &[EntityState],
+    baseline: &HashMap<EntityId, EntityState>,
+    limit: usize,
+    unique: bool,
+) -> Option<DeltaResult> {
+    let mut updates = Vec::new();
+    let mut known = 0;
     for entity in current {
-        current_ids.insert(entity.id);
-        match baseline.get(&entity.id) {
-            None => {
-                // New entity -- not in baseline
-                updates.push(entity.clone());
-            }
-            Some(base) => {
-                if entity_changed(entity, base) {
-                    updates.push(entity.clone());
-                }
+        if let Some(base) = baseline.get(&entity.id) {
+            known += 1;
+            if !entity_changed(entity, base) {
+                continue;
             }
         }
+        if updates.len() == limit {
+            return None;
+        }
+        updates.push(entity.clone());
     }
-
-    let removals: Vec<EntityId> = baseline
-        .keys()
-        .filter(|id| !current_ids.contains(id))
-        .copied()
-        .collect();
-
-    DeltaResult { updates, removals }
+    let removals = if unique && known == baseline.len() {
+        Vec::new()
+    } else {
+        let visible: HashSet<_> = current.iter().map(|e| e.id).collect();
+        baseline
+            .keys()
+            .filter(|id| !visible.contains(id))
+            .copied()
+            .collect()
+    };
+    Some(DeltaResult { updates, removals })
 }
 
 /// Build a baseline map from a full entity snapshot.
@@ -128,6 +148,29 @@ mod tests {
 
     fn make_player(pos: Vec3, server: u16) -> EntityState {
         EntityState::new_player(pos, ServerId(server))
+    }
+
+    #[test]
+    fn bounded_delta_handles_exact_cutoff_and_equal_size_replacement() {
+        let original: Vec<_> = (0..5).map(|_| make_npc(Vec3::ZERO, 1)).collect();
+        let baseline = build_baseline(&original);
+        let mut current = original.clone();
+        current[0] = make_npc(Vec3::X, 1);
+        for e in &mut current[1..4] {
+            e.position.z = 1.0;
+        }
+        let delta = select_delta(&current, &baseline, 4).unwrap();
+        assert_eq!(delta.removals, vec![original[0].id]);
+        assert_eq!(delta.updates.len(), 4);
+        current[4].position.z = 1.0;
+        assert!(select_delta(&current, &baseline, 4).is_none());
+        // General-purpose callers can pass duplicate IDs. They still see the missing entity.
+        current = original.clone();
+        current[1] = current[0].clone();
+        assert_eq!(
+            compute_delta(&current, &baseline).removals,
+            vec![original[1].id]
+        );
     }
 
     #[test]

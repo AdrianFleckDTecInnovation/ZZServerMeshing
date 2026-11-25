@@ -1,0 +1,660 @@
+{
+  "architecture": "x86_64",
+  "cpu": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+  "logical_threads": 28,
+  "migration": [
+    {
+      "bulk_payload": 4112,
+      "cache_hits": 0,
+      "pause_ns": 1529900,
+      "preparation_ns": 2800000,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 2,
+      "pause_ns": 1344800,
+      "preparation_ns": 480500,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 2,
+      "pause_ns": 1765400,
+      "preparation_ns": 525200,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 4,
+      "pause_ns": 1495000,
+      "preparation_ns": 660500,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 4,
+      "pause_ns": 1308100,
+      "preparation_ns": 717900,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 6,
+      "pause_ns": 1176000,
+      "preparation_ns": 467400,
+      "target": 1
+    }
+  ],
+  "network_migration": [
+    {
+      "bulk_payload": 4112,
+      "pause_ns": 7195600,
+      "prepare_ns": 9547000,
+      "socket_rx": 7893,
+      "socket_tx": 8038,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "pause_ns": 6514200,
+      "prepare_ns": 7483100,
+      "socket_rx": 3389,
+      "socket_tx": 3215,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "pause_ns": 5130300,
+      "prepare_ns": 5946500,
+      "socket_rx": 3389,
+      "socket_tx": 3220,
+      "target": 2
+    }
+  ],
+  "os": "windows",
+  "profile": "release",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "scenario_version": 1,
+  "scenes": [
+    {
+      "active_subscriptions": 256,
+      "additional_live_heap_peak": 124558,
+      "allocated_bytes": 3302045,
+      "allocations": 17393,
+      "delivery_queue_peak": 5,
+      "directed_peer_pairs": 1,
+      "exact_spatial_candidates": 976,
+      "field_payload_bytes": 17101,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 522400,
+        "p50": 37500,
+        "p95": 127500,
+        "p99": 380900
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 896,
+      "repeated_frames": 57,
+      "scheduled_edge_peak_sum": 256,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 1
+    },
+    {
+      "active_subscriptions": 286,
+      "additional_live_heap_peak": 100127,
+      "allocated_bytes": 4001618,
+      "allocations": 20074,
+      "delivery_queue_peak": 9,
+      "directed_peer_pairs": 3,
+      "exact_spatial_candidates": 982,
+      "field_payload_bytes": 19200,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 510200,
+        "p50": 53700,
+        "p95": 103700,
+        "p99": 432000
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 1106,
+      "repeated_frames": 64,
+      "scheduled_edge_peak_sum": 283,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 2
+    },
+    {
+      "active_subscriptions": 309,
+      "additional_live_heap_peak": 84757,
+      "allocated_bytes": 4720520,
+      "allocations": 23163,
+      "delivery_queue_peak": 12,
+      "directed_peer_pairs": 7,
+      "exact_spatial_candidates": 986,
+      "field_payload_bytes": 20718,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 537900,
+        "p50": 82100,
+        "p95": 325300,
+        "p99": 459600
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 1266,
+      "repeated_frames": 67,
+      "scheduled_edge_peak_sum": 304,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 4
+    },
+    {
+      "active_subscriptions": 1024,
+      "additional_live_heap_peak": 253417,
+      "allocated_bytes": 13451938,
+      "allocations": 70035,
+      "delivery_queue_peak": 19,
+      "directed_peer_pairs": 4,
+      "exact_spatial_candidates": 3904,
+      "field_payload_bytes": 72902,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 1743200,
+        "p50": 146300,
+        "p95": 352300,
+        "p99": 1687500
+      },
+      "objects": 1024,
+      "physical_islands": 4,
+      "projected_fields_since_start": 3584,
+      "repeated_frames": 226,
+      "scheduled_edge_peak_sum": 1024,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 4
+    },
+    {
+      "active_subscriptions": 4096,
+      "additional_live_heap_peak": 769710,
+      "allocated_bytes": 54048748,
+      "allocations": 278294,
+      "delivery_queue_peak": 72,
+      "directed_peer_pairs": 16,
+      "exact_spatial_candidates": 15616,
+      "field_payload_bytes": 296196,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 7717000,
+        "p50": 762000,
+        "p95": 2090600,
+        "p99": 6469200
+      },
+      "objects": 4096,
+      "physical_islands": 16,
+      "projected_fields_since_start": 14336,
+      "repeated_frames": 904,
+      "scheduled_edge_peak_sum": 4096,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 16
+    }
+  ],
+  "transport": {
+    "durable_action_paths": [
+      {
+        "client_decode_cpu_ns": 0,
+        "client_decode_cycles": 0,
+        "client_encode_cpu_ns": 0,
+        "client_encode_cycles": 0,
+        "distinct_actions": 192,
+        "encoded_requests": 0,
+        "encoded_responses": 0,
+        "framing_buffer_bytes": 0,
+        "path": "direct",
+        "roundtrip_ns": {
+          "max": 2016700,
+          "p50": 1280200,
+          "p95": 1962700,
+          "p99": 2016700
+        },
+        "rpc_calls": 27,
+        "server_decode_cpu_ns": 0,
+        "server_decode_cycles": 0,
+        "server_encode_cpu_ns": 0,
+        "server_encode_cycles": 0,
+        "socket_rx": 0,
+        "socket_tx": 0,
+        "targets": 768
+      },
+      {
+        "client_decode_cpu_ns": 0,
+        "client_decode_cycles": 162890,
+        "client_encode_cpu_ns": 0,
+        "client_encode_cycles": 99764,
+        "distinct_actions": 192,
+        "encoded_requests": 9990,
+        "encoded_responses": 22174,
+        "framing_buffer_bytes": 32164,
+        "path": "tcp_mtls",
+        "roundtrip_ns": {
+          "max": 3957400,
+          "p50": 1620300,
+          "p95": 3494300,
+          "p99": 3957400
+        },
+        "rpc_calls": 27,
+        "server_decode_cpu_ns": 0,
+        "server_decode_cycles": 160125,
+        "server_encode_cpu_ns": 0,
+        "server_encode_cycles": 186853,
+        "socket_rx": 23986,
+        "socket_tx": 11634,
+        "targets": 768
+      }
+    ],
+    "same_owner_lookup": {
+      "calls": 512,
+      "tcp_mtls": {
+        "roundtrip_ns": {
+          "max": 1174200,
+          "p50": 38600,
+          "p95": 71200,
+          "p99": 104400
+        },
+        "rx": 19379,
+        "tx": 25871
+      },
+      "udp_loopback": {
+        "roundtrip_ns": {
+          "max": 371600,
+          "p50": 27500,
+          "p95": 37000,
+          "p99": 71900
+        },
+        "rx": 2048,
+        "tx": 8704
+      }
+    }
+  },
+  "voxel_codecs": [
+    {
+      "changed": 2,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 8,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 49700,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 38900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 28,
+              "codec": "json",
+              "decode_elapsed_ns": 67800,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 33100,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 10,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 49800,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 36200,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 29,
+              "codec": "json",
+              "decode_elapsed_ns": 63600,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 36200,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 521,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 336600,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 282500,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 1075,
+              "codec": "json",
+              "decode_elapsed_ns": 1693400,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 679200,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 16,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 64,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 63400,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 53900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 151,
+              "codec": "json",
+              "decode_elapsed_ns": 265800,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 98000,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 80,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 127500,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 90900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 180,
+              "codec": "json",
+              "decode_elapsed_ns": 279000,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 122900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 531,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 292200,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 202200,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 1102,
+              "codec": "json",
+              "decode_elapsed_ns": 1688700,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 701900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 256,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 996,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 494300,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 388100,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 2246,
+              "codec": "json",
+              "decode_elapsed_ns": 2899100,
+              "decode_thread_cpu_ns": 15625000,
+              "encode_elapsed_ns": 845400,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 1252,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1647100,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 845600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 2755,
+              "codec": "json",
+              "decode_elapsed_ns": 3656900,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 1737000,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 621,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 348100,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 296900,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 1419,
+              "codec": "json",
+              "decode_elapsed_ns": 1981800,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 844700,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 1024,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 3974,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1754300,
+              "decode_thread_cpu_ns": 15625000,
+              "encode_elapsed_ns": 1298600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 8951,
+              "codec": "json",
+              "decode_elapsed_ns": 9924200,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 3523600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 4998,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 5563800,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 2205200,
+              "encode_thread_cpu_ns": 15625000,
+              "iterations": 512
+            },
+            {
+              "bytes": 10996,
+              "codec": "json",
+              "decode_elapsed_ns": 12844300,
+              "decode_thread_cpu_ns": 15625000,
+              "encode_elapsed_ns": 5875600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 911,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 429600,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 385600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 2928,
+              "codec": "json",
+              "decode_elapsed_ns": 3062100,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 1254600,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 4096,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 15886,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 7478000,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 5252800,
+              "encode_thread_cpu_ns": 15625000,
+              "iterations": 512
+            },
+            {
+              "bytes": 35767,
+              "codec": "json",
+              "decode_elapsed_ns": 45293900,
+              "decode_thread_cpu_ns": 46875000,
+              "encode_elapsed_ns": 11098600,
+              "encode_thread_cpu_ns": 15625000,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 1252,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1677100,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 766100,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 3011,
+              "codec": "json",
+              "decode_elapsed_ns": 4166400,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 1435300,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 2063,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1361400,
+              "decode_thread_cpu_ns": 15625000,
+              "encode_elapsed_ns": 1166000,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            },
+            {
+              "bytes": 7365,
+              "codec": "json",
+              "decode_elapsed_ns": 8529300,
+              "decode_thread_cpu_ns": 0,
+              "encode_elapsed_ns": 5977300,
+              "encode_thread_cpu_ns": 0,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    }
+  ]
+}

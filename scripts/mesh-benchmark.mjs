@@ -11,14 +11,24 @@ export async function benchmark({ servers, host, total, seconds, metrics, signal
   try {
     for (const server of servers) {
       const socket = new WebSocket(`ws://${host}:${server.ws}`);
-      const client = { socket, frames: 0, bytes: 0 };
+      const client = { socket, frames: 0, bytes: 0, full: 0, records: 0, removals: 0 };
       clients.push(client);
       socket.binaryType = 'arraybuffer';
       socket.onmessage = ({ data }) => {
         if (typeof data === 'string') return;
         const bytes = new Uint8Array(data);
-        if (bytes.length < 9 || (bytes[0] !== 1 && bytes[0] !== 2)) {
+        const full = bytes[0] === 1;
+        const header = full ? 27 : 31;
+        if (bytes.length < header || (!full && bytes[0] !== 2)) {
           failed.abort(new Error(`S${server.id} returned an invalid snapshot`));
+          return;
+        }
+        // crates/sim-server/src/encoding.rs encodes 47 bytes per state and 16 per removed UUID.
+        const view = new DataView(data);
+        const records = view.getUint32(9, true);
+        const removals = full ? 0 : view.getUint32(13, true);
+        if (bytes.length !== header + 47 * records + 16 * removals) {
+          failed.abort(new Error(`S${server.id} returned inconsistent snapshot counts`));
           return;
         }
         const ack = bytes.slice(0, 9);
@@ -26,6 +36,9 @@ export async function benchmark({ servers, host, total, seconds, metrics, signal
         socket.send(ack);
         client.frames++;
         client.bytes += bytes.length;
+        client.full += Number(full);
+        client.records += records;
+        client.removals += removals;
       };
       socket.onerror = socket.onclose = () => {
         if (!closing) failed.abort(new Error(`Benchmark client disconnected from S${server.id}`));
@@ -49,7 +62,7 @@ export async function benchmark({ servers, host, total, seconds, metrics, signal
     const before = await metrics();
     checkLoad(before);
     const start = performance.now();
-    const counters = clients.map(c => ({ frames: c.frames, bytes: c.bytes }));
+    const counters = clients.map(({ frames, bytes, full, records, removals }) => ({ frames, bytes, full, records, removals }));
     await sleep(seconds * 1000, undefined, { signal });
     const after = await metrics();
     const elapsed = (performance.now() - start) / 1000;
@@ -63,9 +76,13 @@ export async function benchmark({ servers, host, total, seconds, metrics, signal
       return {
         server: m.server_id, authoritative: m.entity_count, shadows: m.shadow_count, peers: m.peer_count,
         ticks, snapshots: frames, tick_hz: rounded(ticks / elapsed), snapshot_hz: rounded(frames / elapsed),
+        full_snapshots: clients[i].full - counters[i].full, entity_records: clients[i].records - counters[i].records,
+        removal_ids: clients[i].removals - counters[i].removals, snapshot_bytes: clients[i].bytes - counters[i].bytes,
         snapshot_KiB_s: rounded((clients[i].bytes - counters[i].bytes) / 1024 / elapsed),
         tick_p50_ms: rounded(m.phases.total_ms.p50), tick_p95_ms: rounded(m.phases.total_ms.p95),
         tick_p99_ms: rounded(m.phases.total_ms.p99), p95_budget_pct: rounded(m.tick_budget_pct),
+        phase_p95_ms: Object.fromEntries(Object.entries(m.phases).map(([name, p]) => [name, rounded(p.p95)])),
+        phase_p99_ms: Object.fromEntries(Object.entries(m.phases).map(([name, p]) => [name, rounded(p.p99)])),
       };
     });
     return {

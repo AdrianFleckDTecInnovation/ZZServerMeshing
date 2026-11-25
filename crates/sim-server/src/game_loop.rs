@@ -182,6 +182,89 @@ impl Default for PeerHealthAccumulator {
 /// Shared between the UDP receiver task (writes) and the game loop (reads/resets).
 pub type SharedPeerHealth = std::sync::Mutex<PeerHealthAccumulator>;
 
+/// The demo's production ECS world and schedule. Both transports feed these resources.
+pub struct DemoWorker {
+    pub world: World,
+    schedule: Schedule,
+}
+
+impl DemoWorker {
+    pub fn new(server_id: ServerId, session_id: u64, initial_npcs: u32, cold_start: bool) -> Self {
+        Self::with_peers(server_id, session_id, initial_npcs, cold_start, Default::default())
+    }
+
+    fn with_peers(server_id: ServerId, session_id: u64, initial_npcs: u32, cold_start: bool,
+        active_peers: Arc<std::sync::RwLock<std::collections::HashSet<u16>>>) -> Self {
+        // -- Create ECS World --
+        let mut world = bevy_ecs::world::World::default();
+
+        // Register all resources
+        world.insert_resource(ServerConfig { server_id });
+        world.insert_resource(SessionId(session_id));
+        world.init_resource::<TickCounter>();
+        world.init_resource::<PeerAddresses>();
+        // WI-202: per-peer WS URL resource, written by process_coord_events and
+        // read by process_transfers to construct `Reconnect { url }` for player
+        // migration.
+        world.init_resource::<PeerWsAddresses>();
+        // WI-213: insert the ActivePeers resource with the shared Arc so the
+        // receiver task (which holds its own clone) sees updates written by
+        // `process_coord_events` when PeerList broadcasts arrive. Inserting by
+        // value (not init_resource) binds the ECS to the exact Arc the caller
+        // passed in.
+        world.insert_resource(crate::resources::ActivePeers(active_peers.clone()));
+        world.init_resource::<EntityLookup>();
+        world.init_resource::<InboundQueue>();
+        world.init_resource::<CoordEventQueue>();
+        world.init_resource::<OutboundReplication>();
+        world.init_resource::<PendingTransfers>();
+        world.init_resource::<OutboundTransfers>();
+        world.init_resource::<OutboundForwards>();
+        world.init_resource::<DrainState>();
+        world.init_resource::<ShutdownRequested>();
+        world.init_resource::<ClientRegistry>();
+        world.init_resource::<OutboundCoordMessages>();
+        world.init_resource::<EntityOwnership>();
+
+        // Spawn initial NPCs. Use a capped range (±800) so NPCs cluster near the
+        // origin where players spawn. With AoI filtering (500 unit radius), spreading
+        // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
+        //
+        // WI-215 (finding 085): gate on `cold_start`. On a restart-after-crash or
+        // rolling redeploy, survivors have already adopted the entities this
+        // server previously owned (via shadow promotion or authority transfer).
+        // Re-spawning the default `initial_npcs` would duplicate them on every
+        // cycle. Only spawn when the operator explicitly asked for a fresh
+        // cluster bootstrap via `--cold-start`.
+        if cold_start {
+            let mut rng = rand::rng();
+            let spawn_range = 400.0_f32;
+            for _ in 0..initial_npcs {
+                let pos = Vec3::new(
+                    rng.random_range(-spawn_range..spawn_range),
+                    0.0,
+                    rng.random_range(-spawn_range..spawn_range),
+                );
+                let state = EntityState::new_npc(pos, server_id);
+                spawn_from_entity_state_direct(&mut world, &state, true, None);
+            }
+            tracing::info!("ECS World initialized with {} NPCs (cold start)", initial_npcs);
+        } else {
+            tracing::info!(
+                "ECS World initialized with 0 NPCs (cold_start=false; initial_npcs={} ignored — expected on restart)",
+                initial_npcs
+            );
+        }
+
+        Self { world, schedule: build_schedule() }
+    }
+
+    pub fn step(&mut self) {
+        self.world.resource_mut::<TickCounter>().0 += 1;
+        self.schedule.run(&mut self.world);
+    }
+}
+
 /// Run the new ECS-based game loop.
 ///
 /// `drain_complete` (WI-191): a `Notify` that the game loop pokes when it
@@ -220,66 +303,7 @@ pub async fn run_game_loop_ecs(
     // per-peer maps don't grow unbounded over the server's lifetime.
     active_peers: Arc<std::sync::RwLock<std::collections::HashSet<u16>>>,
 ) {
-    // -- Create ECS World --
-    let mut world = bevy_ecs::world::World::default();
-
-    // Register all resources
-    world.insert_resource(ServerConfig { server_id });
-    world.insert_resource(SessionId(session_id));
-    world.init_resource::<TickCounter>();
-    world.init_resource::<PeerAddresses>();
-    // WI-202: per-peer WS URL resource, written by process_coord_events and
-    // read by process_transfers to construct `Reconnect { url }` for player
-    // migration.
-    world.init_resource::<PeerWsAddresses>();
-    // WI-213: insert the ActivePeers resource with the shared Arc so the
-    // receiver task (which holds its own clone) sees updates written by
-    // `process_coord_events` when PeerList broadcasts arrive. Inserting by
-    // value (not init_resource) binds the ECS to the exact Arc the caller
-    // passed in.
-    world.insert_resource(crate::resources::ActivePeers(active_peers.clone()));
-    world.init_resource::<EntityLookup>();
-    world.init_resource::<InboundQueue>();
-    world.init_resource::<CoordEventQueue>();
-    world.init_resource::<OutboundReplication>();
-    world.init_resource::<PendingTransfers>();
-    world.init_resource::<OutboundTransfers>();
-    world.init_resource::<OutboundForwards>();
-    world.init_resource::<DrainState>();
-    world.init_resource::<ShutdownRequested>();
-    world.init_resource::<ClientRegistry>();
-    world.init_resource::<OutboundCoordMessages>();
-    world.init_resource::<EntityOwnership>();
-
-    // Spawn initial NPCs. Use a capped range (±800) so NPCs cluster near the
-    // origin where players spawn. With AoI filtering (500 unit radius), spreading
-    // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
-    //
-    // WI-215 (finding 085): gate on `cold_start`. On a restart-after-crash or
-    // rolling redeploy, survivors have already adopted the entities this
-    // server previously owned (via shadow promotion or authority transfer).
-    // Re-spawning the default `initial_npcs` would duplicate them on every
-    // cycle. Only spawn when the operator explicitly asked for a fresh
-    // cluster bootstrap via `--cold-start`.
-    if cold_start {
-        let mut rng = rand::rng();
-        let spawn_range = 400.0_f32;
-        for _ in 0..initial_npcs {
-            let pos = Vec3::new(
-                rng.random_range(-spawn_range..spawn_range),
-                0.0,
-                rng.random_range(-spawn_range..spawn_range),
-            );
-            let state = EntityState::new_npc(pos, server_id);
-            spawn_from_entity_state_direct(&mut world, &state, true, None);
-        }
-        tracing::info!("ECS World initialized with {} NPCs (cold start)", initial_npcs);
-    } else {
-        tracing::info!(
-            "ECS World initialized with 0 NPCs (cold_start=false; initial_npcs={} ignored — expected on restart)",
-            initial_npcs
-        );
-    }
+    let mut worker = DemoWorker::with_peers(server_id, session_id, initial_npcs, cold_start, active_peers);
 
     // Wire the local session id into the metrics collector so /metrics can
     // expose it (WI-136). We do this once, right after resource insertion —
@@ -288,9 +312,6 @@ pub async fn run_game_loop_ecs(
         let mut m = metrics.lock().unwrap_or_else(|e| e.into_inner());
         m.set_session_id(session_id);
     }
-
-    // Build the schedule
-    let mut schedule = build_schedule();
 
     // Tick loop
     let mut interval = tokio::time::interval(TICK_DURATION);
@@ -304,7 +325,6 @@ pub async fn run_game_loop_ecs(
     let mut udp_repl_closed = false;
     let mut udp_ctrl_closed = false;
     // Outbound UDP byte counter, reset each tick (WI-101)
-    let mut udp_bytes_out: u64 = 0;
 
     loop {
         interval.tick().await;
@@ -312,6 +332,7 @@ pub async fn run_game_loop_ecs(
         // Per-tick tracing span with server_id and tick for structured log correlation.
         // Scope is limited to the synchronous ECS phases (before any await points)
         // because entered spans are not Send across await boundaries.
+        let world = &mut worker.world;
         let current_tick = world.resource::<TickCounter>().0;
         // WI-212: publish the current tick to the shared atomic so the UDP
         // receiver can stamp `session_changed_at_tick` when it observes a
@@ -351,19 +372,21 @@ pub async fn run_game_loop_ecs(
 
         // -- Phase 2: Increment tick and run all ECS systems --
         let t1 = Instant::now();
-        world.resource_mut::<TickCounter>().0 += 1;
-        schedule.run(&mut world);
+        worker.step();
+        let world = &mut worker.world;
         let sim_dur = t1.elapsed();
 
         // Drop the tracing span guard before yielding (entered spans are not Send)
         drop(_tick_guard);
 
-        // Yield to the tokio scheduler after the ECS schedule run.
-        // The game loop uses std::sync::Mutex which blocks the runtime thread.
-        // Without yield points, other tokio tasks (heartbeat sender, UDP
-        // receiver, coordinator client) can be starved for CPU time, causing
-        // false heartbeat timeouts under heavy load (5000+ entities).
-        tokio::task::yield_now().await;
+        // Short ticks already yield at the 50 ms timer. Give long CPU slices an
+        // extra scheduling point for the heartbeat, UDP receiver and client tasks.
+        const COOPERATIVE_SLICE: std::time::Duration = std::time::Duration::from_millis(1);
+        let mut slice_start = tick_start;
+        if slice_start.elapsed() >= COOPERATIVE_SLICE {
+            tokio::task::yield_now().await;
+            slice_start = Instant::now();
+        }
 
         // -- Phase 3: Extract outbound data --
         let repl_full = world
@@ -514,7 +537,7 @@ pub async fn run_game_loop_ecs(
         let t2 = Instant::now();
         let server_id_u16 = world.resource::<ServerConfig>().server_id;
         let session_id_u64 = world.resource::<SessionId>().0;
-        udp_bytes_out = 0;
+        let mut udp_bytes_out = 0;
 
         if let Some(entities) = &repl_full {
             // Full snapshot fallback: broadcast to all peers when filtering
@@ -586,9 +609,9 @@ pub async fn run_game_loop_ecs(
         }
         let transfer_dur = t2.elapsed();
 
-        // Second yield point: after enqueuing all UDP datagrams.
-        // This is the second-longest phase under heavy entity counts.
-        tokio::task::yield_now().await;
+        if slice_start.elapsed() >= COOPERATIVE_SLICE {
+            tokio::task::yield_now().await;
+        }
 
         // -- Phase 5: Per-client frames are sent by prepare_client_snapshot --
         // (frames are pushed directly into per-client mpsc channels during the schedule run)

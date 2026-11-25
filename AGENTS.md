@@ -9,8 +9,14 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | Run Rust tests, TypeScript checks and the client production build | `npm test` |
 | Exercise input acknowledgements and peer replication on a fresh mesh | `npm run smoke` |
 | Measure release binaries with three clients and 3,000 NPCs | `npm run bench -- --servers 3 --npcs 3000 --seconds 15` |
+| Compare the original browser demo with the working tree | `npm run bench:compare` |
+| Exercise player density, moving clusters and directed TLS traffic | `npm run bench:clusters` and `npm run bench:cluster-wire` |
 
 Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal before using the same ports for another run. Each launch prints its own log directory under `target/`. See [the quick start](docs/quickstart.md) for endpoints, controls and individual commands.
+
+## Infinite Stars
+
+`crates/zz-mesh` exposes the Bevy 0.15 library. `examples/infinite-stars` consumes its public API. Start the persistent example with `cargo run --locked -p infinite-stars`. Run `cargo test --locked -p zz-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [game integration guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
 
 ## Where to look
 

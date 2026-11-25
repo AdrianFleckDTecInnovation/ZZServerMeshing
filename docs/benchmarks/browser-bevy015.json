@@ -1,0 +1,127 @@
+{
+  "date": "2026-11-24",
+  "profile": "release",
+  "bevy_ecs": "0.15.4",
+  "measurements": [
+    {
+      "environment": "Windows 11",
+      "run": {
+        "platform": "win32 10.0.26200 x64",
+        "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+        "node": "v22.16.0",
+        "profile": "release",
+        "npcs": 3000,
+        "clients": 3,
+        "warmup_seconds": 5,
+        "measured_seconds": 15.014,
+        "servers": [
+          {
+            "server": 1,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 300,
+            "snapshots": 300,
+            "tick_hz": 19.982,
+            "snapshot_hz": 19.982,
+            "snapshot_KiB_s": 2492.741,
+            "tick_p50_ms": 2.896,
+            "tick_p95_ms": 4.908,
+            "tick_p99_ms": 5.235,
+            "p95_budget_pct": 9.817
+          },
+          {
+            "server": 2,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 300,
+            "snapshots": 300,
+            "tick_hz": 19.982,
+            "snapshot_hz": 19.982,
+            "snapshot_KiB_s": 2662.736,
+            "tick_p50_ms": 2.998,
+            "tick_p95_ms": 4.779,
+            "tick_p99_ms": 5.938,
+            "p95_budget_pct": 9.558
+          },
+          {
+            "server": 3,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 301,
+            "snapshots": 301,
+            "tick_hz": 20.048,
+            "snapshot_hz": 20.048,
+            "snapshot_KiB_s": 2671.615,
+            "tick_p50_ms": 2.788,
+            "tick_p95_ms": 4.321,
+            "tick_p99_ms": 4.914,
+            "p95_budget_pct": 8.643
+          }
+        ]
+      }
+    },
+    {
+      "environment": "Debian 12",
+      "run": {
+        "platform": "linux 6.1.0-56-cloud-amd64 x64",
+        "cpu": "QEMU Virtual CPU version 2.5+",
+        "node": "v22.16.0",
+        "profile": "release",
+        "npcs": 3000,
+        "clients": 3,
+        "warmup_seconds": 5,
+        "measured_seconds": 15.004,
+        "servers": [
+          {
+            "server": 1,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 300,
+            "snapshots": 300,
+            "tick_hz": 19.995,
+            "snapshot_hz": 19.995,
+            "snapshot_KiB_s": 2659.553,
+            "tick_p50_ms": 1.533,
+            "tick_p95_ms": 2.708,
+            "tick_p99_ms": 5.945,
+            "p95_budget_pct": 5.417
+          },
+          {
+            "server": 2,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 300,
+            "snapshots": 300,
+            "tick_hz": 19.995,
+            "snapshot_hz": 19.995,
+            "snapshot_KiB_s": 2677.516,
+            "tick_p50_ms": 1.499,
+            "tick_p95_ms": 3.008,
+            "tick_p99_ms": 8.476,
+            "p95_budget_pct": 6.015
+          },
+          {
+            "server": 3,
+            "authoritative": 1001,
+            "shadows": 2002,
+            "peers": 2,
+            "ticks": 300,
+            "snapshots": 300,
+            "tick_hz": 19.995,
+            "snapshot_hz": 19.995,
+            "snapshot_KiB_s": 2617.503,
+            "tick_p50_ms": 1.543,
+            "tick_p95_ms": 2.684,
+            "tick_p99_ms": 4.987,
+            "p95_budget_pct": 5.367
+          }
+        ]
+      }
+    }
+  ]
+}

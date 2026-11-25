@@ -19,7 +19,7 @@
  */
 
 import type { WorldSnapshot, RawEntity } from './world-view';
-import { PROTOCOL } from './config';
+import { PROTOCOL } from './config.ts';
 
 // Pre-allocated hex lookup table
 const HEX: string[] = [];
@@ -76,10 +76,12 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
   const frameType = bytes[0];
 
   if (frameType === PROTOCOL.FRAME_FULL) {
+    if (buffer.byteLength < PROTOCOL.FULL_HEADER_SIZE) return null;
     const tickLow = view.getUint32(1, true);
     const tickHigh = view.getUint32(5, true);
     const tick = tickLow + tickHigh * 0x100000000;
     const entityCount = view.getUint32(9, true);
+    if (buffer.byteLength !== PROTOCOL.FULL_HEADER_SIZE + entityCount * PROTOCOL.ENTITY_SIZE) return null;
     // Skip 14 bytes of legacy metrics (offset 13-26) for protocol stability
 
     const entities: RawEntity[] = new Array(entityCount);
@@ -93,11 +95,13 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): BinaryFrame | null {
   }
 
   if (frameType === PROTOCOL.FRAME_DELTA) {
+    if (buffer.byteLength < PROTOCOL.DELTA_HEADER_SIZE) return null;
     const tickLow = view.getUint32(1, true);
     const tickHigh = view.getUint32(5, true);
     const tick = tickLow + tickHigh * 0x100000000;
     const updateCount = view.getUint32(9, true);
     const removalCount = view.getUint32(13, true);
+    if (buffer.byteLength !== PROTOCOL.DELTA_HEADER_SIZE + updateCount * PROTOCOL.ENTITY_SIZE + removalCount * 16) return null;
     // Skip 14 bytes of legacy metrics (offset 17-30) for protocol stability
 
     const entities: RawEntity[] = new Array(updateCount);

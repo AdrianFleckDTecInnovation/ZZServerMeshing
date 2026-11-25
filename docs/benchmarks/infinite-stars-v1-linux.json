@@ -1,0 +1,660 @@
+{
+  "architecture": "x86_64",
+  "cpu": "QEMU Virtual CPU version 2.5+",
+  "logical_threads": 6,
+  "migration": [
+    {
+      "bulk_payload": 4112,
+      "cache_hits": 0,
+      "pause_ns": 4346721,
+      "preparation_ns": 1676009,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 2,
+      "pause_ns": 4452621,
+      "preparation_ns": 1450307,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 2,
+      "pause_ns": 4526522,
+      "preparation_ns": 1443407,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 4,
+      "pause_ns": 4584023,
+      "preparation_ns": 2200510,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 4,
+      "pause_ns": 4694623,
+      "preparation_ns": 2210510,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "cache_hits": 6,
+      "pause_ns": 4869823,
+      "preparation_ns": 1411007,
+      "target": 1
+    }
+  ],
+  "network_migration": [
+    {
+      "bulk_payload": 4112,
+      "pause_ns": 9216045,
+      "prepare_ns": 7448036,
+      "socket_rx": 7896,
+      "socket_tx": 8036,
+      "target": 2
+    },
+    {
+      "bulk_payload": 0,
+      "pause_ns": 8251740,
+      "prepare_ns": 6429531,
+      "socket_rx": 3395,
+      "socket_tx": 3216,
+      "target": 1
+    },
+    {
+      "bulk_payload": 0,
+      "pause_ns": 9210744,
+      "prepare_ns": 6670332,
+      "socket_rx": 3395,
+      "socket_tx": 3214,
+      "target": 2
+    }
+  ],
+  "os": "linux",
+  "profile": "release",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "scenario_version": 1,
+  "scenes": [
+    {
+      "active_subscriptions": 256,
+      "additional_live_heap_peak": 124594,
+      "allocated_bytes": 4916405,
+      "allocations": 22528,
+      "delivery_queue_peak": 5,
+      "directed_peer_pairs": 1,
+      "exact_spatial_candidates": 1414,
+      "field_payload_bytes": 17101,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 865604,
+        "p50": 37600,
+        "p95": 124401,
+        "p99": 774503
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 896,
+      "repeated_frames": 57,
+      "scheduled_edge_peak_sum": 256,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 1
+    },
+    {
+      "active_subscriptions": 286,
+      "additional_live_heap_peak": 98885,
+      "allocated_bytes": 5727482,
+      "allocations": 27345,
+      "delivery_queue_peak": 9,
+      "directed_peer_pairs": 3,
+      "exact_spatial_candidates": 1414,
+      "field_payload_bytes": 19200,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 915705,
+        "p50": 56400,
+        "p95": 174501,
+        "p99": 855604
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 1106,
+      "repeated_frames": 64,
+      "scheduled_edge_peak_sum": 283,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 2
+    },
+    {
+      "active_subscriptions": 309,
+      "additional_live_heap_peak": 86139,
+      "allocated_bytes": 6629552,
+      "allocations": 34127,
+      "delivery_queue_peak": 12,
+      "directed_peer_pairs": 7,
+      "exact_spatial_candidates": 1414,
+      "field_payload_bytes": 20718,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 1205606,
+        "p50": 81100,
+        "p95": 287501,
+        "p99": 1179906
+      },
+      "objects": 256,
+      "physical_islands": 1,
+      "projected_fields_since_start": 1266,
+      "repeated_frames": 67,
+      "scheduled_edge_peak_sum": 304,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 4
+    },
+    {
+      "active_subscriptions": 1024,
+      "additional_live_heap_peak": 248185,
+      "allocated_bytes": 20045282,
+      "allocations": 89736,
+      "delivery_queue_peak": 19,
+      "directed_peer_pairs": 4,
+      "exact_spatial_candidates": 5656,
+      "field_payload_bytes": 72902,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 3875018,
+        "p50": 185801,
+        "p95": 634803,
+        "p99": 3431217
+      },
+      "objects": 1024,
+      "physical_islands": 4,
+      "projected_fields_since_start": 3584,
+      "repeated_frames": 226,
+      "scheduled_edge_peak_sum": 1024,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 4
+    },
+    {
+      "active_subscriptions": 4096,
+      "additional_live_heap_peak": 750928,
+      "allocated_bytes": 81410220,
+      "allocations": 357776,
+      "delivery_queue_peak": 72,
+      "directed_peer_pairs": 16,
+      "exact_spatial_candidates": 22624,
+      "field_payload_bytes": 296196,
+      "first_island_frames": 697,
+      "first_island_payload": 17101,
+      "loop_ns": {
+        "max": 11997858,
+        "p50": 811504,
+        "p95": 2919714,
+        "p99": 10933653
+      },
+      "objects": 4096,
+      "physical_islands": 16,
+      "projected_fields_since_start": 14336,
+      "repeated_frames": 904,
+      "scheduled_edge_peak_sum": 4096,
+      "socket_bytes": 0,
+      "ticks": 160,
+      "workers": 16
+    }
+  ],
+  "transport": {
+    "durable_action_paths": [
+      {
+        "client_decode_cpu_ns": 0,
+        "client_decode_cycles": 0,
+        "client_encode_cpu_ns": 0,
+        "client_encode_cycles": 0,
+        "distinct_actions": 192,
+        "encoded_requests": 0,
+        "encoded_responses": 0,
+        "framing_buffer_bytes": 0,
+        "path": "direct",
+        "roundtrip_ns": {
+          "max": 3940819,
+          "p50": 3168415,
+          "p95": 3912019,
+          "p99": 3940819
+        },
+        "rpc_calls": 27,
+        "server_decode_cpu_ns": 0,
+        "server_decode_cycles": 0,
+        "server_encode_cpu_ns": 0,
+        "server_encode_cycles": 0,
+        "socket_rx": 0,
+        "socket_tx": 0,
+        "targets": 768
+      },
+      {
+        "client_decode_cpu_ns": 110300,
+        "client_decode_cycles": 0,
+        "client_encode_cpu_ns": 60700,
+        "client_encode_cycles": 0,
+        "distinct_actions": 192,
+        "encoded_requests": 9990,
+        "encoded_responses": 22174,
+        "framing_buffer_bytes": 32164,
+        "path": "tcp_mtls",
+        "roundtrip_ns": {
+          "max": 7758238,
+          "p50": 2712513,
+          "p95": 5272125,
+          "p99": 7758238
+        },
+        "rpc_calls": 27,
+        "server_decode_cpu_ns": 88800,
+        "server_decode_cycles": 0,
+        "server_encode_cpu_ns": 97400,
+        "server_encode_cycles": 0,
+        "socket_rx": 23984,
+        "socket_tx": 11635,
+        "targets": 768
+      }
+    ],
+    "same_owner_lookup": {
+      "calls": 512,
+      "tcp_mtls": {
+        "roundtrip_ns": {
+          "max": 2059810,
+          "p50": 87200,
+          "p95": 245501,
+          "p99": 366301
+        },
+        "rx": 19379,
+        "tx": 25872
+      },
+      "udp_loopback": {
+        "roundtrip_ns": {
+          "max": 271201,
+          "p50": 57100,
+          "p95": 144100,
+          "p99": 220501
+        },
+        "rx": 2048,
+        "tx": 8704
+      }
+    }
+  },
+  "voxel_codecs": [
+    {
+      "changed": 2,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 8,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 36700,
+              "decode_thread_cpu_ns": 35400,
+              "encode_elapsed_ns": 29000,
+              "encode_thread_cpu_ns": 27700,
+              "iterations": 512
+            },
+            {
+              "bytes": 28,
+              "codec": "json",
+              "decode_elapsed_ns": 59701,
+              "decode_thread_cpu_ns": 58600,
+              "encode_elapsed_ns": 25600,
+              "encode_thread_cpu_ns": 25000,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 10,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 39900,
+              "decode_thread_cpu_ns": 38800,
+              "encode_elapsed_ns": 28600,
+              "encode_thread_cpu_ns": 27900,
+              "iterations": 512
+            },
+            {
+              "bytes": 29,
+              "codec": "json",
+              "decode_elapsed_ns": 65600,
+              "decode_thread_cpu_ns": 64700,
+              "encode_elapsed_ns": 26900,
+              "encode_thread_cpu_ns": 26200,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 521,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 260701,
+              "decode_thread_cpu_ns": 259700,
+              "encode_elapsed_ns": 308602,
+              "encode_thread_cpu_ns": 307900,
+              "iterations": 512
+            },
+            {
+              "bytes": 1075,
+              "codec": "json",
+              "decode_elapsed_ns": 1940409,
+              "decode_thread_cpu_ns": 1937900,
+              "encode_elapsed_ns": 925505,
+              "encode_thread_cpu_ns": 924700,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 16,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 64,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 73501,
+              "decode_thread_cpu_ns": 72500,
+              "encode_elapsed_ns": 49700,
+              "encode_thread_cpu_ns": 48800,
+              "iterations": 512
+            },
+            {
+              "bytes": 151,
+              "codec": "json",
+              "decode_elapsed_ns": 269301,
+              "decode_thread_cpu_ns": 268300,
+              "encode_elapsed_ns": 98400,
+              "encode_thread_cpu_ns": 97800,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 80,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 126200,
+              "decode_thread_cpu_ns": 125300,
+              "encode_elapsed_ns": 66401,
+              "encode_thread_cpu_ns": 65800,
+              "iterations": 512
+            },
+            {
+              "bytes": 180,
+              "codec": "json",
+              "decode_elapsed_ns": 311601,
+              "decode_thread_cpu_ns": 310600,
+              "encode_elapsed_ns": 115301,
+              "encode_thread_cpu_ns": 114700,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 531,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 257501,
+              "decode_thread_cpu_ns": 256400,
+              "encode_elapsed_ns": 268502,
+              "encode_thread_cpu_ns": 267800,
+              "iterations": 512
+            },
+            {
+              "bytes": 1102,
+              "codec": "json",
+              "decode_elapsed_ns": 1680708,
+              "decode_thread_cpu_ns": 1679600,
+              "encode_elapsed_ns": 960105,
+              "encode_thread_cpu_ns": 959400,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 256,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 996,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 447602,
+              "decode_thread_cpu_ns": 446600,
+              "encode_elapsed_ns": 370402,
+              "encode_thread_cpu_ns": 369600,
+              "iterations": 512
+            },
+            {
+              "bytes": 2246,
+              "codec": "json",
+              "decode_elapsed_ns": 2703513,
+              "decode_thread_cpu_ns": 2702400,
+              "encode_elapsed_ns": 961804,
+              "encode_thread_cpu_ns": 961200,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 1252,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1384106,
+              "decode_thread_cpu_ns": 1383100,
+              "encode_elapsed_ns": 643003,
+              "encode_thread_cpu_ns": 642100,
+              "iterations": 512
+            },
+            {
+              "bytes": 2755,
+              "codec": "json",
+              "decode_elapsed_ns": 4231720,
+              "decode_thread_cpu_ns": 4230100,
+              "encode_elapsed_ns": 1612708,
+              "encode_thread_cpu_ns": 1611300,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 621,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 248001,
+              "decode_thread_cpu_ns": 247300,
+              "encode_elapsed_ns": 322501,
+              "encode_thread_cpu_ns": 321800,
+              "iterations": 512
+            },
+            {
+              "bytes": 1419,
+              "codec": "json",
+              "decode_elapsed_ns": 2108410,
+              "decode_thread_cpu_ns": 2107300,
+              "encode_elapsed_ns": 973705,
+              "encode_thread_cpu_ns": 962200,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 1024,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 3974,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1780808,
+              "decode_thread_cpu_ns": 1779400,
+              "encode_elapsed_ns": 1507908,
+              "encode_thread_cpu_ns": 1507100,
+              "iterations": 512
+            },
+            {
+              "bytes": 8951,
+              "codec": "json",
+              "decode_elapsed_ns": 12661761,
+              "decode_thread_cpu_ns": 12659900,
+              "encode_elapsed_ns": 3872319,
+              "encode_thread_cpu_ns": 3871500,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 4998,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 5207625,
+              "decode_thread_cpu_ns": 5206200,
+              "encode_elapsed_ns": 2389112,
+              "encode_thread_cpu_ns": 2388200,
+              "iterations": 512
+            },
+            {
+              "bytes": 10996,
+              "codec": "json",
+              "decode_elapsed_ns": 17134882,
+              "decode_thread_cpu_ns": 17132000,
+              "encode_elapsed_ns": 5000224,
+              "encode_thread_cpu_ns": 4999500,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 911,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 358802,
+              "decode_thread_cpu_ns": 357800,
+              "encode_elapsed_ns": 515303,
+              "encode_thread_cpu_ns": 514600,
+              "iterations": 512
+            },
+            {
+              "bytes": 2928,
+              "codec": "json",
+              "decode_elapsed_ns": 3145615,
+              "decode_thread_cpu_ns": 3144300,
+              "encode_elapsed_ns": 1258906,
+              "encode_thread_cpu_ns": 1258200,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    },
+    {
+      "changed": 4096,
+      "formats": [
+        {
+          "codecs": [
+            {
+              "bytes": 15886,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 8313740,
+              "decode_thread_cpu_ns": 8312300,
+              "encode_elapsed_ns": 6877033,
+              "encode_thread_cpu_ns": 6875700,
+              "iterations": 512
+            },
+            {
+              "bytes": 35767,
+              "codec": "json",
+              "decode_elapsed_ns": 51423349,
+              "decode_thread_cpu_ns": 51421000,
+              "encode_elapsed_ns": 18647290,
+              "encode_thread_cpu_ns": 18417100,
+              "iterations": 512
+            }
+          ],
+          "format": "sorted"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 1252,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 1400706,
+              "decode_thread_cpu_ns": 1399500,
+              "encode_elapsed_ns": 612703,
+              "encode_thread_cpu_ns": 612100,
+              "iterations": 512
+            },
+            {
+              "bytes": 3011,
+              "codec": "json",
+              "decode_elapsed_ns": 5677128,
+              "decode_thread_cpu_ns": 5673600,
+              "encode_elapsed_ns": 1419007,
+              "encode_thread_cpu_ns": 1418100,
+              "iterations": 512
+            }
+          ],
+          "format": "ranges"
+        },
+        {
+          "codecs": [
+            {
+              "bytes": 2063,
+              "codec": "bincode-le-varint",
+              "decode_elapsed_ns": 809604,
+              "decode_thread_cpu_ns": 807400,
+              "encode_elapsed_ns": 1166505,
+              "encode_thread_cpu_ns": 1165600,
+              "iterations": 512
+            },
+            {
+              "bytes": 7365,
+              "codec": "json",
+              "decode_elapsed_ns": 8529442,
+              "decode_thread_cpu_ns": 8528200,
+              "encode_elapsed_ns": 3075515,
+              "encode_thread_cpu_ns": 3074700,
+              "iterations": 512
+            }
+          ],
+          "format": "palette_and_mask"
+        }
+      ]
+    }
+  ]
+}

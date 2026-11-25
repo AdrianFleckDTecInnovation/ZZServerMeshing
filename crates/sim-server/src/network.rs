@@ -62,7 +62,7 @@ pub async fn run_websocket_server(
     auth_players: Arc<SharedAuthPlayers>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+    let listener = TcpListener::bind(shared::listen_addr(port))
         .await
         .expect("Failed to bind WebSocket port");
 
@@ -126,7 +126,7 @@ pub async fn run_websocket_server(
 const CLAIM_WAIT_MS: u64 = 500;
 
 /// How long to wait for a claimed player entity to arrive via
-/// AuthorityTransfer before falling back to spawning a new player.
+/// AuthorityTransfer before the client can retry the claim.
 /// Sized to cover a worst-case coordinator hop + UDP round-trip (~200 ms)
 /// plus the client's own reconnect backoff (~250 ms on the fast path).
 const CLAIM_ARRIVAL_WAIT_MS: u64 = 2000;
@@ -224,9 +224,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // If ClaimPlayer arrived, wait up to CLAIM_ARRIVAL_WAIT_MS for the
     // entity to appear on this server (arrival via AuthorityTransfer).
     // If it does, register the client bound to the existing entity.
-    // If not, fall back to spawning a new player with the SAME UUID the
-    // client claimed — this preserves the client-server UUID agreement and
-    // avoids the reconcile churn of reassigning.
+    // A late transfer can still arrive after the timeout. Leave its ID reserved.
     let (player_id, do_spawn) = match claimed_player_id {
         Some(claimed) => {
             let deadline = tokio::time::Instant::now()
@@ -249,9 +247,10 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                     client_id,
                     player_id = %claimed,
                     wait_ms = CLAIM_ARRIVAL_WAIT_MS,
-                    "ClaimPlayer timed out waiting for entity, spawning new player with claimed UUID"
+                    "ClaimPlayer is waiting for authority transfer"
                 );
-                (claimed, true)
+                let _ = ws_sink.send(Message::Close(None)).await;
+                return;
             }
         }
         None => {
@@ -452,6 +451,27 @@ mod tests {
     use shared::entity::{EntityId, EntityState, ServerId};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn timed_out_claim_closes_without_spawning_or_registering_a_replacement() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{tungstenite::{protocol::Role, Message}, WebSocketStream};
+
+        let (server, client) = tokio::io::duplex(4096);
+        let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let inbound = Arc::new(super::SharedInbound::default());
+        let task = tokio::spawn(super::handle_client(
+            server, "127.0.0.1:1".parse().unwrap(), inbound.clone(), Arc::default(),
+        ));
+        let claim = shared::protocol::ClientMessage::ClaimPlayer { player_id: EntityId::new() };
+        client.send(Message::Text(serde_json::to_string(&claim).unwrap().into())).await.unwrap();
+        assert!(matches!(client.next().await, Some(Ok(Message::Close(_)))));
+        task.await.unwrap();
+        let queue = inbound.lock().unwrap();
+        assert!(queue.client_inputs.is_empty());
+        assert!(queue.register_clients.is_empty());
+    }
 
     #[test]
     fn encode_binary_snapshot_empty() {

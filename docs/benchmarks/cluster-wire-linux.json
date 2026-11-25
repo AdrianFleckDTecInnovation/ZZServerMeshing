@@ -1,0 +1,478 @@
+{
+  "arch": "x86_64",
+  "os": "linux",
+  "scenes": [
+    {
+      "players": 16,
+      "processes": 2,
+      "segments": [
+        {
+          "applied_frames": 192,
+          "barriers": 12,
+          "convergence_ms": [
+            52.012213,
+            48.336875,
+            51.795017,
+            51.621719000000006,
+            52.284108,
+            46.8768,
+            52.622203999999996,
+            51.454423,
+            51.968015,
+            46.807103000000005,
+            51.314726,
+            51.717919
+          ],
+          "incoming_foreign_home_frames": 0,
+          "p50_ms": 51.621719000000006,
+          "p95_ms": 52.622203999999996,
+          "phase": "isolated",
+          "queued_frames": 192,
+          "tls_rx": 46392,
+          "tls_tx": 6936
+        }
+      ],
+      "sites": 1
+    },
+    {
+      "players": 32,
+      "processes": 4,
+      "segments": [
+        {
+          "applied_frames": 384,
+          "barriers": 12,
+          "convergence_ms": [
+            49.459558,
+            53.947381,
+            54.778566,
+            49.182063,
+            50.866535,
+            50.441141,
+            50.469941999999996,
+            48.509574,
+            53.830684,
+            47.067198999999995,
+            52.638505,
+            55.271659
+          ],
+          "incoming_foreign_home_frames": 0,
+          "p50_ms": 50.469941999999996,
+          "p95_ms": 55.271659,
+          "phase": "isolated",
+          "queued_frames": 384,
+          "tls_rx": 95039,
+          "tls_tx": 13919
+        }
+      ],
+      "sites": 2
+    },
+    {
+      "players": 64,
+      "processes": 8,
+      "segments": [
+        {
+          "applied_frames": 768,
+          "barriers": 12,
+          "convergence_ms": [
+            52.729504000000006,
+            52.831303000000005,
+            52.564707000000006,
+            51.035333,
+            51.496225,
+            53.891184,
+            49.697554999999994,
+            48.786471,
+            59.117895,
+            49.202163999999996,
+            50.209547,
+            56.088846999999994
+          ],
+          "incoming_foreign_home_frames": 0,
+          "p50_ms": 51.496225,
+          "p95_ms": 59.117895,
+          "phase": "isolated",
+          "queued_frames": 768,
+          "tls_rx": 192431,
+          "tls_tx": 27791
+        },
+        {
+          "applied_frames": 0,
+          "incoming_foreign_home_frames": 0,
+          "phase": "idle",
+          "queued_frames": 0,
+          "seconds": 5.500696991,
+          "tls_rx": 40608,
+          "tls_tx": 40608
+        },
+        {
+          "applied_frames": 640,
+          "barriers": 8,
+          "convergence_ms": [
+            41.088207000000004,
+            46.199222,
+            50.963842,
+            51.053841000000006,
+            50.533349,
+            50.718646,
+            307.431725,
+            47.774395999999996
+          ],
+          "incoming_foreign_home_frames": 152,
+          "p50_ms": 50.533349,
+          "p95_ms": 307.431725,
+          "phase": "approach",
+          "queued_frames": 664,
+          "tls_rx": 151176,
+          "tls_tx": 45517
+        },
+        {
+          "applied_frames": 512,
+          "barriers": 4,
+          "convergence_ms": [
+            54.09839,
+            46.027226,
+            50.843445,
+            55.24347
+          ],
+          "incoming_foreign_home_frames": 256,
+          "p50_ms": 50.843445,
+          "p95_ms": 55.24347,
+          "phase": "hold",
+          "queued_frames": 512,
+          "tls_rx": 78688,
+          "tls_tx": 16992
+        },
+        {
+          "applied_frames": 1280,
+          "barriers": 8,
+          "convergence_ms": [
+            58.257419,
+            47.202704999999995,
+            49.33007,
+            56.40185,
+            52.896609999999995,
+            49.36907,
+            300.127455,
+            59.164105
+          ],
+          "incoming_foreign_home_frames": 816,
+          "p50_ms": 52.896609999999995,
+          "p95_ms": 300.127455,
+          "phase": "approach",
+          "queued_frames": 1328,
+          "tls_rx": 189594,
+          "tls_tx": 71000
+        },
+        {
+          "applied_frames": 1024,
+          "barriers": 4,
+          "convergence_ms": [
+            46.253021999999994,
+            52.786213,
+            47.00681,
+            53.409802
+          ],
+          "incoming_foreign_home_frames": 768,
+          "p50_ms": 47.00681,
+          "p95_ms": 53.409802,
+          "phase": "hold",
+          "queued_frames": 1024,
+          "tls_rx": 108512,
+          "tls_tx": 32480
+        },
+        {
+          "applied_frames": 2432,
+          "barriers": 8,
+          "convergence_ms": [
+            47.01011,
+            55.90796,
+            45.664832000000004,
+            63.650330000000004,
+            53.434601,
+            43.840163000000004,
+            300.13896,
+            61.36857
+          ],
+          "incoming_foreign_home_frames": 1992,
+          "p50_ms": 53.434601,
+          "p95_ms": 300.13896,
+          "phase": "approach",
+          "queued_frames": 2504,
+          "tls_rx": 264805,
+          "tls_tx": 119540
+        },
+        {
+          "applied_frames": 1792,
+          "barriers": 4,
+          "convergence_ms": [
+            47.981795,
+            54.785981,
+            47.778498,
+            53.543501
+          ],
+          "incoming_foreign_home_frames": 1536,
+          "p50_ms": 47.981795,
+          "p95_ms": 54.785981,
+          "phase": "hold",
+          "queued_frames": 1792,
+          "tls_rx": 153632,
+          "tls_tx": 55712
+        },
+        {
+          "applied_frames": 2432,
+          "barriers": 8,
+          "convergence_ms": [
+            47.145208000000004,
+            130.66870699999998,
+            76.934609,
+            52.740614,
+            52.476419,
+            51.402337,
+            47.815397000000004,
+            52.713615
+          ],
+          "incoming_foreign_home_frames": 1920,
+          "p50_ms": 52.476419,
+          "p95_ms": 130.66870699999998,
+          "phase": "depart",
+          "queued_frames": 2432,
+          "tls_rx": 240528,
+          "tls_tx": 89232
+        },
+        {
+          "applied_frames": 1024,
+          "barriers": 4,
+          "convergence_ms": [
+            47.307506,
+            57.826131000000004,
+            47.877497,
+            53.6916
+          ],
+          "incoming_foreign_home_frames": 768,
+          "p50_ms": 47.877497,
+          "p95_ms": 57.826131000000004,
+          "phase": "hold",
+          "queued_frames": 1024,
+          "tls_rx": 108512,
+          "tls_tx": 32480
+        },
+        {
+          "applied_frames": 1280,
+          "barriers": 8,
+          "convergence_ms": [
+            51.971629,
+            135.99581999999998,
+            57.744332,
+            54.776182,
+            50.328556000000006,
+            53.172308,
+            49.430372,
+            51.870531
+          ],
+          "incoming_foreign_home_frames": 768,
+          "p50_ms": 51.971629,
+          "p95_ms": 135.99581999999998,
+          "phase": "depart",
+          "queued_frames": 1280,
+          "tls_rx": 173104,
+          "tls_tx": 50416
+        },
+        {
+          "applied_frames": 512,
+          "barriers": 4,
+          "convergence_ms": [
+            47.571002,
+            51.092543,
+            58.956712,
+            49.334472
+          ],
+          "incoming_foreign_home_frames": 256,
+          "p50_ms": 49.334472,
+          "p95_ms": 58.956712,
+          "phase": "hold",
+          "queued_frames": 512,
+          "tls_rx": 78688,
+          "tls_tx": 16992
+        },
+        {
+          "applied_frames": 640,
+          "barriers": 8,
+          "convergence_ms": [
+            44.75705,
+            147.216935,
+            51.608635,
+            51.88283199999999,
+            52.572019,
+            58.090326999999995,
+            52.189926,
+            54.038395
+          ],
+          "incoming_foreign_home_frames": 128,
+          "p50_ms": 52.189926,
+          "p95_ms": 147.216935,
+          "phase": "depart",
+          "queued_frames": 640,
+          "tls_rx": 136176,
+          "tls_tx": 27088
+        },
+        {
+          "applied_frames": 256,
+          "barriers": 4,
+          "convergence_ms": [
+            47.135911,
+            52.120828,
+            51.990029,
+            52.357822999999996
+          ],
+          "incoming_foreign_home_frames": 0,
+          "p50_ms": 51.990029,
+          "p95_ms": 52.357822999999996,
+          "phase": "hold",
+          "queued_frames": 256,
+          "tls_rx": 64128,
+          "tls_tx": 9248
+        },
+        {
+          "applied_frames": 656,
+          "barriers": 8,
+          "convergence_ms": [
+            45.977129999999995,
+            53.514204,
+            46.073228,
+            296.783033,
+            139.255972,
+            52.102928,
+            307.563757,
+            52.411724
+          ],
+          "incoming_foreign_home_frames": 156,
+          "p50_ms": 52.411724,
+          "p95_ms": 307.563757,
+          "phase": "exchange",
+          "players_switching": 4,
+          "queued_frames": 668,
+          "return": false,
+          "tls_rx": 143222,
+          "tls_tx": 35414
+        },
+        {
+          "applied_frames": 656,
+          "barriers": 8,
+          "convergence_ms": [
+            45.923732,
+            128.962243,
+            53.595104,
+            309.154735,
+            143.597002,
+            52.242627,
+            52.014132,
+            52.259428
+          ],
+          "incoming_foreign_home_frames": 147,
+          "p50_ms": 52.259428,
+          "p95_ms": 309.154735,
+          "phase": "exchange",
+          "players_switching": 4,
+          "queued_frames": 659,
+          "return": true,
+          "tls_rx": 141521,
+          "tls_tx": 32251
+        },
+        {
+          "applied_frames": 704,
+          "barriers": 8,
+          "convergence_ms": [
+            53.060814,
+            47.816001,
+            51.051548000000004,
+            302.784344,
+            162.329592,
+            51.831536,
+            309.108546,
+            51.927434
+          ],
+          "incoming_foreign_home_frames": 232,
+          "p50_ms": 51.927434,
+          "p95_ms": 309.108546,
+          "phase": "exchange",
+          "players_switching": 16,
+          "queued_frames": 744,
+          "return": false,
+          "tls_rx": 148192,
+          "tls_tx": 40892
+        },
+        {
+          "applied_frames": 704,
+          "barriers": 8,
+          "convergence_ms": [
+            45.999233000000004,
+            150.117496,
+            50.822452,
+            334.417026,
+            121.79127100000001,
+            59.783504,
+            52.895118999999994,
+            53.910902
+          ],
+          "incoming_foreign_home_frames": 208,
+          "p50_ms": 53.910902,
+          "p95_ms": 334.417026,
+          "phase": "exchange",
+          "players_switching": 16,
+          "queued_frames": 720,
+          "return": true,
+          "tls_rx": 145171,
+          "tls_tx": 37279
+        },
+        {
+          "applied_frames": 640,
+          "barriers": 8,
+          "convergence_ms": [
+            46.998718000000004,
+            53.689606,
+            51.189748,
+            289.361381,
+            150.003402,
+            53.857504,
+            52.521526,
+            53.282014000000004
+          ],
+          "incoming_foreign_home_frames": 152,
+          "p50_ms": 53.282014000000004,
+          "p95_ms": 289.361381,
+          "phase": "exchange",
+          "players_switching": 32,
+          "queued_frames": 664,
+          "return": false,
+          "tls_rx": 140628,
+          "tls_tx": 35228
+        },
+        {
+          "applied_frames": 640,
+          "barriers": 8,
+          "convergence_ms": [
+            53.47571,
+            49.264381,
+            52.083934,
+            300.451703,
+            152.328966,
+            58.587025000000004,
+            47.808305000000004,
+            60.222798000000004
+          ],
+          "incoming_foreign_home_frames": 160,
+          "p50_ms": 53.47571,
+          "p95_ms": 300.451703,
+          "phase": "exchange",
+          "players_switching": 32,
+          "queued_frames": 672,
+          "return": true,
+          "tls_rx": 141322,
+          "tls_tx": 35458
+        }
+      ],
+      "sites": 4
+    }
+  ],
+  "version": 1
+}

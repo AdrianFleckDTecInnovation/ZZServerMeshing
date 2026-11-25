@@ -1,0 +1,2029 @@
+{
+  "version": 1,
+  "reference": "3ef0d789196aa6c16de4fa12be394bdf7f8ea835",
+  "binary_sha256": {
+    "reference": {
+      "sim-server": "a14f75ab08149f16c4ab1933f152950bc57de0b9e8d6c259a15796f27dd956d4",
+      "coordinator": "42a43010f38d61cdd4c95700894d2a5d11f31c7a20a4d4247dc028b13c23678b"
+    },
+    "candidate": {
+      "sim-server": "d70331a54d016b7dfad0ee358d070f6aca8c8c15f6efd82289e007dcce296e15",
+      "coordinator": "578968c342989b5473aeff19d4c7219fc1b716ce5ae39eb886bb14a7895f7ee8"
+    }
+  },
+  "runs": [
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 30.814,
+          "tick_p50_ms": 0.217,
+          "tick_p95_ms": 0.354,
+          "tick_p99_ms": 0.632,
+          "p95_budget_pct": 0.708,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.127,
+            "transfers_ms": 0.004,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.354
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.014,
+            "simulation_ms": 0.177,
+            "transfers_ms": 0.016,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.632
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 27.555,
+          "tick_p50_ms": 0.135,
+          "tick_p95_ms": 0.268,
+          "tick_p99_ms": 0.527,
+          "p95_budget_pct": 0.536,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.088,
+            "transfers_ms": 0.003,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.268
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.425,
+            "transfers_ms": 0.006,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.527
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 27.798,
+          "tick_p50_ms": 0.136,
+          "tick_p95_ms": 0.244,
+          "tick_p99_ms": 0.538,
+          "p95_budget_pct": 0.489,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.125,
+            "transfers_ms": 0.004,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.244
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.188,
+            "transfers_ms": 0.021,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.538
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 30.816,
+          "tick_p50_ms": 0.103,
+          "tick_p95_ms": 0.25,
+          "tick_p99_ms": 0.33,
+          "p95_budget_pct": 0.501,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.131,
+            "transfers_ms": 0.043,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.25
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.03,
+            "simulation_ms": 0.216,
+            "transfers_ms": 0.183,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.33
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 30.727,
+          "tick_p50_ms": 0.103,
+          "tick_p95_ms": 0.219,
+          "tick_p99_ms": 0.345,
+          "p95_budget_pct": 0.438,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.128,
+            "transfers_ms": 0.047,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.219
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.242,
+            "transfers_ms": 0.136,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.345
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 30.447,
+          "tick_p50_ms": 0.075,
+          "tick_p95_ms": 0.195,
+          "tick_p99_ms": 0.319,
+          "p95_budget_pct": 0.39,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.127,
+            "transfers_ms": 0.046,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.195
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.162,
+            "transfers_ms": 0.115,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.319
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2668.115,
+          "tick_p50_ms": 1.468,
+          "tick_p95_ms": 2.816,
+          "tick_p99_ms": 11.613,
+          "p95_budget_pct": 5.632,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.458,
+            "transfers_ms": 0.075,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.816
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 2.899,
+            "transfers_ms": 0.319,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 11.613
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2665.885,
+          "tick_p50_ms": 1.644,
+          "tick_p95_ms": 2.477,
+          "tick_p99_ms": 4.407,
+          "p95_budget_pct": 4.954,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.507,
+            "transfers_ms": 0.082,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.477
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.025,
+            "simulation_ms": 3.322,
+            "transfers_ms": 0.217,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.407
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2368.068,
+          "tick_p50_ms": 1.47,
+          "tick_p95_ms": 2.23,
+          "tick_p99_ms": 2.822,
+          "p95_budget_pct": 4.461,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.479,
+            "transfers_ms": 0.083,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.23
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.985,
+            "transfers_ms": 0.152,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.822
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2684.507,
+          "tick_p50_ms": 0.986,
+          "tick_p95_ms": 2.541,
+          "tick_p99_ms": 3.351,
+          "p95_budget_pct": 5.082,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.847,
+            "transfers_ms": 0.143,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.541
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 3.039,
+            "transfers_ms": 0.492,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.351
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2648.681,
+          "tick_p50_ms": 0.916,
+          "tick_p95_ms": 1.746,
+          "tick_p99_ms": 2.377,
+          "p95_budget_pct": 3.492,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.442,
+            "transfers_ms": 0.164,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.746
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 2.222,
+            "transfers_ms": 0.479,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.377
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2648.647,
+          "tick_p50_ms": 0.951,
+          "tick_p95_ms": 1.736,
+          "tick_p99_ms": 2.231,
+          "p95_budget_pct": 3.471,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.396,
+            "transfers_ms": 0.113,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.736
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.78,
+            "transfers_ms": 0.255,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.231
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 5890.734,
+          "tick_p50_ms": 4.286,
+          "tick_p95_ms": 7.469,
+          "tick_p99_ms": 10.913,
+          "p95_budget_pct": 14.938,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 6.467,
+            "transfers_ms": 0.364,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.469
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.026,
+            "simulation_ms": 8.25,
+            "transfers_ms": 0.753,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 10.913
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 4817.223,
+          "tick_p50_ms": 3.81,
+          "tick_p95_ms": 7.088,
+          "tick_p99_ms": 8.518,
+          "p95_budget_pct": 14.176,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 5.621,
+            "transfers_ms": 0.259,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.088
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 7.613,
+            "transfers_ms": 0.75,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 8.518
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 5001.169,
+          "tick_p50_ms": 3.637,
+          "tick_p95_ms": 5.981,
+          "tick_p99_ms": 6.735,
+          "p95_budget_pct": 11.962,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.508,
+            "transfers_ms": 0.306,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.981
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 5.429,
+            "transfers_ms": 1.207,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.735
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 6054.951,
+          "tick_p50_ms": 2.563,
+          "tick_p95_ms": 3.99,
+          "tick_p99_ms": 5.213,
+          "p95_budget_pct": 7.98,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.425,
+            "transfers_ms": 0.226,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.99
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 4.442,
+            "transfers_ms": 0.507,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.213
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 6459.001,
+          "tick_p50_ms": 3.012,
+          "tick_p95_ms": 5.407,
+          "tick_p99_ms": 6.758,
+          "p95_budget_pct": 10.814,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.981,
+            "transfers_ms": 0.351,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.407
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 5.875,
+            "transfers_ms": 0.791,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.758
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 4281.499,
+          "tick_p50_ms": 2.216,
+          "tick_p95_ms": 3.596,
+          "tick_p99_ms": 4.492,
+          "p95_budget_pct": 7.193,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.13,
+            "transfers_ms": 0.203,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.596
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.112,
+            "transfers_ms": 0.656,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.492
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 29.897,
+          "tick_p50_ms": 0.116,
+          "tick_p95_ms": 0.25,
+          "tick_p99_ms": 0.544,
+          "p95_budget_pct": 0.5,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.109,
+            "transfers_ms": 0.075,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.25
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.157,
+            "transfers_ms": 0.196,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.544
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 29.541,
+          "tick_p50_ms": 0.084,
+          "tick_p95_ms": 0.221,
+          "tick_p99_ms": 0.448,
+          "p95_budget_pct": 0.442,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.117,
+            "transfers_ms": 0.072,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.221
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.003,
+            "simulation_ms": 0.212,
+            "transfers_ms": 0.173,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.448
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 29.498,
+          "tick_p50_ms": 0.068,
+          "tick_p95_ms": 0.239,
+          "tick_p99_ms": 0.297,
+          "p95_budget_pct": 0.478,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.128,
+            "transfers_ms": 0.046,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.239
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 0.16,
+            "transfers_ms": 0.1,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.297
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 28.98,
+          "tick_p50_ms": 0.196,
+          "tick_p95_ms": 0.335,
+          "tick_p99_ms": 0.41,
+          "p95_budget_pct": 0.669,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.115,
+            "transfers_ms": 0.006,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.335
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.162,
+            "transfers_ms": 0.017,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.41
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 28.98,
+          "tick_p50_ms": 0.186,
+          "tick_p95_ms": 0.292,
+          "tick_p99_ms": 0.408,
+          "p95_budget_pct": 0.584,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.116,
+            "transfers_ms": 0.004,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.292
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 0.208,
+            "transfers_ms": 0.015,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.408
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 28.601,
+          "tick_p50_ms": 0.138,
+          "tick_p95_ms": 0.318,
+          "tick_p99_ms": 0.65,
+          "p95_budget_pct": 0.635,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.126,
+            "transfers_ms": 0.003,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.318
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 0.172,
+            "transfers_ms": 0.014,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.65
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.004,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2692.151,
+          "tick_p50_ms": 0.941,
+          "tick_p95_ms": 1.713,
+          "tick_p99_ms": 3.124,
+          "p95_budget_pct": 3.425,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.255,
+            "transfers_ms": 0.128,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.713
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.698,
+            "transfers_ms": 0.264,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.124
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2521.241,
+          "tick_p50_ms": 0.807,
+          "tick_p95_ms": 1.336,
+          "tick_p99_ms": 1.774,
+          "p95_budget_pct": 2.672,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.04,
+            "transfers_ms": 0.099,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.336
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 1.247,
+            "transfers_ms": 0.266,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.774
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.996,
+          "snapshot_hz": 19.996,
+          "snapshot_KiB_s": 2485.282,
+          "tick_p50_ms": 0.776,
+          "tick_p95_ms": 1.316,
+          "tick_p99_ms": 2.039,
+          "p95_budget_pct": 2.632,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.034,
+            "transfers_ms": 0.097,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.316
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.874,
+            "transfers_ms": 0.189,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.039
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 2680.841,
+          "tick_p50_ms": 1.455,
+          "tick_p95_ms": 2.093,
+          "tick_p99_ms": 2.942,
+          "p95_budget_pct": 4.186,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.328,
+            "transfers_ms": 0.072,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.093
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 2.089,
+            "transfers_ms": 0.115,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.942
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 2678.608,
+          "tick_p50_ms": 1.501,
+          "tick_p95_ms": 2.266,
+          "tick_p99_ms": 3.323,
+          "p95_budget_pct": 4.533,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.403,
+            "transfers_ms": 0.07,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.266
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 2.066,
+            "transfers_ms": 0.17,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.323
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 2269.283,
+          "tick_p50_ms": 1.397,
+          "tick_p95_ms": 2.214,
+          "tick_p99_ms": 2.672,
+          "p95_budget_pct": 4.429,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.408,
+            "transfers_ms": 0.077,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.214
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 1.876,
+            "transfers_ms": 0.118,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.672
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 7247.125,
+          "tick_p50_ms": 2.727,
+          "tick_p95_ms": 3.809,
+          "tick_p99_ms": 6.21,
+          "p95_budget_pct": 7.618,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 3.094,
+            "transfers_ms": 0.224,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.809
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.008,
+            "simulation_ms": 4.107,
+            "transfers_ms": 0.477,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.21
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 5874.908,
+          "tick_p50_ms": 2.506,
+          "tick_p95_ms": 3.521,
+          "tick_p99_ms": 4.038,
+          "p95_budget_pct": 7.041,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.147,
+            "transfers_ms": 0.2,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.521
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 3.629,
+            "transfers_ms": 0.275,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.038
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 6479.959,
+          "tick_p50_ms": 2.732,
+          "tick_p95_ms": 3.583,
+          "tick_p99_ms": 4.413,
+          "p95_budget_pct": 7.165,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 3.142,
+            "transfers_ms": 0.202,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.583
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 3.556,
+            "transfers_ms": 0.339,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.413
+          }
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 6225.203,
+          "tick_p50_ms": 4,
+          "tick_p95_ms": 7.853,
+          "tick_p99_ms": 9.777,
+          "p95_budget_pct": 15.706,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 6.649,
+            "transfers_ms": 0.196,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.853
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 8.495,
+            "transfers_ms": 1.108,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 9.777
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 5283.164,
+          "tick_p50_ms": 3.627,
+          "tick_p95_ms": 5.934,
+          "tick_p99_ms": 6.921,
+          "p95_budget_pct": 11.869,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.638,
+            "transfers_ms": 0.287,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.934
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 5.512,
+            "transfers_ms": 0.861,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.921
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 4269.659,
+          "tick_p50_ms": 3.293,
+          "tick_p95_ms": 4.878,
+          "tick_p99_ms": 6.42,
+          "p95_budget_pct": 9.755,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.095,
+            "transfers_ms": 0.229,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.878
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 5.061,
+            "transfers_ms": 0.755,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.42
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 29.392,
+          "tick_p50_ms": 0.23,
+          "tick_p95_ms": 0.383,
+          "tick_p99_ms": 0.639,
+          "p95_budget_pct": 0.767,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.159,
+            "transfers_ms": 0.005,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.383
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.189,
+            "transfers_ms": 0.047,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.639
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 29.167,
+          "tick_p50_ms": 0.138,
+          "tick_p95_ms": 0.243,
+          "tick_p99_ms": 0.553,
+          "p95_budget_pct": 0.486,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 0.084,
+            "transfers_ms": 0.004,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.243
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.149,
+            "transfers_ms": 0.011,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.553
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 29.142,
+          "tick_p50_ms": 0.128,
+          "tick_p95_ms": 0.298,
+          "tick_p99_ms": 0.442,
+          "p95_budget_pct": 0.596,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.127,
+            "transfers_ms": 0.004,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.298
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 0.15,
+            "transfers_ms": 0.007,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.442
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 30,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.01,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.99,
+          "snapshot_hz": 19.99,
+          "snapshot_KiB_s": 30.804,
+          "tick_p50_ms": 0.111,
+          "tick_p95_ms": 0.255,
+          "tick_p99_ms": 0.495,
+          "p95_budget_pct": 0.511,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.149,
+            "transfers_ms": 0.045,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.255
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.014,
+            "simulation_ms": 0.422,
+            "transfers_ms": 0.109,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.495
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.99,
+          "snapshot_hz": 19.99,
+          "snapshot_KiB_s": 30.627,
+          "tick_p50_ms": 0.08,
+          "tick_p95_ms": 0.275,
+          "tick_p99_ms": 0.389,
+          "p95_budget_pct": 0.551,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.138,
+            "transfers_ms": 0.07,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.275
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 0.258,
+            "transfers_ms": 0.122,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.389
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 11,
+          "shadows": 22,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.99,
+          "snapshot_hz": 19.99,
+          "snapshot_KiB_s": 29.936,
+          "tick_p50_ms": 0.077,
+          "tick_p95_ms": 0.232,
+          "tick_p99_ms": 0.341,
+          "p95_budget_pct": 0.464,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.134,
+            "transfers_ms": 0.069,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.232
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 0.242,
+            "transfers_ms": 0.12,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 0.341
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2671.712,
+          "tick_p50_ms": 1.431,
+          "tick_p95_ms": 3.386,
+          "tick_p99_ms": 4.976,
+          "p95_budget_pct": 6.773,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.345,
+            "transfers_ms": 0.077,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 3.386
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 2.84,
+            "transfers_ms": 0.118,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.976
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2472.5,
+          "tick_p50_ms": 1.379,
+          "tick_p95_ms": 2.444,
+          "tick_p99_ms": 5.224,
+          "p95_budget_pct": 4.888,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.466,
+            "transfers_ms": 0.079,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.444
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.003,
+            "simulation_ms": 2.728,
+            "transfers_ms": 0.145,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.224
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 2541.055,
+          "tick_p50_ms": 1.422,
+          "tick_p95_ms": 2.198,
+          "tick_p99_ms": 5.697,
+          "p95_budget_pct": 4.397,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.363,
+            "transfers_ms": 0.071,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.198
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.01,
+            "simulation_ms": 2.954,
+            "transfers_ms": 0.161,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.697
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 3000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.006,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.994,
+          "snapshot_hz": 19.994,
+          "snapshot_KiB_s": 2681.923,
+          "tick_p50_ms": 0.895,
+          "tick_p95_ms": 1.6,
+          "tick_p99_ms": 2.272,
+          "p95_budget_pct": 3.201,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 1.173,
+            "transfers_ms": 0.109,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.6
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 2.042,
+            "transfers_ms": 0.986,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 2.272
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.994,
+          "snapshot_hz": 19.994,
+          "snapshot_KiB_s": 2655.308,
+          "tick_p50_ms": 0.889,
+          "tick_p95_ms": 1.463,
+          "tick_p99_ms": 1.909,
+          "p95_budget_pct": 2.925,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.193,
+            "transfers_ms": 0.13,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.463
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.56,
+            "transfers_ms": 0.288,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.909
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 1001,
+          "shadows": 2002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.994,
+          "snapshot_hz": 19.994,
+          "snapshot_KiB_s": 2452.15,
+          "tick_p50_ms": 0.866,
+          "tick_p95_ms": 1.394,
+          "tick_p99_ms": 1.594,
+          "p95_budget_pct": 2.788,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.078,
+            "transfers_ms": 0.118,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.394
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 1.27,
+            "transfers_ms": 0.367,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 1.594
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "reference",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.003,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 6658.72,
+          "tick_p50_ms": 4.037,
+          "tick_p95_ms": 7.06,
+          "tick_p99_ms": 18.919,
+          "p95_budget_pct": 14.12,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 5.931,
+            "transfers_ms": 0.246,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.06
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.004,
+            "simulation_ms": 15.565,
+            "transfers_ms": 0.399,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 18.919
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 5486.429,
+          "tick_p50_ms": 3.55,
+          "tick_p95_ms": 7.802,
+          "tick_p99_ms": 13.714,
+          "p95_budget_pct": 15.604,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 5.469,
+            "transfers_ms": 0.268,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.802
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 11.761,
+            "transfers_ms": 0.497,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 13.714
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.997,
+          "snapshot_hz": 19.997,
+          "snapshot_KiB_s": 6792.414,
+          "tick_p50_ms": 3.882,
+          "tick_p95_ms": 7.043,
+          "tick_p99_ms": 15.886,
+          "p95_budget_pct": 14.085,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 5.965,
+            "transfers_ms": 0.33,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.043
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 13.433,
+            "transfers_ms": 2.837,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 15.886
+          }
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "variant": "candidate",
+      "platform": "linux 6.1.0-56-cloud-amd64 x64",
+      "cpu": "QEMU Virtual CPU version 2.5+",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 6547.196,
+          "tick_p50_ms": 2.695,
+          "tick_p95_ms": 6.214,
+          "tick_p99_ms": 11.718,
+          "p95_budget_pct": 12.428,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 5.446,
+            "transfers_ms": 0.344,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.214
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.003,
+            "simulation_ms": 8.502,
+            "transfers_ms": 2.633,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 11.718
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 5303.118,
+          "tick_p50_ms": 2.668,
+          "tick_p95_ms": 4.937,
+          "tick_p99_ms": 8.785,
+          "p95_budget_pct": 9.874,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.452,
+            "transfers_ms": 0.296,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.937
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 7.017,
+            "transfers_ms": 0.918,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 8.785
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "snapshot_KiB_s": 4583.989,
+          "tick_p50_ms": 2.518,
+          "tick_p95_ms": 4.657,
+          "tick_p99_ms": 7.128,
+          "p95_budget_pct": 9.314,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.071,
+            "transfers_ms": 0.267,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.657
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.006,
+            "simulation_ms": 6.404,
+            "transfers_ms": 0.413,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.128
+          }
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "npcs": 30,
+      "variant": "reference",
+      "slowest_p50_ms": 0.217,
+      "slowest_p95_ms": 0.354,
+      "slowest_p99_ms": 0.639,
+      "min_tick_hz": 19.997,
+      "min_snapshot_hz": 19.997
+    },
+    {
+      "npcs": 30,
+      "variant": "candidate",
+      "slowest_p50_ms": 0.111,
+      "slowest_p95_ms": 0.25,
+      "slowest_p99_ms": 0.495,
+      "min_tick_hz": 19.996,
+      "min_snapshot_hz": 19.996
+    },
+    {
+      "npcs": 3000,
+      "variant": "reference",
+      "slowest_p50_ms": 1.501,
+      "slowest_p95_ms": 2.816,
+      "slowest_p99_ms": 5.697,
+      "min_tick_hz": 19.996,
+      "min_snapshot_hz": 19.996
+    },
+    {
+      "npcs": 3000,
+      "variant": "candidate",
+      "slowest_p50_ms": 0.941,
+      "slowest_p95_ms": 1.713,
+      "slowest_p99_ms": 3.124,
+      "min_tick_hz": 19.996,
+      "min_snapshot_hz": 19.996
+    },
+    {
+      "npcs": 9000,
+      "variant": "reference",
+      "slowest_p50_ms": 4.037,
+      "slowest_p95_ms": 7.802,
+      "slowest_p99_ms": 10.913,
+      "min_tick_hz": 19.995,
+      "min_snapshot_hz": 19.995
+    },
+    {
+      "npcs": 9000,
+      "variant": "candidate",
+      "slowest_p50_ms": 2.732,
+      "slowest_p95_ms": 5.407,
+      "slowest_p99_ms": 6.758,
+      "min_tick_hz": 19.995,
+      "min_snapshot_hz": 19.995
+    }
+  ],
+  "comparison": [
+    {
+      "npcs": 30,
+      "p50_delta_ms": -0.106,
+      "p50_delta_pct": -48.8,
+      "p95_delta_ms": -0.104,
+      "p95_delta_pct": -29.4,
+      "p99_delta_ms": -0.144,
+      "p99_delta_pct": -22.5
+    },
+    {
+      "npcs": 3000,
+      "p50_delta_ms": -0.56,
+      "p50_delta_pct": -37.3,
+      "p95_delta_ms": -1.103,
+      "p95_delta_pct": -39.2,
+      "p99_delta_ms": -2.573,
+      "p99_delta_pct": -45.2
+    },
+    {
+      "npcs": 9000,
+      "p50_delta_ms": -1.305,
+      "p50_delta_pct": -32.3,
+      "p95_delta_ms": -2.395,
+      "p95_delta_pct": -30.7,
+      "p99_delta_ms": -4.155,
+      "p99_delta_pct": -38.1
+    }
+  ],
+  "reference_lockfile": "a2c478bf8f6e048fd370d9fda85e96aeeba133aa",
+  "windows_reference_entry_points_from": null
+}

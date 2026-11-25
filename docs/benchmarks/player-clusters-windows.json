@@ -1,0 +1,6315 @@
+{
+  "method": 1,
+  "platform": "Windows 11 x64 build 26200, native, 20 cores / 28 logical processors",
+  "cpu": "Intel Core i7-13850HX",
+  "profile": "release",
+  "rustc": "1.96.1",
+  "runs": [
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "density": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 33600,
+          "first_worker_frames": 800,
+          "foreign_home_frames": 0,
+          "frames": 1600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 25600,
+          "step_ms": {
+            "max": 0.2612,
+            "p50": 0.1338,
+            "p95": 0.1744,
+            "p99": 0.2295
+          },
+          "step_with_topology_ms": {
+            "max": 0.2787,
+            "p50": 0.1458,
+            "p95": 0.1883,
+            "p99": 0.2594
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.0299,
+            "p50": 0.012,
+            "p95": 0.0151,
+            "p99": 0.0175
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 32,
+          "field_bytes": 68800,
+          "first_worker_frames": 1600,
+          "foreign_home_frames": 0,
+          "frames": 3200,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 32,
+          "players_per_origin": 32,
+          "queue_peak": 32,
+          "spatial_candidates": 102400,
+          "step_ms": {
+            "max": 0.5499,
+            "p50": 0.2927,
+            "p95": 0.3947,
+            "p99": 0.4845
+          },
+          "step_with_topology_ms": {
+            "max": 0.6092,
+            "p50": 0.3273,
+            "p95": 0.4347,
+            "p99": 0.5475
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.0744,
+            "p50": 0.0336,
+            "p95": 0.0444,
+            "p99": 0.0708
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 139200,
+          "first_worker_frames": 3200,
+          "foreign_home_frames": 0,
+          "frames": 6400,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 64,
+          "players_per_origin": 64,
+          "queue_peak": 64,
+          "spatial_candidates": 409600,
+          "step_ms": {
+            "max": 1.3455,
+            "p50": 0.6684,
+            "p95": 0.9201,
+            "p99": 1.0898
+          },
+          "step_with_topology_ms": {
+            "max": 1.4286,
+            "p50": 0.7465,
+            "p95": 1.0082,
+            "p99": 1.1814
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.1302,
+            "p50": 0.0676,
+            "p95": 0.095,
+            "p99": 0.1093
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 128,
+          "field_bytes": 280000,
+          "first_worker_frames": 6400,
+          "foreign_home_frames": 0,
+          "frames": 12800,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 128,
+          "players_per_origin": 128,
+          "queue_peak": 128,
+          "spatial_candidates": 1638400,
+          "step_ms": {
+            "max": 3.74,
+            "p50": 2.048,
+            "p95": 2.9522,
+            "p99": 3.4128
+          },
+          "step_with_topology_ms": {
+            "max": 3.9393,
+            "p50": 2.1844,
+            "p95": 3.0905,
+            "p99": 3.5435
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.2915,
+            "p50": 0.1329,
+            "p95": 0.1993,
+            "p99": 0.2643
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 256,
+          "field_bytes": 561600,
+          "first_worker_frames": 12800,
+          "foreign_home_frames": 0,
+          "frames": 25600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 256,
+          "players_per_origin": 256,
+          "queue_peak": 256,
+          "spatial_candidates": 6553600,
+          "step_ms": {
+            "max": 11.2869,
+            "p50": 7.9616,
+            "p95": 10.0053,
+            "p99": 10.9893
+          },
+          "step_with_topology_ms": {
+            "max": 11.9808,
+            "p50": 8.3371,
+            "p95": 10.4131,
+            "p99": 11.3828
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.6939,
+            "p50": 0.3376,
+            "p95": 0.5009,
+            "p99": 0.6705
+          },
+          "workers": 2
+        }
+      ],
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66168,
+          "step_ms": {
+            "max": 1.3499,
+            "p50": 0.6454,
+            "p95": 1.2456,
+            "p99": 1.3499
+          },
+          "step_with_topology_ms": {
+            "max": 1.423,
+            "p50": 0.7327,
+            "p95": 1.3271,
+            "p99": 1.423
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.4711,
+            "p50": 0.0844,
+            "p95": 0.2677,
+            "p99": 0.4711
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66159,
+          "step_ms": {
+            "max": 1.9946,
+            "p50": 0.6125,
+            "p95": 1.1264,
+            "p99": 1.9946
+          },
+          "step_with_topology_ms": {
+            "max": 2.0788,
+            "p50": 0.7044,
+            "p95": 1.2017,
+            "p99": 2.0788
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1196,
+            "p50": 0.0753,
+            "p95": 0.1084,
+            "p99": 0.1196
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66715,
+          "step_ms": {
+            "max": 1.5464,
+            "p50": 0.5053,
+            "p95": 1.5038,
+            "p99": 1.5464
+          },
+          "step_with_topology_ms": {
+            "max": 1.6347,
+            "p50": 0.5761,
+            "p95": 1.5756,
+            "p99": 1.6347
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1413,
+            "p50": 0.0697,
+            "p95": 0.0966,
+            "p99": 0.1413
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66665,
+          "step_ms": {
+            "max": 1.2974,
+            "p50": 0.545,
+            "p95": 1.1657,
+            "p99": 1.2974
+          },
+          "step_with_topology_ms": {
+            "max": 1.3752,
+            "p50": 0.6075,
+            "p95": 1.2468,
+            "p99": 1.3752
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0847,
+            "p50": 0.0644,
+            "p95": 0.0838,
+            "p99": 0.0847
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68388,
+          "step_ms": {
+            "max": 2.1228,
+            "p50": 0.5583,
+            "p95": 1.6159,
+            "p99": 2.1228
+          },
+          "step_with_topology_ms": {
+            "max": 2.2194,
+            "p50": 0.6316,
+            "p95": 1.6936,
+            "p99": 2.2194
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.4078,
+            "p50": 0.0743,
+            "p95": 0.0966,
+            "p99": 0.4078
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68172,
+          "step_ms": {
+            "max": 1.9102,
+            "p50": 0.4987,
+            "p95": 1.4769,
+            "p99": 1.9102
+          },
+          "step_with_topology_ms": {
+            "max": 1.9941,
+            "p50": 0.6216,
+            "p95": 1.5998,
+            "p99": 1.9941
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1229,
+            "p50": 0.0681,
+            "p95": 0.1229,
+            "p99": 0.1229
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79888,
+          "step_ms": {
+            "max": 2.199,
+            "p50": 0.6441,
+            "p95": 1.7465,
+            "p99": 2.199
+          },
+          "step_with_topology_ms": {
+            "max": 2.2751,
+            "p50": 0.7155,
+            "p95": 1.8182,
+            "p99": 2.2751
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.2246,
+            "p50": 0.0694,
+            "p95": 0.11,
+            "p99": 0.2246
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79088,
+          "step_ms": {
+            "max": 3.2398,
+            "p50": 0.6499,
+            "p95": 1.6849,
+            "p99": 3.2398
+          },
+          "step_with_topology_ms": {
+            "max": 3.3136,
+            "p50": 0.7295,
+            "p95": 1.8493,
+            "p99": 3.3136
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1717,
+            "p50": 0.0718,
+            "p95": 0.1131,
+            "p99": 0.1717
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 182208,
+          "step_ms": {
+            "max": 8.4349,
+            "p50": 0.6256,
+            "p95": 7.5105,
+            "p99": 8.4349
+          },
+          "step_with_topology_ms": {
+            "max": 8.5029,
+            "p50": 0.6872,
+            "p95": 7.5759,
+            "p99": 8.5029
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1038,
+            "p50": 0.0668,
+            "p95": 0.1013,
+            "p99": 0.1038
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 179904,
+          "step_ms": {
+            "max": 8.1443,
+            "p50": 0.6597,
+            "p95": 5.939,
+            "p99": 8.1443
+          },
+          "step_with_topology_ms": {
+            "max": 8.2297,
+            "p50": 0.734,
+            "p95": 6.0052,
+            "p99": 8.2297
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0868,
+            "p50": 0.0699,
+            "p95": 0.0854,
+            "p99": 0.0868
+          },
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 30720,
+          "step_ms": {
+            "max": 0.2008,
+            "p50": 0.126,
+            "p95": 0.1627,
+            "p99": 0.1815
+          },
+          "step_with_topology_ms": {
+            "max": 0.2205,
+            "p50": 0.1376,
+            "p95": 0.1786,
+            "p99": 0.1966
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.0218,
+            "p50": 0.0117,
+            "p95": 0.0155,
+            "p99": 0.0197
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 61440,
+          "step_ms": {
+            "max": 1.0459,
+            "p50": 0.2667,
+            "p95": 0.4135,
+            "p99": 0.6963
+          },
+          "step_with_topology_ms": {
+            "max": 1.1316,
+            "p50": 0.3036,
+            "p95": 0.4809,
+            "p99": 0.7572
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.106,
+            "p50": 0.0356,
+            "p95": 0.0625,
+            "p99": 0.0926
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 0.9888,
+            "p50": 0.5509,
+            "p95": 0.7652,
+            "p99": 0.9471
+          },
+          "step_with_topology_ms": {
+            "max": 1.1054,
+            "p50": 0.6445,
+            "p95": 0.8749,
+            "p99": 1.058
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1469,
+            "p50": 0.0913,
+            "p95": 0.1102,
+            "p99": 0.1446
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 245760,
+          "step_ms": {
+            "max": 1.882,
+            "p50": 1.1371,
+            "p95": 1.5249,
+            "p99": 1.838
+          },
+          "step_with_topology_ms": {
+            "max": 2.2952,
+            "p50": 1.3167,
+            "p95": 1.807,
+            "p99": 2.1527
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.6079,
+            "p50": 0.1838,
+            "p95": 0.2836,
+            "p99": 0.5737
+          },
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 1.0075,
+            "p50": 0.6516,
+            "p95": 0.8883,
+            "p99": 1.0075
+          },
+          "step_with_topology_ms": {
+            "max": 1.1112,
+            "p50": 0.744,
+            "p95": 1.0342,
+            "p99": 1.1112
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.2689,
+            "p50": 0.0975,
+            "p95": 0.1511,
+            "p99": 0.2689
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 42416,
+          "step_ms": {
+            "max": 2.0822,
+            "p50": 0.7189,
+            "p95": 1.4679,
+            "p99": 2.0822
+          },
+          "step_with_topology_ms": {
+            "max": 2.1784,
+            "p50": 0.8246,
+            "p95": 1.5731,
+            "p99": 2.1784
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.143,
+            "p50": 0.1059,
+            "p95": 0.1387,
+            "p99": 0.143
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.2156,
+            "p50": 0.7618,
+            "p95": 1.0712,
+            "p99": 1.2156
+          },
+          "step_with_topology_ms": {
+            "max": 1.2879,
+            "p50": 0.837,
+            "p95": 1.1877,
+            "p99": 1.2879
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1165,
+            "p50": 0.0752,
+            "p95": 0.105,
+            "p99": 0.1165
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 76640,
+          "step_ms": {
+            "max": 4.2157,
+            "p50": 0.8007,
+            "p95": 3.064,
+            "p99": 4.2157
+          },
+          "step_with_topology_ms": {
+            "max": 4.3043,
+            "p50": 0.8894,
+            "p95": 3.162,
+            "p99": 4.3043
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1231,
+            "p50": 0.0846,
+            "p95": 0.1224,
+            "p99": 0.1231
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.8106,
+            "p50": 1.2447,
+            "p95": 1.6893,
+            "p99": 1.8106
+          },
+          "step_with_topology_ms": {
+            "max": 1.901,
+            "p50": 1.3161,
+            "p95": 1.7819,
+            "p99": 1.901
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1152,
+            "p50": 0.0687,
+            "p95": 0.0926,
+            "p99": 0.1152
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 133760,
+          "step_ms": {
+            "max": 9.5291,
+            "p50": 1.251,
+            "p95": 2.0543,
+            "p99": 9.5291
+          },
+          "step_with_topology_ms": {
+            "max": 9.6113,
+            "p50": 1.3228,
+            "p95": 2.1205,
+            "p99": 9.6113
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0878,
+            "p50": 0.0675,
+            "p95": 0.0822,
+            "p99": 0.0878
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 196608,
+          "step_ms": {
+            "max": 3.1346,
+            "p50": 1.9618,
+            "p95": 2.5786,
+            "p99": 3.1346
+          },
+          "step_with_topology_ms": {
+            "max": 3.2376,
+            "p50": 2.0382,
+            "p95": 2.6812,
+            "p99": 3.2376
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1569,
+            "p50": 0.0655,
+            "p95": 0.103,
+            "p99": 0.1569
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 132992,
+          "step_ms": {
+            "max": 9.8802,
+            "p50": 1.543,
+            "p95": 3.0469,
+            "p99": 9.8802
+          },
+          "step_with_topology_ms": {
+            "max": 9.9718,
+            "p50": 1.6229,
+            "p95": 3.1716,
+            "p99": 9.9718
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1247,
+            "p50": 0.0851,
+            "p95": 0.1019,
+            "p99": 0.1247
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 2.1633,
+            "p50": 1.3037,
+            "p95": 1.9683,
+            "p99": 2.1633
+          },
+          "step_with_topology_ms": {
+            "max": 2.2542,
+            "p50": 1.3768,
+            "p95": 2.0592,
+            "p99": 2.2542
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1173,
+            "p50": 0.0764,
+            "p95": 0.106,
+            "p99": 0.1173
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 75008,
+          "step_ms": {
+            "max": 3.6558,
+            "p50": 0.7945,
+            "p95": 2.2083,
+            "p99": 3.6558
+          },
+          "step_with_topology_ms": {
+            "max": 3.7358,
+            "p50": 0.8709,
+            "p95": 2.2994,
+            "p99": 3.7358
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1347,
+            "p50": 0.079,
+            "p95": 0.1277,
+            "p99": 0.1347
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.6864,
+            "p50": 0.7823,
+            "p95": 1.223,
+            "p99": 1.6864
+          },
+          "step_with_topology_ms": {
+            "max": 1.8011,
+            "p50": 0.8741,
+            "p95": 1.3225,
+            "p99": 1.8011
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1967,
+            "p50": 0.0832,
+            "p95": 0.1147,
+            "p99": 0.1967
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 41600,
+          "step_ms": {
+            "max": 1.4838,
+            "p50": 0.5653,
+            "p95": 0.9971,
+            "p99": 1.4838
+          },
+          "step_with_topology_ms": {
+            "max": 1.5683,
+            "p50": 0.642,
+            "p95": 1.0975,
+            "p99": 1.5683
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1642,
+            "p50": 0.0791,
+            "p95": 0.1261,
+            "p99": 0.1642
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 0.9813,
+            "p50": 0.5631,
+            "p95": 0.8301,
+            "p99": 0.9813
+          },
+          "step_with_topology_ms": {
+            "max": 1.0894,
+            "p50": 0.6603,
+            "p95": 0.9419,
+            "p99": 1.0894
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1251,
+            "p50": 0.094,
+            "p95": 0.1133,
+            "p99": 0.1251
+          },
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 0.8604,
+            "p50": 0.4424,
+            "p95": 0.6365,
+            "p99": 0.7967
+          },
+          "step_with_topology_ms": {
+            "max": 0.9677,
+            "p50": 0.5249,
+            "p95": 0.7467,
+            "p99": 0.9556
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1589,
+            "p50": 0.0806,
+            "p95": 0.1073,
+            "p99": 0.1245
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 0.7714,
+            "p50": 0.4495,
+            "p95": 0.6178,
+            "p99": 0.7542
+          },
+          "step_with_topology_ms": {
+            "max": 0.8975,
+            "p50": 0.5345,
+            "p95": 0.7166,
+            "p99": 0.8716
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1393,
+            "p50": 0.0797,
+            "p95": 0.1081,
+            "p99": 0.1294
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.2692,
+            "p50": 0.5196,
+            "p95": 0.7817,
+            "p99": 0.896
+          },
+          "step_with_topology_ms": {
+            "max": 1.6801,
+            "p50": 0.6006,
+            "p95": 0.9073,
+            "p99": 1.0269
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.4218,
+            "p50": 0.0826,
+            "p95": 0.1256,
+            "p99": 0.4109
+          },
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    },
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "density": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 33600,
+          "first_worker_frames": 800,
+          "foreign_home_frames": 0,
+          "frames": 1600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 25600,
+          "step_ms": {
+            "max": 0.193,
+            "p50": 0.1051,
+            "p95": 0.1626,
+            "p99": 0.1842
+          },
+          "step_with_topology_ms": {
+            "max": 0.208,
+            "p50": 0.1144,
+            "p95": 0.1776,
+            "p99": 0.1991
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.0184,
+            "p50": 0.0088,
+            "p95": 0.0148,
+            "p99": 0.0161
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 32,
+          "field_bytes": 68800,
+          "first_worker_frames": 1600,
+          "foreign_home_frames": 0,
+          "frames": 3200,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 32,
+          "players_per_origin": 32,
+          "queue_peak": 32,
+          "spatial_candidates": 102400,
+          "step_ms": {
+            "max": 0.6256,
+            "p50": 0.2339,
+            "p95": 0.3728,
+            "p99": 0.431
+          },
+          "step_with_topology_ms": {
+            "max": 0.6586,
+            "p50": 0.2598,
+            "p95": 0.433,
+            "p99": 0.4894
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.0763,
+            "p50": 0.0271,
+            "p95": 0.0419,
+            "p99": 0.0584
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 139200,
+          "first_worker_frames": 3200,
+          "foreign_home_frames": 0,
+          "frames": 6400,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 64,
+          "players_per_origin": 64,
+          "queue_peak": 64,
+          "spatial_candidates": 409600,
+          "step_ms": {
+            "max": 1.3392,
+            "p50": 0.7787,
+            "p95": 1.1014,
+            "p99": 1.3016
+          },
+          "step_with_topology_ms": {
+            "max": 1.4281,
+            "p50": 0.854,
+            "p95": 1.1902,
+            "p99": 1.4068
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.1284,
+            "p50": 0.0778,
+            "p95": 0.0956,
+            "p99": 0.1052
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 128,
+          "field_bytes": 280000,
+          "first_worker_frames": 6400,
+          "foreign_home_frames": 0,
+          "frames": 12800,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 128,
+          "players_per_origin": 128,
+          "queue_peak": 128,
+          "spatial_candidates": 1638400,
+          "step_ms": {
+            "max": 3.1869,
+            "p50": 2.442,
+            "p95": 3.0964,
+            "p99": 3.167
+          },
+          "step_with_topology_ms": {
+            "max": 3.4188,
+            "p50": 2.6116,
+            "p95": 3.3314,
+            "p99": 3.3915
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.2427,
+            "p50": 0.1642,
+            "p95": 0.2098,
+            "p99": 0.2371
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 256,
+          "field_bytes": 561600,
+          "first_worker_frames": 12800,
+          "foreign_home_frames": 0,
+          "frames": 25600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 256,
+          "players_per_origin": 256,
+          "queue_peak": 256,
+          "spatial_candidates": 6553600,
+          "step_ms": {
+            "max": 10.9138,
+            "p50": 7.8582,
+            "p95": 9.3216,
+            "p99": 10.3542
+          },
+          "step_with_topology_ms": {
+            "max": 11.2519,
+            "p50": 8.1636,
+            "p95": 9.7273,
+            "p99": 10.843
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.6296,
+            "p50": 0.3381,
+            "p95": 0.4583,
+            "p99": 0.5392
+          },
+          "workers": 2
+        }
+      ],
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66168,
+          "step_ms": {
+            "max": 1.6122,
+            "p50": 0.5234,
+            "p95": 1.325,
+            "p99": 1.6122
+          },
+          "step_with_topology_ms": {
+            "max": 1.7031,
+            "p50": 0.603,
+            "p95": 1.4157,
+            "p99": 1.7031
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1277,
+            "p50": 0.0715,
+            "p95": 0.1182,
+            "p99": 0.1277
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66159,
+          "step_ms": {
+            "max": 0.9977,
+            "p50": 0.5041,
+            "p95": 0.9839,
+            "p99": 0.9977
+          },
+          "step_with_topology_ms": {
+            "max": 1.0628,
+            "p50": 0.5744,
+            "p95": 1.0513,
+            "p99": 1.0628
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1633,
+            "p50": 0.066,
+            "p95": 0.0861,
+            "p99": 0.1633
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66715,
+          "step_ms": {
+            "max": 1.3914,
+            "p50": 0.5229,
+            "p95": 1.3387,
+            "p99": 1.3914
+          },
+          "step_with_topology_ms": {
+            "max": 1.4803,
+            "p50": 0.5851,
+            "p95": 1.4196,
+            "p99": 1.4803
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0889,
+            "p50": 0.0655,
+            "p95": 0.0841,
+            "p99": 0.0889
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66665,
+          "step_ms": {
+            "max": 2.0272,
+            "p50": 0.6695,
+            "p95": 1.1015,
+            "p99": 2.0272
+          },
+          "step_with_topology_ms": {
+            "max": 2.1012,
+            "p50": 0.7342,
+            "p95": 1.17,
+            "p99": 2.1012
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1042,
+            "p50": 0.0705,
+            "p95": 0.101,
+            "p99": 0.1042
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68388,
+          "step_ms": {
+            "max": 1.9739,
+            "p50": 0.4897,
+            "p95": 1.483,
+            "p99": 1.9739
+          },
+          "step_with_topology_ms": {
+            "max": 2.0494,
+            "p50": 0.5571,
+            "p95": 1.5727,
+            "p99": 2.0494
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1489,
+            "p50": 0.0692,
+            "p95": 0.0973,
+            "p99": 0.1489
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68172,
+          "step_ms": {
+            "max": 1.756,
+            "p50": 0.5286,
+            "p95": 1.2319,
+            "p99": 1.756
+          },
+          "step_with_topology_ms": {
+            "max": 1.8359,
+            "p50": 0.6096,
+            "p95": 1.3147,
+            "p99": 1.8359
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0891,
+            "p50": 0.0704,
+            "p95": 0.0859,
+            "p99": 0.0891
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79888,
+          "step_ms": {
+            "max": 2.8933,
+            "p50": 0.6511,
+            "p95": 2.1278,
+            "p99": 2.8933
+          },
+          "step_with_topology_ms": {
+            "max": 2.9746,
+            "p50": 0.7217,
+            "p95": 2.2054,
+            "p99": 2.9746
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0986,
+            "p50": 0.0744,
+            "p95": 0.0914,
+            "p99": 0.0986
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79088,
+          "step_ms": {
+            "max": 3.7744,
+            "p50": 0.652,
+            "p95": 1.7961,
+            "p99": 3.7744
+          },
+          "step_with_topology_ms": {
+            "max": 3.8564,
+            "p50": 0.7196,
+            "p95": 1.8923,
+            "p99": 3.8564
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1199,
+            "p50": 0.0689,
+            "p95": 0.1003,
+            "p99": 0.1199
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 182208,
+          "step_ms": {
+            "max": 6.9409,
+            "p50": 0.6804,
+            "p95": 6.263,
+            "p99": 6.9409
+          },
+          "step_with_topology_ms": {
+            "max": 7.0166,
+            "p50": 0.7595,
+            "p95": 6.3444,
+            "p99": 7.0166
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.3221,
+            "p50": 0.064,
+            "p95": 0.1671,
+            "p99": 0.3221
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 179904,
+          "step_ms": {
+            "max": 7.6453,
+            "p50": 0.703,
+            "p95": 6.4863,
+            "p99": 7.6453
+          },
+          "step_with_topology_ms": {
+            "max": 7.7082,
+            "p50": 0.7655,
+            "p95": 6.5689,
+            "p99": 7.7082
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0896,
+            "p50": 0.0687,
+            "p95": 0.0892,
+            "p99": 0.0896
+          },
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 30720,
+          "step_ms": {
+            "max": 0.4401,
+            "p50": 0.1061,
+            "p95": 0.196,
+            "p99": 0.3323
+          },
+          "step_with_topology_ms": {
+            "max": 0.4669,
+            "p50": 0.1165,
+            "p95": 0.2129,
+            "p99": 0.3592
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.0419,
+            "p50": 0.0093,
+            "p95": 0.0183,
+            "p99": 0.0269
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 61440,
+          "step_ms": {
+            "max": 0.712,
+            "p50": 0.23,
+            "p95": 0.4248,
+            "p99": 0.664
+          },
+          "step_with_topology_ms": {
+            "max": 0.768,
+            "p50": 0.2596,
+            "p95": 0.5086,
+            "p99": 0.7247
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.0897,
+            "p50": 0.0298,
+            "p95": 0.0505,
+            "p99": 0.0772
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.2892,
+            "p50": 0.4955,
+            "p95": 0.7641,
+            "p99": 0.9091
+          },
+          "step_with_topology_ms": {
+            "max": 1.4147,
+            "p50": 0.5729,
+            "p95": 0.8907,
+            "p99": 1.0994
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.3454,
+            "p50": 0.0807,
+            "p95": 0.1241,
+            "p99": 0.1727
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 245760,
+          "step_ms": {
+            "max": 2.0945,
+            "p50": 1.0288,
+            "p95": 1.7803,
+            "p99": 2.0727
+          },
+          "step_with_topology_ms": {
+            "max": 2.2737,
+            "p50": 1.1962,
+            "p95": 1.9548,
+            "p99": 2.2319
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.3033,
+            "p50": 0.1636,
+            "p95": 0.224,
+            "p99": 0.291
+          },
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 0.9174,
+            "p50": 0.523,
+            "p95": 0.6955,
+            "p99": 0.9174
+          },
+          "step_with_topology_ms": {
+            "max": 1.0353,
+            "p50": 0.6086,
+            "p95": 0.8052,
+            "p99": 1.0353
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1278,
+            "p50": 0.0835,
+            "p95": 0.1179,
+            "p99": 0.1278
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 42416,
+          "step_ms": {
+            "max": 1.9149,
+            "p50": 0.536,
+            "p95": 1.8889,
+            "p99": 1.9149
+          },
+          "step_with_topology_ms": {
+            "max": 2.0134,
+            "p50": 0.6173,
+            "p95": 1.9711,
+            "p99": 2.0134
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1501,
+            "p50": 0.0812,
+            "p95": 0.146,
+            "p99": 0.1501
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.4541,
+            "p50": 0.741,
+            "p95": 1.0909,
+            "p99": 1.4541
+          },
+          "step_with_topology_ms": {
+            "max": 1.5638,
+            "p50": 0.8164,
+            "p95": 1.1662,
+            "p99": 1.5638
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1097,
+            "p50": 0.0738,
+            "p95": 0.1087,
+            "p99": 0.1097
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 76640,
+          "step_ms": {
+            "max": 5.1658,
+            "p50": 1.0074,
+            "p95": 2.9739,
+            "p99": 5.1658
+          },
+          "step_with_topology_ms": {
+            "max": 5.2761,
+            "p50": 1.1077,
+            "p95": 3.0639,
+            "p99": 5.2761
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1349,
+            "p50": 0.0878,
+            "p95": 0.1345,
+            "p99": 0.1349
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.7664,
+            "p50": 1.2222,
+            "p95": 1.7052,
+            "p99": 1.7664
+          },
+          "step_with_topology_ms": {
+            "max": 1.8481,
+            "p50": 1.2926,
+            "p95": 1.8034,
+            "p99": 1.8481
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1426,
+            "p50": 0.0694,
+            "p95": 0.0982,
+            "p99": 0.1426
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 133760,
+          "step_ms": {
+            "max": 9.2154,
+            "p50": 1.3612,
+            "p95": 2.7401,
+            "p99": 9.2154
+          },
+          "step_with_topology_ms": {
+            "max": 9.2831,
+            "p50": 1.4243,
+            "p95": 2.8352,
+            "p99": 9.2831
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1305,
+            "p50": 0.0714,
+            "p95": 0.1056,
+            "p99": 0.1305
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 196608,
+          "step_ms": {
+            "max": 3.1023,
+            "p50": 2.0075,
+            "p95": 2.6173,
+            "p99": 3.1023
+          },
+          "step_with_topology_ms": {
+            "max": 3.1763,
+            "p50": 2.0721,
+            "p95": 2.6898,
+            "p99": 3.1763
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1918,
+            "p50": 0.069,
+            "p95": 0.082,
+            "p99": 0.1918
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 132992,
+          "step_ms": {
+            "max": 7.3855,
+            "p50": 1.2936,
+            "p95": 2.3017,
+            "p99": 7.3855
+          },
+          "step_with_topology_ms": {
+            "max": 7.4741,
+            "p50": 1.3575,
+            "p95": 2.3776,
+            "p99": 7.4741
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.486,
+            "p50": 0.0664,
+            "p95": 0.0921,
+            "p99": 0.486
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 2.0182,
+            "p50": 1.197,
+            "p95": 1.7786,
+            "p99": 2.0182
+          },
+          "step_with_topology_ms": {
+            "max": 2.094,
+            "p50": 1.2643,
+            "p95": 1.8838,
+            "p99": 2.094
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1052,
+            "p50": 0.0682,
+            "p95": 0.094,
+            "p99": 0.1052
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 75008,
+          "step_ms": {
+            "max": 3.6289,
+            "p50": 0.7642,
+            "p95": 1.501,
+            "p99": 3.6289
+          },
+          "step_with_topology_ms": {
+            "max": 3.7092,
+            "p50": 0.8411,
+            "p95": 1.5941,
+            "p99": 3.7092
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.108,
+            "p50": 0.0704,
+            "p95": 0.1012,
+            "p99": 0.108
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.5455,
+            "p50": 0.6784,
+            "p95": 0.9624,
+            "p99": 1.5455
+          },
+          "step_with_topology_ms": {
+            "max": 1.6332,
+            "p50": 0.7506,
+            "p95": 1.0586,
+            "p99": 1.6332
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1064,
+            "p50": 0.0735,
+            "p95": 0.0887,
+            "p99": 0.1064
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 41600,
+          "step_ms": {
+            "max": 1.5119,
+            "p50": 0.5248,
+            "p95": 1.2643,
+            "p99": 1.5119
+          },
+          "step_with_topology_ms": {
+            "max": 1.5991,
+            "p50": 0.6076,
+            "p95": 1.3494,
+            "p99": 1.5991
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1151,
+            "p50": 0.0809,
+            "p95": 0.1083,
+            "p99": 0.1151
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 0.8743,
+            "p50": 0.4939,
+            "p95": 0.793,
+            "p99": 0.8743
+          },
+          "step_with_topology_ms": {
+            "max": 0.9719,
+            "p50": 0.5753,
+            "p95": 0.8945,
+            "p99": 0.9719
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.174,
+            "p50": 0.0806,
+            "p95": 0.1059,
+            "p99": 0.174
+          },
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 0.8908,
+            "p50": 0.5134,
+            "p95": 0.7593,
+            "p99": 0.8631
+          },
+          "step_with_topology_ms": {
+            "max": 1.0018,
+            "p50": 0.6075,
+            "p95": 0.9044,
+            "p99": 1.0015
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.3193,
+            "p50": 0.0928,
+            "p95": 0.1521,
+            "p99": 0.1816
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.0415,
+            "p50": 0.6009,
+            "p95": 0.8039,
+            "p99": 0.9631
+          },
+          "step_with_topology_ms": {
+            "max": 1.1674,
+            "p50": 0.7107,
+            "p95": 0.9257,
+            "p99": 1.1128
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1497,
+            "p50": 0.1045,
+            "p95": 0.1247,
+            "p99": 0.1493
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.1884,
+            "p50": 0.4955,
+            "p95": 0.9272,
+            "p99": 1.1167
+          },
+          "step_with_topology_ms": {
+            "max": 1.3139,
+            "p50": 0.5786,
+            "p95": 1.0665,
+            "p99": 1.2298
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.3688,
+            "p50": 0.0813,
+            "p95": 0.1297,
+            "p99": 0.2519
+          },
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    },
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "density": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 33600,
+          "first_worker_frames": 800,
+          "foreign_home_frames": 0,
+          "frames": 1600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 25600,
+          "step_ms": {
+            "max": 0.5155,
+            "p50": 0.1027,
+            "p95": 0.1584,
+            "p99": 0.31
+          },
+          "step_with_topology_ms": {
+            "max": 0.5389,
+            "p50": 0.1126,
+            "p95": 0.172,
+            "p99": 0.3267
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.035,
+            "p50": 0.0092,
+            "p95": 0.0136,
+            "p99": 0.0252
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 32,
+          "field_bytes": 68800,
+          "first_worker_frames": 1600,
+          "foreign_home_frames": 0,
+          "frames": 3200,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 32,
+          "players_per_origin": 32,
+          "queue_peak": 32,
+          "spatial_candidates": 102400,
+          "step_ms": {
+            "max": 0.5281,
+            "p50": 0.2667,
+            "p95": 0.3539,
+            "p99": 0.5149
+          },
+          "step_with_topology_ms": {
+            "max": 0.5937,
+            "p50": 0.2975,
+            "p95": 0.3906,
+            "p99": 0.5629
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.0656,
+            "p50": 0.0304,
+            "p95": 0.0397,
+            "p99": 0.0517
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 139200,
+          "first_worker_frames": 3200,
+          "foreign_home_frames": 0,
+          "frames": 6400,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 64,
+          "players_per_origin": 64,
+          "queue_peak": 64,
+          "spatial_candidates": 409600,
+          "step_ms": {
+            "max": 1.4353,
+            "p50": 0.7808,
+            "p95": 1.0526,
+            "p99": 1.2648
+          },
+          "step_with_topology_ms": {
+            "max": 1.5243,
+            "p50": 0.8627,
+            "p95": 1.1571,
+            "p99": 1.3651
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.3388,
+            "p50": 0.0787,
+            "p95": 0.1003,
+            "p99": 0.1212
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 128,
+          "field_bytes": 280000,
+          "first_worker_frames": 6400,
+          "foreign_home_frames": 0,
+          "frames": 12800,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 128,
+          "players_per_origin": 128,
+          "queue_peak": 128,
+          "spatial_candidates": 1638400,
+          "step_ms": {
+            "max": 3.6185,
+            "p50": 2.5813,
+            "p95": 3.2954,
+            "p99": 3.5219
+          },
+          "step_with_topology_ms": {
+            "max": 3.8753,
+            "p50": 2.7644,
+            "p95": 3.4863,
+            "p99": 3.7946
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.3534,
+            "p50": 0.1717,
+            "p95": 0.2214,
+            "p99": 0.2765
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 256,
+          "field_bytes": 561600,
+          "first_worker_frames": 12800,
+          "foreign_home_frames": 0,
+          "frames": 25600,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "dense",
+          "players": 256,
+          "players_per_origin": 256,
+          "queue_peak": 256,
+          "spatial_candidates": 6553600,
+          "step_ms": {
+            "max": 10.5617,
+            "p50": 8.5291,
+            "p95": 9.5694,
+            "p99": 10.5561
+          },
+          "step_with_topology_ms": {
+            "max": 10.934,
+            "p50": 8.9036,
+            "p95": 9.9211,
+            "p99": 10.9038
+          },
+          "ticks": 100,
+          "topology_query_ms": {
+            "max": 0.5105,
+            "p50": 0.3508,
+            "p95": 0.4525,
+            "p99": 0.498
+          },
+          "workers": 2
+        }
+      ],
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66168,
+          "step_ms": {
+            "max": 1.6297,
+            "p50": 0.5199,
+            "p95": 1.412,
+            "p99": 1.6297
+          },
+          "step_with_topology_ms": {
+            "max": 1.7104,
+            "p50": 0.5998,
+            "p95": 1.5166,
+            "p99": 1.7104
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1046,
+            "p50": 0.0696,
+            "p95": 0.1016,
+            "p99": 0.1046
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 66159,
+          "step_ms": {
+            "max": 1.3072,
+            "p50": 0.5425,
+            "p95": 1.1514,
+            "p99": 1.3072
+          },
+          "step_with_topology_ms": {
+            "max": 1.3929,
+            "p50": 0.6127,
+            "p95": 1.2239,
+            "p99": 1.3929
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.3324,
+            "p50": 0.0695,
+            "p95": 0.09,
+            "p99": 0.3324
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66715,
+          "step_ms": {
+            "max": 1.5913,
+            "p50": 0.5948,
+            "p95": 1.5805,
+            "p99": 1.5913
+          },
+          "step_with_topology_ms": {
+            "max": 1.6654,
+            "p50": 0.6693,
+            "p95": 1.6596,
+            "p99": 1.6654
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0945,
+            "p50": 0.0741,
+            "p95": 0.0928,
+            "p99": 0.0945
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 66665,
+          "step_ms": {
+            "max": 1.6373,
+            "p50": 0.6182,
+            "p95": 1.0982,
+            "p99": 1.6373
+          },
+          "step_with_topology_ms": {
+            "max": 1.7496,
+            "p50": 0.7067,
+            "p95": 1.1866,
+            "p99": 1.7496
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1123,
+            "p50": 0.0794,
+            "p95": 0.1005,
+            "p99": 0.1123
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68388,
+          "step_ms": {
+            "max": 2.1154,
+            "p50": 0.6282,
+            "p95": 1.5956,
+            "p99": 2.1154
+          },
+          "step_with_topology_ms": {
+            "max": 2.1936,
+            "p50": 0.7313,
+            "p95": 1.6733,
+            "p99": 2.1936
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1219,
+            "p50": 0.0796,
+            "p95": 0.1151,
+            "p99": 0.1219
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 68172,
+          "step_ms": {
+            "max": 2.583,
+            "p50": 0.8372,
+            "p95": 1.2786,
+            "p99": 2.583
+          },
+          "step_with_topology_ms": {
+            "max": 2.6758,
+            "p50": 0.9419,
+            "p95": 1.3824,
+            "p99": 2.6758
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.4808,
+            "p50": 0.093,
+            "p95": 0.1348,
+            "p99": 0.4808
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79888,
+          "step_ms": {
+            "max": 2.4454,
+            "p50": 0.7035,
+            "p95": 1.933,
+            "p99": 2.4454
+          },
+          "step_with_topology_ms": {
+            "max": 2.5335,
+            "p50": 0.8106,
+            "p95": 2.0154,
+            "p99": 2.5335
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1162,
+            "p50": 0.0825,
+            "p95": 0.109,
+            "p99": 0.1162
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 79088,
+          "step_ms": {
+            "max": 2.3582,
+            "p50": 0.6989,
+            "p95": 1.9028,
+            "p99": 2.3582
+          },
+          "step_with_topology_ms": {
+            "max": 2.4334,
+            "p50": 0.7703,
+            "p95": 2.0029,
+            "p99": 2.4334
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1076,
+            "p50": 0.0752,
+            "p95": 0.1013,
+            "p99": 0.1076
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 182208,
+          "step_ms": {
+            "max": 7.2839,
+            "p50": 0.6889,
+            "p95": 7.197,
+            "p99": 7.2839
+          },
+          "step_with_topology_ms": {
+            "max": 7.3549,
+            "p50": 0.7633,
+            "p95": 7.2672,
+            "p99": 7.3549
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.2899,
+            "p50": 0.0702,
+            "p95": 0.2209,
+            "p99": 0.2899
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 179904,
+          "step_ms": {
+            "max": 7.8695,
+            "p50": 0.7113,
+            "p95": 6.6227,
+            "p99": 7.8695
+          },
+          "step_with_topology_ms": {
+            "max": 7.9382,
+            "p50": 0.7866,
+            "p95": 6.7034,
+            "p99": 7.9382
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.2991,
+            "p50": 0.0706,
+            "p95": 0.2025,
+            "p99": 0.2991
+          },
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 30720,
+          "step_ms": {
+            "max": 0.2008,
+            "p50": 0.0991,
+            "p95": 0.1544,
+            "p99": 0.1922
+          },
+          "step_with_topology_ms": {
+            "max": 0.2585,
+            "p50": 0.1081,
+            "p95": 0.1748,
+            "p99": 0.2163
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1041,
+            "p50": 0.009,
+            "p95": 0.014,
+            "p99": 0.0172
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 61440,
+          "step_ms": {
+            "max": 0.6801,
+            "p50": 0.2334,
+            "p95": 0.3769,
+            "p99": 0.6602
+          },
+          "step_with_topology_ms": {
+            "max": 0.7283,
+            "p50": 0.2667,
+            "p95": 0.4202,
+            "p99": 0.7056
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1845,
+            "p50": 0.0314,
+            "p95": 0.0482,
+            "p99": 0.076
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.7095,
+            "p50": 0.519,
+            "p95": 0.8926,
+            "p99": 1.1414
+          },
+          "step_with_topology_ms": {
+            "max": 1.8197,
+            "p50": 0.6094,
+            "p95": 0.9681,
+            "p99": 1.258
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.348,
+            "p50": 0.0846,
+            "p95": 0.1166,
+            "p99": 0.2983
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 245760,
+          "step_ms": {
+            "max": 1.7733,
+            "p50": 1.0878,
+            "p95": 1.543,
+            "p99": 1.7257
+          },
+          "step_with_topology_ms": {
+            "max": 1.9542,
+            "p50": 1.2634,
+            "p95": 1.7276,
+            "p99": 1.9012
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.3187,
+            "p50": 0.1705,
+            "p95": 0.2424,
+            "p99": 0.3166
+          },
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 1.006,
+            "p50": 0.5042,
+            "p95": 0.8796,
+            "p99": 1.006
+          },
+          "step_with_topology_ms": {
+            "max": 1.1401,
+            "p50": 0.5841,
+            "p95": 0.9737,
+            "p99": 1.1401
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.2419,
+            "p50": 0.0781,
+            "p95": 0.1341,
+            "p99": 0.2419
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 42416,
+          "step_ms": {
+            "max": 1.7799,
+            "p50": 0.5749,
+            "p95": 1.3818,
+            "p99": 1.7799
+          },
+          "step_with_topology_ms": {
+            "max": 1.8689,
+            "p50": 0.659,
+            "p95": 1.4821,
+            "p99": 1.8689
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1504,
+            "p50": 0.0848,
+            "p95": 0.1079,
+            "p99": 0.1504
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.6552,
+            "p50": 0.8604,
+            "p95": 1.2432,
+            "p99": 1.6552
+          },
+          "step_with_topology_ms": {
+            "max": 1.8137,
+            "p50": 0.9501,
+            "p95": 1.3309,
+            "p99": 1.8137
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1723,
+            "p50": 0.092,
+            "p95": 0.1298,
+            "p99": 0.1723
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 76640,
+          "step_ms": {
+            "max": 3.5732,
+            "p50": 1.0033,
+            "p95": 2.7091,
+            "p99": 3.5732
+          },
+          "step_with_topology_ms": {
+            "max": 3.6817,
+            "p50": 1.1173,
+            "p95": 2.7834,
+            "p99": 3.6817
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1683,
+            "p50": 0.1019,
+            "p95": 0.1242,
+            "p99": 0.1683
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.8694,
+            "p50": 1.3104,
+            "p95": 1.754,
+            "p99": 1.8694
+          },
+          "step_with_topology_ms": {
+            "max": 1.9711,
+            "p50": 1.3812,
+            "p95": 1.8533,
+            "p99": 1.9711
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1079,
+            "p50": 0.0726,
+            "p95": 0.1027,
+            "p99": 0.1079
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 133760,
+          "step_ms": {
+            "max": 9.2806,
+            "p50": 1.3133,
+            "p95": 2.6189,
+            "p99": 9.2806
+          },
+          "step_with_topology_ms": {
+            "max": 9.3534,
+            "p50": 1.3813,
+            "p95": 2.6871,
+            "p99": 9.3534
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.0969,
+            "p50": 0.0655,
+            "p95": 0.0954,
+            "p99": 0.0969
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 196608,
+          "step_ms": {
+            "max": 3.2292,
+            "p50": 2.1541,
+            "p95": 2.6911,
+            "p99": 3.2292
+          },
+          "step_with_topology_ms": {
+            "max": 3.3141,
+            "p50": 2.2239,
+            "p95": 2.7606,
+            "p99": 3.3141
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.103,
+            "p50": 0.0732,
+            "p95": 0.0984,
+            "p99": 0.103
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 132992,
+          "step_ms": {
+            "max": 7.9675,
+            "p50": 1.389,
+            "p95": 2.0406,
+            "p99": 7.9675
+          },
+          "step_with_topology_ms": {
+            "max": 8.0342,
+            "p50": 1.4781,
+            "p95": 2.1039,
+            "p99": 8.0342
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1172,
+            "p50": 0.068,
+            "p95": 0.0975,
+            "p99": 0.1172
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 2.0759,
+            "p50": 1.1437,
+            "p95": 1.6244,
+            "p99": 2.0759
+          },
+          "step_with_topology_ms": {
+            "max": 2.1654,
+            "p50": 1.2165,
+            "p95": 1.6928,
+            "p99": 2.1654
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.1874,
+            "p50": 0.0655,
+            "p95": 0.0907,
+            "p99": 0.1874
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 75008,
+          "step_ms": {
+            "max": 5.8788,
+            "p50": 0.7458,
+            "p95": 1.6217,
+            "p99": 5.8788
+          },
+          "step_with_topology_ms": {
+            "max": 5.9559,
+            "p50": 0.8185,
+            "p95": 1.7158,
+            "p99": 5.9559
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1213,
+            "p50": 0.0729,
+            "p95": 0.1178,
+            "p99": 0.1213
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 73728,
+          "step_ms": {
+            "max": 1.539,
+            "p50": 0.7678,
+            "p95": 1.1884,
+            "p99": 1.539
+          },
+          "step_with_topology_ms": {
+            "max": 1.7564,
+            "p50": 0.8421,
+            "p95": 1.264,
+            "p99": 1.7564
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.2174,
+            "p50": 0.082,
+            "p95": 0.1095,
+            "p99": 0.2174
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 41600,
+          "step_ms": {
+            "max": 2.1147,
+            "p50": 0.6505,
+            "p95": 1.0616,
+            "p99": 2.1147
+          },
+          "step_with_topology_ms": {
+            "max": 2.2198,
+            "p50": 0.7575,
+            "p95": 1.1701,
+            "p99": 2.2198
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.1406,
+            "p50": 0.0989,
+            "p95": 0.1289,
+            "p99": 0.1406
+          },
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 49152,
+          "step_ms": {
+            "max": 0.8951,
+            "p50": 0.4956,
+            "p95": 0.7771,
+            "p99": 0.8951
+          },
+          "step_with_topology_ms": {
+            "max": 0.9771,
+            "p50": 0.5873,
+            "p95": 0.8726,
+            "p99": 0.9771
+          },
+          "ticks": 48,
+          "topology_query_ms": {
+            "max": 0.4085,
+            "p50": 0.0806,
+            "p95": 0.1031,
+            "p99": 0.4085
+          },
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 0.7294,
+            "p50": 0.4318,
+            "p95": 0.6315,
+            "p99": 0.7054
+          },
+          "step_with_topology_ms": {
+            "max": 0.8255,
+            "p50": 0.5108,
+            "p95": 0.737,
+            "p99": 0.817
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.1251,
+            "p50": 0.0774,
+            "p95": 0.1116,
+            "p99": 0.1198
+          },
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": null,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.2108,
+            "p50": 0.4506,
+            "p95": 0.8016,
+            "p99": 0.9823
+          },
+          "step_with_topology_ms": {
+            "max": 1.3637,
+            "p50": 0.5329,
+            "p95": 0.8886,
+            "p99": 1.1498
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.262,
+            "p50": 0.0796,
+            "p95": 0.1176,
+            "p99": 0.2076
+          },
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 122880,
+          "step_ms": {
+            "max": 1.5555,
+            "p50": 0.5221,
+            "p95": 0.8235,
+            "p99": 0.9356
+          },
+          "step_with_topology_ms": {
+            "max": 1.776,
+            "p50": 0.6077,
+            "p95": 0.94,
+            "p99": 1.0324
+          },
+          "ticks": 120,
+          "topology_query_ms": {
+            "max": 0.2686,
+            "p50": 0.0854,
+            "p95": 0.1093,
+            "p99": 0.2205
+          },
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    }
+  ],
+  "before_sha256": "a7dc0149a49345cee557cf4795c9cae1c0b2c62d2eb599627e2fe5a0c49012b4",
+  "before_runs": [
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1911976,
+          "step_ms": {
+            "max": 15.2532,
+            "p50": 9.5485,
+            "p95": 14.5793,
+            "p99": 15.2532
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1918609,
+          "step_ms": {
+            "max": 14.6485,
+            "p50": 11.2002,
+            "p95": 14.3474,
+            "p99": 14.6485
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1696523,
+          "step_ms": {
+            "max": 14.7448,
+            "p50": 9.0982,
+            "p95": 14.0946,
+            "p99": 14.7448
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1708443,
+          "step_ms": {
+            "max": 14.5573,
+            "p50": 8.0573,
+            "p95": 14.1986,
+            "p99": 14.5573
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1376932,
+          "step_ms": {
+            "max": 17.9177,
+            "p50": 6.5865,
+            "p95": 15.6275,
+            "p99": 17.9177
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1396180,
+          "step_ms": {
+            "max": 16.8341,
+            "p50": 7.0113,
+            "p95": 16.1387,
+            "p99": 16.8341
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1229840,
+          "step_ms": {
+            "max": 20.3918,
+            "p50": 8.0093,
+            "p95": 19.887,
+            "p99": 20.3918
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1252176,
+          "step_ms": {
+            "max": 21.8315,
+            "p50": 8.3246,
+            "p95": 21.4798,
+            "p99": 21.8315
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3270592,
+          "step_ms": {
+            "max": 86.1492,
+            "p50": 13.4929,
+            "p95": 82.0715,
+            "p99": 86.1492
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3268288,
+          "step_ms": {
+            "max": 73.2828,
+            "p50": 14.4165,
+            "p95": 72.3687,
+            "p99": 73.2828
+          },
+          "ticks": 32,
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 522240,
+          "step_ms": {
+            "max": 1.2924,
+            "p50": 0.6717,
+            "p95": 0.9532,
+            "p99": 1.2158
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 1044480,
+          "step_ms": {
+            "max": 2.4734,
+            "p50": 1.6173,
+            "p95": 2.2566,
+            "p99": 2.4258
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.9263,
+            "p50": 3.7212,
+            "p95": 4.5522,
+            "p99": 4.8524
+          },
+          "ticks": 120,
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 4177920,
+          "step_ms": {
+            "max": 10.3436,
+            "p50": 7.6819,
+            "p95": 9.5688,
+            "p99": 10.2122
+          },
+          "ticks": 120,
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 5.1136,
+            "p50": 3.7602,
+            "p95": 4.8991,
+            "p99": 5.1136
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 685616,
+          "step_ms": {
+            "max": 11.2048,
+            "p50": 4.304,
+            "p95": 11.1882,
+            "p99": 11.2048
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 11.8891,
+            "p50": 9.5589,
+            "p95": 10.8689,
+            "p99": 11.8891
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1741920,
+          "step_ms": {
+            "max": 33.1503,
+            "p50": 9.9007,
+            "p95": 32.2696,
+            "p99": 33.1503
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 38.7152,
+            "p50": 30.6148,
+            "p95": 34.9807,
+            "p99": 38.7152
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4547584,
+          "step_ms": {
+            "max": 80.4174,
+            "p50": 28.2404,
+            "p95": 76.993,
+            "p99": 80.4174
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 12779520,
+          "step_ms": {
+            "max": 195.9568,
+            "p50": 74.9806,
+            "p95": 130.3182,
+            "p99": 195.9568
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4632064,
+          "step_ms": {
+            "max": 73.8792,
+            "p50": 39.8738,
+            "p95": 72.8808,
+            "p99": 73.8792
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 41.5619,
+            "p50": 29.6426,
+            "p95": 40.472,
+            "p99": 41.5619
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1799168,
+          "step_ms": {
+            "max": 28.2036,
+            "p50": 9.4182,
+            "p95": 27.8296,
+            "p99": 28.2036
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 11.9198,
+            "p50": 10.3611,
+            "p95": 11.6696,
+            "p99": 11.9198
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 702976,
+          "step_ms": {
+            "max": 10.1977,
+            "p50": 3.8599,
+            "p95": 10.1465,
+            "p99": 10.1977
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 4.745,
+            "p50": 3.4977,
+            "p95": 4.319,
+            "p99": 4.745
+          },
+          "ticks": 48,
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": 5760,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 5.1702,
+            "p50": 3.2825,
+            "p95": 4.1409,
+            "p99": 4.679
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 3840,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.7218,
+            "p50": 3.3723,
+            "p95": 4.3032,
+            "p99": 4.6144
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 5.1838,
+            "p50": 3.6887,
+            "p95": 4.5838,
+            "p99": 5.0
+          },
+          "ticks": 120,
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    },
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1911976,
+          "step_ms": {
+            "max": 15.2348,
+            "p50": 9.9224,
+            "p95": 13.932,
+            "p99": 15.2348
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1918609,
+          "step_ms": {
+            "max": 18.2824,
+            "p50": 11.1104,
+            "p95": 17.2328,
+            "p99": 18.2824
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1696523,
+          "step_ms": {
+            "max": 17.9995,
+            "p50": 9.7606,
+            "p95": 16.1972,
+            "p99": 17.9995
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1708443,
+          "step_ms": {
+            "max": 16.7836,
+            "p50": 8.9721,
+            "p95": 16.6089,
+            "p99": 16.7836
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1376932,
+          "step_ms": {
+            "max": 17.5884,
+            "p50": 7.0596,
+            "p95": 16.209,
+            "p99": 17.5884
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1396180,
+          "step_ms": {
+            "max": 15.7017,
+            "p50": 8.003,
+            "p95": 15.6807,
+            "p99": 15.7017
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1229840,
+          "step_ms": {
+            "max": 19.7296,
+            "p50": 8.5835,
+            "p95": 18.8646,
+            "p99": 19.7296
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1252176,
+          "step_ms": {
+            "max": 19.897,
+            "p50": 8.2188,
+            "p95": 19.0104,
+            "p99": 19.897
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3270592,
+          "step_ms": {
+            "max": 64.023,
+            "p50": 11.755,
+            "p95": 60.2959,
+            "p99": 64.023
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3268288,
+          "step_ms": {
+            "max": 58.7918,
+            "p50": 11.5907,
+            "p95": 56.2273,
+            "p99": 58.7918
+          },
+          "ticks": 32,
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 522240,
+          "step_ms": {
+            "max": 1.3879,
+            "p50": 0.6681,
+            "p95": 1.0717,
+            "p99": 1.2905
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 1044480,
+          "step_ms": {
+            "max": 2.5442,
+            "p50": 1.5031,
+            "p95": 2.0903,
+            "p99": 2.3138
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 5.1827,
+            "p50": 3.8054,
+            "p95": 4.6198,
+            "p99": 5.0279
+          },
+          "ticks": 120,
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 4177920,
+          "step_ms": {
+            "max": 9.1752,
+            "p50": 7.6291,
+            "p95": 8.9422,
+            "p99": 9.1742
+          },
+          "ticks": 120,
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 5.3493,
+            "p50": 3.2856,
+            "p95": 4.6784,
+            "p99": 5.3493
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 685616,
+          "step_ms": {
+            "max": 10.5062,
+            "p50": 3.3362,
+            "p95": 9.3473,
+            "p99": 10.5062
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 10.8627,
+            "p50": 9.3157,
+            "p95": 10.2801,
+            "p99": 10.8627
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1741920,
+          "step_ms": {
+            "max": 31.7125,
+            "p50": 10.0499,
+            "p95": 31.5927,
+            "p99": 31.7125
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 36.4014,
+            "p50": 29.6755,
+            "p95": 35.5827,
+            "p99": 36.4014
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4547584,
+          "step_ms": {
+            "max": 69.0046,
+            "p50": 28.0498,
+            "p95": 68.3571,
+            "p99": 69.0046
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 12779520,
+          "step_ms": {
+            "max": 81.2704,
+            "p50": 69.7261,
+            "p95": 76.6911,
+            "p99": 81.2704
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4632064,
+          "step_ms": {
+            "max": 74.5802,
+            "p50": 30.8734,
+            "p95": 70.1906,
+            "p99": 74.5802
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 37.8067,
+            "p50": 29.1132,
+            "p95": 36.3375,
+            "p99": 37.8067
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1799168,
+          "step_ms": {
+            "max": 28.6068,
+            "p50": 9.2928,
+            "p95": 28.0325,
+            "p99": 28.6068
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 11.1269,
+            "p50": 9.364,
+            "p95": 10.9748,
+            "p99": 11.1269
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 702976,
+          "step_ms": {
+            "max": 12.7326,
+            "p50": 3.7593,
+            "p95": 12.0058,
+            "p99": 12.7326
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 4.9719,
+            "p50": 3.6742,
+            "p95": 4.7435,
+            "p99": 4.9719
+          },
+          "ticks": 48,
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": 5760,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.6642,
+            "p50": 3.4783,
+            "p95": 4.3121,
+            "p99": 4.6255
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 3840,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.5881,
+            "p50": 3.4529,
+            "p95": 4.1931,
+            "p99": 4.5653
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.983,
+            "p50": 3.4924,
+            "p95": 4.424,
+            "p99": 4.7972
+          },
+          "ticks": 120,
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    },
+    {
+      "arch": "x86_64",
+      "delivery_queue_limit": 8192,
+      "exchange": [
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 64675,
+          "first_worker_frames": 691,
+          "foreign_home_frames": 761,
+          "frames": 2809,
+          "new_baselines": 136,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1911976,
+          "step_ms": {
+            "max": 13.3491,
+            "p50": 9.7439,
+            "p95": 13.2572,
+            "p99": 13.3491
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62856,
+          "first_worker_frames": 682,
+          "foreign_home_frames": 680,
+          "frames": 2728,
+          "new_baselines": 8,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 4,
+          "queue_peak": 192,
+          "spatial_candidates": 1918609,
+          "step_ms": {
+            "max": 14.0773,
+            "p50": 9.6837,
+            "p95": 12.846,
+            "p99": 14.0773
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 66306,
+          "first_worker_frames": 716,
+          "foreign_home_frames": 832,
+          "frames": 2880,
+          "new_baselines": 144,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1696523,
+          "step_ms": {
+            "max": 16.3809,
+            "p50": 8.5269,
+            "p95": 15.224,
+            "p99": 16.3809
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 63724,
+          "first_worker_frames": 692,
+          "foreign_home_frames": 720,
+          "frames": 2768,
+          "new_baselines": 16,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 8,
+          "queue_peak": 192,
+          "spatial_candidates": 1708443,
+          "step_ms": {
+            "max": 15.3752,
+            "p50": 8.3388,
+            "p95": 13.9971,
+            "p99": 15.3752
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 68204,
+          "first_worker_frames": 736,
+          "foreign_home_frames": 912,
+          "frames": 2960,
+          "new_baselines": 160,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1376932,
+          "step_ms": {
+            "max": 17.8393,
+            "p50": 7.0323,
+            "p95": 16.8534,
+            "p99": 17.8393
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 65624,
+          "first_worker_frames": 712,
+          "foreign_home_frames": 800,
+          "frames": 2848,
+          "new_baselines": 32,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 16,
+          "queue_peak": 192,
+          "spatial_candidates": 1396180,
+          "step_ms": {
+            "max": 16.8094,
+            "p50": 7.2952,
+            "p95": 16.6258,
+            "p99": 16.8094
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 12,
+          "end_subscriptions": 192,
+          "field_bytes": 72320,
+          "first_worker_frames": 776,
+          "foreign_home_frames": 1072,
+          "frames": 3120,
+          "new_baselines": 192,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1229840,
+          "step_ms": {
+            "max": 18.2713,
+            "p50": 9.3714,
+            "p95": 17.8312,
+            "p99": 18.2713
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 69744,
+          "first_worker_frames": 752,
+          "foreign_home_frames": 960,
+          "frames": 3008,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 32,
+          "queue_peak": 192,
+          "spatial_candidates": 1252176,
+          "step_ms": {
+            "max": 20.2137,
+            "p50": 8.2986,
+            "p95": 18.1971,
+            "p99": 20.2137
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "exchange",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3270592,
+          "step_ms": {
+            "max": 60.5727,
+            "p50": 11.5911,
+            "p95": 60.4482,
+            "p99": 60.5727
+          },
+          "ticks": 32,
+          "workers": 4
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 62944,
+          "first_worker_frames": 672,
+          "foreign_home_frames": 640,
+          "frames": 2688,
+          "new_baselines": 128,
+          "peak_islands": 2,
+          "peak_pairs": 12,
+          "phase": "return",
+          "players": 64,
+          "players_per_origin": 32,
+          "players_switching": 64,
+          "queue_peak": 192,
+          "spatial_candidates": 3268288,
+          "step_ms": {
+            "max": 64.0467,
+            "p50": 11.0402,
+            "p95": 61.383,
+            "p99": 64.0467
+          },
+          "ticks": 32,
+          "workers": 4
+        }
+      ],
+      "independent": [
+        {
+          "end_islands": 1,
+          "end_pairs": 2,
+          "end_subscriptions": 16,
+          "field_bytes": 40320,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 1920,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 2,
+          "phase": "separated",
+          "players": 16,
+          "players_per_origin": 16,
+          "queue_peak": 16,
+          "spatial_candidates": 522240,
+          "step_ms": {
+            "max": 1.5222,
+            "p50": 0.8587,
+            "p95": 1.2479,
+            "p99": 1.4813
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 4,
+          "end_subscriptions": 32,
+          "field_bytes": 86400,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 3840,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 4,
+          "phase": "separated",
+          "players": 32,
+          "players_per_origin": 16,
+          "queue_peak": 32,
+          "spatial_candidates": 1044480,
+          "step_ms": {
+            "max": 2.7105,
+            "p50": 1.6568,
+            "p95": 2.1683,
+            "p99": 2.4441
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 5.5221,
+            "p50": 3.3747,
+            "p95": 4.4496,
+            "p99": 5.1698
+          },
+          "ticks": 120,
+          "workers": 8
+        },
+        {
+          "end_islands": 8,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 364800,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 15360,
+          "new_baselines": 0,
+          "peak_islands": 8,
+          "peak_pairs": 16,
+          "phase": "separated",
+          "players": 128,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 4177920,
+          "step_ms": {
+            "max": 10.5434,
+            "p50": 7.3225,
+            "p95": 9.2575,
+            "p99": 9.6212
+          },
+          "ticks": 120,
+          "workers": 16
+        }
+      ],
+      "merge_split": [
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 5.8426,
+            "p50": 3.7398,
+            "p95": 4.7668,
+            "p99": 5.8426
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 55624,
+          "first_worker_frames": 348,
+          "foreign_home_frames": 376,
+          "frames": 2424,
+          "new_baselines": 64,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 685616,
+          "step_ms": {
+            "max": 11.7746,
+            "p50": 3.3763,
+            "p95": 10.7092,
+            "p99": 11.7746
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 12.4383,
+            "p50": 9.8801,
+            "p95": 12.0416,
+            "p99": 12.4383
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 105488,
+          "first_worker_frames": 864,
+          "foreign_home_frames": 2816,
+          "frames": 4864,
+          "new_baselines": 128,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1741920,
+          "step_ms": {
+            "max": 29.5027,
+            "p50": 10.7918,
+            "p95": 27.3015,
+            "p99": 29.5027
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 36.8753,
+            "p50": 27.7773,
+            "p95": 33.3234,
+            "p99": 36.8753
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 198656,
+          "first_worker_frames": 1376,
+          "foreign_home_frames": 7296,
+          "frames": 9344,
+          "new_baselines": 192,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "approach",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4547584,
+          "step_ms": {
+            "max": 90.0829,
+            "p50": 29.9356,
+            "p95": 87.483,
+            "p99": 90.0829
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 448,
+          "field_bytes": 451584,
+          "first_worker_frames": 2688,
+          "foreign_home_frames": 18432,
+          "frames": 21504,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 12779520,
+          "step_ms": {
+            "max": 94.842,
+            "p50": 73.4705,
+            "p95": 90.8887,
+            "p99": 94.842
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 194688,
+          "first_worker_frames": 1360,
+          "foreign_home_frames": 7104,
+          "frames": 9152,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 56,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 448,
+          "spatial_candidates": 4632064,
+          "step_ms": {
+            "max": 72.6038,
+            "p50": 28.5008,
+            "p95": 70.815,
+            "p99": 72.6038
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 2,
+          "end_pairs": 32,
+          "end_subscriptions": 256,
+          "field_bytes": 261120,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 9216,
+          "frames": 12288,
+          "new_baselines": 0,
+          "peak_islands": 2,
+          "peak_pairs": 32,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 5627904,
+          "step_ms": {
+            "max": 36.1023,
+            "p50": 28.6181,
+            "p95": 33.6384,
+            "p99": 36.1023
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 102848,
+          "first_worker_frames": 848,
+          "foreign_home_frames": 2688,
+          "frames": 4736,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 32,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 256,
+          "spatial_candidates": 1799168,
+          "step_ms": {
+            "max": 31.1551,
+            "p50": 11.0853,
+            "p95": 30.7671,
+            "p99": 31.1551
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 3,
+          "end_pairs": 16,
+          "end_subscriptions": 128,
+          "field_bytes": 134400,
+          "first_worker_frames": 1152,
+          "foreign_home_frames": 3072,
+          "frames": 6144,
+          "new_baselines": 0,
+          "peak_islands": 3,
+          "peak_pairs": 16,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 2039808,
+          "step_ms": {
+            "max": 13.5174,
+            "p50": 10.156,
+            "p95": 12.9946,
+            "p99": 13.5174
+          },
+          "ticks": 48,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 54496,
+          "first_worker_frames": 336,
+          "foreign_home_frames": 320,
+          "frames": 2368,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 16,
+          "phase": "depart",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 128,
+          "spatial_candidates": 702976,
+          "step_ms": {
+            "max": 10.5467,
+            "p50": 3.5564,
+            "p95": 10.3681,
+            "p99": 10.5467
+          },
+          "ticks": 32,
+          "workers": 8
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 72192,
+          "first_worker_frames": 384,
+          "foreign_home_frames": 0,
+          "frames": 3072,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "hold",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 835584,
+          "step_ms": {
+            "max": 4.6708,
+            "p50": 3.366,
+            "p95": 4.5389,
+            "p99": 4.6708
+          },
+          "ticks": 48,
+          "workers": 8
+        }
+      ],
+      "os": "windows",
+      "per_site": 16,
+      "separation_mm": 64000,
+      "shared_workers": [
+        {
+          "end_islands": 4,
+          "end_pairs": 2,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 3840,
+          "foreign_home_frames": 5760,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 2,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.653,
+            "p50": 3.1627,
+            "p95": 4.2272,
+            "p99": 4.5747
+          },
+          "ticks": 120,
+          "workers": 2
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 4,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 1920,
+          "foreign_home_frames": 3840,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 4,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 4.9498,
+            "p50": 3.5218,
+            "p95": 4.4682,
+            "p99": 4.9343
+          },
+          "ticks": 120,
+          "workers": 4
+        },
+        {
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 64,
+          "field_bytes": 180480,
+          "first_worker_frames": 960,
+          "foreign_home_frames": 0,
+          "frames": 7680,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "shared-workers",
+          "players": 64,
+          "players_per_origin": 16,
+          "queue_peak": 64,
+          "spatial_candidates": 2088960,
+          "step_ms": {
+            "max": 5.6504,
+            "p50": 3.8845,
+            "p95": 4.9397,
+            "p99": 5.212
+          },
+          "ticks": 120,
+          "workers": 8
+        }
+      ],
+      "version": 1,
+      "warmup_ticks": 6
+    }
+  ]
+}

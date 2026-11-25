@@ -11,3 +11,15 @@ pub mod tls;
 /// v2 (2026-04-17): PeerMessage variants gained a `session_id: u64` field to
 /// enable peer-restart detection (design 013).
 pub const PROTOCOL_VERSION: u16 = 2;
+
+/// The native development launcher restricts its WS, HTTP and UDP listeners to
+/// loopback. Standalone board and cloud launchers retain their network interfaces.
+pub fn listen_addr(port: u16) -> std::net::SocketAddrV4 {
+    use std::net::Ipv4Addr;
+    let ip = if std::env::var_os("MESH_LOOPBACK_ONLY").is_some() {
+        Ipv4Addr::LOCALHOST
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    };
+    std::net::SocketAddrV4::new(ip, port)
+}

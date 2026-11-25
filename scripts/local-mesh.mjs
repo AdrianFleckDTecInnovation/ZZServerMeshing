@@ -3,7 +3,7 @@ import { createSocket } from 'node:dgram';
 import { once } from 'node:events';
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -44,17 +44,17 @@ function build(release) {
   return Object.fromEntries(artifacts.filter(a => a.executable).map(a => [a.target.name, a.executable]));
 }
 
-async function checkPorts(tcp, udp, vitePort) {
+async function checkPorts(tcp, udp, vitePort, serviceHost) {
   for (const [kind, ports] of [['TCP', tcp], ['UDP', udp]]) {
     if (new Set(ports).size !== ports.length) throw new Error(`Overlapping ${kind} ports in configuration`);
     for (const port of ports) {
       integer(`${kind} port`, port, 1, 65535);
       const socket = kind === 'TCP' ? createServer() : createSocket('udp4');
       const listening = once(socket, 'listening');
-      // Winsock can permit a loopback bind alongside a wildcard listener.
-      // Probe the same address that the service will actually bind.
-      if (kind === 'TCP') socket.listen(port, port === vitePort ? host : '0.0.0.0');
-      else socket.bind(port, '0.0.0.0');
+      // Historical comparison binaries listen on all interfaces. The native
+      // launcher binds its own builds and Vite to loopback.
+      if (kind === 'TCP') socket.listen(port, port === vitePort ? host : serviceHost);
+      else socket.bind(port, serviceHost);
       try { await listening; }
       catch (error) { throw new Error(`${kind} port ${port} unavailable (${error.code})`); }
       await new Promise(resolve => socket.close(resolve));
@@ -66,11 +66,11 @@ async function main() {
   const [mode = 'start', ...args] = process.argv.slice(2);
   const { values } = parseArgs({ args, options: {
     servers: { type: 'string' }, npcs: { type: 'string' },
-    ...(mode === 'bench' ? { seconds: { type: 'string' } } : {}),
+    ...(mode === 'bench' ? { seconds: { type: 'string' }, 'bin-dir': { type: 'string' } } : {}),
     help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) {
-    console.log('node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL] [bench: --seconds N]');
+    console.log('node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL] [bench: --seconds N --bin-dir RELEASE_DIR]');
     return;
   }
   const client = integer('CLIENT_PORT', setting('CLIENT_PORT'), 1, 65535);
@@ -105,8 +105,11 @@ async function main() {
     throw new Error('Install the local dependencies first with npm run setup');
   }
   await checkPorts([ws, http, ...(frontend ? [client] : []), ...servers.flatMap(s => [s.ws, s.metrics])],
-    servers.map(s => s.udp), frontend ? client : undefined);
-  const bins = build(mode === 'bench');
+    servers.map(s => s.udp), frontend ? client : undefined, values['bin-dir'] ? '0.0.0.0' : host);
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  const bins = values['bin-dir']
+    ? Object.fromEntries(['coordinator', 'sim-server'].map(name => [name, resolve(values['bin-dir'], name + suffix)]))
+    : build(mode === 'bench');
   mkdirSync(join(root, 'target'), { recursive: true });
   const logs = mkdtempSync(join(root, 'target', 'mesh-run-'));
   console.error(`Service logs: ${logs}`);
@@ -169,13 +172,14 @@ async function main() {
         bins[name] = copy;
       }
     }
-    launch('coordinator', bins.coordinator, ['--port', ws, '--http-port', http]);
+    const localOnly = { env: { MESH_LOOPBACK_ONLY: '1' } };
+    launch('coordinator', bins.coordinator, ['--port', ws, '--http-port', http], localOnly);
     await waitFor('coordinator', async () => Array.isArray((await getJson(`${coord}/servers`)).servers));
     for (const s of servers) {
       const npcs = Math.floor(total / count) + (s.id <= total % count ? 1 : 0);
       launch(`sim-${s.id}`, bins['sim-server'], ['--server-id', s.id, '--port', s.ws, '--udp-port', s.udp,
         '--metrics-port', s.metrics, '--coordinator', `${host}:${ws}`, '--advertise-host', host,
-        '--initial-npcs', npcs, '--cold-start']);
+        '--initial-npcs', npcs, '--cold-start'], localOnly);
     }
     await waitFor('all mesh peers', async () => {
       const rows = await metrics();

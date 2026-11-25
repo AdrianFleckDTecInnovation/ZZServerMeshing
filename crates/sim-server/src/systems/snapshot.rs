@@ -1,17 +1,12 @@
 use crate::components::*;
 use crate::conversion::to_entity_state;
-use crate::delta::{build_baseline, compute_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
+use crate::delta::{build_baseline, select_delta, update_baseline, FULL_SNAPSHOT_INTERVAL};
 use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
 use glam::Vec3;
 use shared::entity::{EntityId, EntityState, ServerId};
 use shared::spatial::in_aoi;
-
-/// When this fraction of entities changed, send a full snapshot instead of a delta.
-/// Full snapshot header is 4 bytes smaller (27 vs 31) and avoids the overhead of
-/// delta encoding when nearly everything changed (common with NPC movement every tick).
-const DELTA_FALLBACK_THRESHOLD: f32 = 0.80;
 
 pub fn prepare_client_snapshot(
     tick: Res<TickCounter>,
@@ -50,14 +45,19 @@ pub fn prepare_client_snapshot(
         With<Authoritative>,
     >,
 ) {
+    if registry.clients.is_empty() {
+        return;
+    }
     let mut entities = Vec::with_capacity(
         auth_query.iter().count() + shadow_query.iter().count() + transfer_query.iter().count(),
     );
 
     // Authoritative entities first (take precedence)
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_ids = std::collections::HashSet::with_capacity(entities.capacity());
     for (nid, pos, vel, kind, auth, seq) in auth_query.iter() {
-        seen_ids.insert(nid.0);
+        if !seen_ids.insert(nid.0) {
+            continue;
+        }
         entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
     }
 
@@ -66,7 +66,9 @@ pub fn prepare_client_snapshot(
     // source's client view before the target starts broadcasting it as a shadow.
     // Clients see the entity continuously -- it just changes authority color.
     for (nid, pos, vel, kind, outbound, seq) in transfer_query.iter() {
-        seen_ids.insert(nid.0);
+        if !seen_ids.insert(nid.0) {
+            continue;
+        }
         let state = to_entity_state(
             nid,
             pos,
@@ -80,7 +82,7 @@ pub fn prepare_client_snapshot(
 
     // Shadow entities (skip if already seen as authoritative or transfer-outbound)
     for (nid, pos, vel, kind, auth, seq) in shadow_query.iter() {
-        if !seen_ids.contains(&nid.0) {
+        if seen_ids.insert(nid.0) {
             entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
         }
     }
@@ -157,7 +159,35 @@ pub fn prepare_client_snapshot(
             || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL
             || stale_ack;
 
-        if send_full {
+        let delta = if send_full {
+            None
+        } else {
+            // Send a full snapshot when more than four fifths of the visible IDs changed.
+            let limit = client_entities.len() - client_entities.len().div_ceil(5);
+            select_delta(&client_entities, handle.baseline.as_ref().unwrap(), limit)
+        };
+        if let Some(delta) = delta {
+            let frame = encode_binary_delta(tick.0, &delta.updates, &delta.removals);
+
+            match handle.tx.try_send(ClientFrame::Binary(frame)) {
+                Ok(()) => {
+                    // Success: advance baseline to match the delta we just sent
+                    update_baseline(handle.baseline.as_mut().unwrap(), &delta);
+                    handle.ticks_since_full += 1;
+                    handle.last_sent_tick = tick.0;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Frame dropped: baseline NOT advanced. Clear it entirely to
+                    // force a full snapshot on the next tick, guaranteeing convergence.
+                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
+                    handle.baseline = None;
+                    handle.ticks_since_full = 0;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Client disconnected; will be cleaned up by unregister event
+                }
+            }
+        } else {
             if stale_ack {
                 tracing::info!(
                     client_id = _client_id,
@@ -186,61 +216,6 @@ pub fn prepare_client_snapshot(
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // Client disconnected; will be cleaned up by unregister event
-                }
-            }
-        } else {
-            // Delta path: compute delta against baseline, then decide if delta is worth it.
-            let baseline = handle.baseline.as_ref().unwrap();
-            let delta = compute_delta(&client_entities, baseline);
-
-            // Heuristic: if >80% of entities changed, full snapshot is cheaper (audit #027).
-            // Full snapshot has a smaller header (27 vs 31 bytes) and avoids delta encoding CPU.
-            let change_ratio = if client_entities.is_empty() {
-                0.0
-            } else {
-                delta.updates.len() as f32 / client_entities.len() as f32
-            };
-
-            if change_ratio > DELTA_FALLBACK_THRESHOLD {
-                // Too many changes -- send full snapshot instead of delta
-                let frame = encode_binary_snapshot(tick.0, &client_entities);
-                match handle.tx.try_send(ClientFrame::Binary(frame)) {
-                    Ok(()) => {
-                        handle.baseline = Some(build_baseline(&client_entities));
-                        handle.ticks_since_full = 1;
-                        handle.last_sent_tick = tick.0;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            client_id = _client_id,
-                            "Client frame channel full, dropping fallback full snapshot"
-                        );
-                        handle.baseline = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-                }
-            } else {
-                // Normal delta path
-                let removal_ids: Vec<EntityId> = delta.removals.clone();
-                let frame = encode_binary_delta(tick.0, &delta.updates, &removal_ids);
-
-                match handle.tx.try_send(ClientFrame::Binary(frame)) {
-                    Ok(()) => {
-                        // Success: advance baseline to match the delta we just sent
-                        update_baseline(handle.baseline.as_mut().unwrap(), &delta);
-                        handle.ticks_since_full += 1;
-                        handle.last_sent_tick = tick.0;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        // Frame dropped: baseline NOT advanced. Clear it entirely to
-                        // force a full snapshot on the next tick, guaranteeing convergence.
-                        tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
-                        handle.baseline = None;
-                        handle.ticks_since_full = 0;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        // Client disconnected; will be cleaned up by unregister event
-                    }
                 }
             }
         }

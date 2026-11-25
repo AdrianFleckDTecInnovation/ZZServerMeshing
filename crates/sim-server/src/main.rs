@@ -1,18 +1,4 @@
-mod components;
-mod conversion;
-mod coordinator_client;
-mod delta;
-mod encoding;
-mod game_loop;
-mod metrics;
-mod metrics_server;
-mod network;
-pub mod peer_bounds;
-mod receiver;
-mod resources;
-mod schedule;
-mod systems;
-
+use sim_server::{coordinator_client, game_loop, metrics, metrics_server, network, receiver, resources};
 use clap::Parser;
 use shared::entity::ServerId;
 use std::path::PathBuf;
@@ -192,7 +178,7 @@ async fn main() {
 
     // Bind UDP socket for peer communication
     let udp_socket = Arc::new(
-        UdpSocket::bind(format!("0.0.0.0:{}", args.udp_port))
+        UdpSocket::bind(shared::listen_addr(args.udp_port))
             .await
             .expect("Failed to bind UDP port"),
     );

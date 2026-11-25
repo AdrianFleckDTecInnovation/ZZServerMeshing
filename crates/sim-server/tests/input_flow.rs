@@ -5,9 +5,13 @@ use glam::Vec3;
 use shared::entity::{EntityId, EntityState, ServerId};
 use shared::protocol::{ClientMessage, PeerMessage};
 
-// We can't import sim_server internals directly (it's a binary crate),
-// so these tests exercise the shared types and world logic that both
-// simulation.rs and receiver.rs depend on.
+#[test]
+fn local_worker_runs_the_network_servers_schedule() {
+    let mut worker = sim_server::DemoWorker::new(ServerId(1), 8, 3, true);
+    worker.step();
+    assert_eq!(worker.world.resource::<sim_server::resources::TickCounter>().0, 1);
+    assert_eq!(worker.world.resource::<sim_server::resources::EntityLookup>().0.len(), 3);
+}
 
 #[test]
 fn move_input_json_roundtrip_with_seq() {

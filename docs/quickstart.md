@@ -1,5 +1,8 @@
 # Quick Start Guide
 
+Start the persistent Bevy game with `cargo run --locked -p infinite-stars`. Its worker commands, game extension example and release measurements are in the [Infinite Stars guide](infinite-stars.md). The commands below start the original browser demo.
+
+
 ## Prerequisites
 
 - Rust stable with the platform C toolchain. On Windows install the MSVC toolchain, Visual Studio C++ Build Tools and the Windows SDK. On Debian/Ubuntu the native compiler and linker are provided by `build-essential`.
@@ -12,6 +15,8 @@ npm run setup
 ```
 
 ## Run the Cluster
+
+The native launcher binds coordinator, simulation, metrics and Vite to IPv4 loopback. Standalone server processes keep their deployment bindings. The [cluster benchmark guide](cluster-performance.md) includes commands for measuring the browser demo and persistent game beside a running development mesh.
 
 ```bash
 # Start coordinator + 3 sim-servers + client

@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "reference": "3ef0d789196aa6c16de4fa12be394bdf7f8ea835",
+  "binary_sha256": {
+    "reference": {
+      "sim-server": "7073f5fda75aef10da4b43301e15f87fe27bba6df596f94a86f3ae76c8dbe1db",
+      "coordinator": "4e87debfcb9dc2a90a580b109f237d8ab3d92576c8f3ee3e134c47b0efdb356a"
+    },
+    "candidate": {
+      "sim-server": "025fc233c8946f7a3a9f1736cf7628e6bbd5e5f4707ccdaa7598bcaa1fa7adb9",
+      "coordinator": "64bfc6f1e0a9d7306ebd0ec14ca168417eac293f4822a816041f51661b945a42"
+    }
+  },
+  "runs": [
+    {
+      "rep": 1,
+      "variant": "reference",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.005,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 400,
+          "tick_hz": 20.045,
+          "snapshot_hz": 19.995,
+          "full_snapshots": 272,
+          "entity_records": 3093697,
+          "removal_ids": 25,
+          "snapshot_bytes": 145415471,
+          "snapshot_KiB_s": 7098.478,
+          "tick_p50_ms": 4.287,
+          "tick_p95_ms": 5.71,
+          "tick_p99_ms": 6.091,
+          "p95_budget_pct": 11.421,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.484,
+            "transfers_ms": 0.29,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.71
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.002,
+            "simulation_ms": 5.09,
+            "transfers_ms": 0.327,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.091
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.045,
+          "snapshot_hz": 20.045,
+          "full_snapshots": 280,
+          "entity_records": 3123610,
+          "removal_ids": 24,
+          "snapshot_bytes": 146821365,
+          "snapshot_KiB_s": 7167.107,
+          "tick_p50_ms": 4.198,
+          "tick_p95_ms": 5.583,
+          "tick_p99_ms": 6.786,
+          "p95_budget_pct": 11.166,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.486,
+            "transfers_ms": 0.277,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.583
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.008,
+            "simulation_ms": 5.046,
+            "transfers_ms": 0.305,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.786
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 400,
+          "tick_hz": 19.995,
+          "snapshot_hz": 19.995,
+          "full_snapshots": 328,
+          "entity_records": 3267042,
+          "removal_ids": 20,
+          "snapshot_bytes": 153562382,
+          "snapshot_KiB_s": 7496.171,
+          "tick_p50_ms": 4.351,
+          "tick_p95_ms": 5.771,
+          "tick_p99_ms": 6.286,
+          "p95_budget_pct": 11.541,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.465,
+            "transfers_ms": 0.305,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.771
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.005,
+            "simulation_ms": 4.993,
+            "transfers_ms": 0.373,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.286
+          }
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "variant": "candidate",
+      "platform": "win32 10.0.26200 x64",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-13850HX",
+      "node": "v22.16.0",
+      "profile": "release",
+      "npcs": 9000,
+      "clients": 3,
+      "warmup_seconds": 5,
+      "measured_seconds": 20.019,
+      "servers": [
+        {
+          "server": 1,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 400,
+          "tick_hz": 20.031,
+          "snapshot_hz": 19.981,
+          "full_snapshots": 296,
+          "entity_records": 3131847,
+          "removal_ids": 20,
+          "snapshot_bytes": 147208345,
+          "snapshot_KiB_s": 7181.202,
+          "tick_p50_ms": 3.298,
+          "tick_p95_ms": 5.011,
+          "tick_p99_ms": 7.767,
+          "p95_budget_pct": 10.022,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.049,
+            "transfers_ms": 0.353,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 5.011
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.014,
+            "simulation_ms": 6.506,
+            "transfers_ms": 0.509,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 7.767
+          }
+        },
+        {
+          "server": 2,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 401,
+          "snapshots": 401,
+          "tick_hz": 20.031,
+          "snapshot_hz": 20.031,
+          "full_snapshots": 272,
+          "entity_records": 3099623,
+          "removal_ids": 24,
+          "snapshot_bytes": 145694008,
+          "snapshot_KiB_s": 7107.329,
+          "tick_p50_ms": 3.196,
+          "tick_p95_ms": 4.844,
+          "tick_p99_ms": 6.142,
+          "p95_budget_pct": 9.687,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.049,
+            "transfers_ms": 0.351,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.844
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.013,
+            "simulation_ms": 4.659,
+            "transfers_ms": 0.537,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.142
+          }
+        },
+        {
+          "server": 3,
+          "authoritative": 3001,
+          "shadows": 6002,
+          "peers": 2,
+          "ticks": 400,
+          "snapshots": 401,
+          "tick_hz": 19.981,
+          "snapshot_hz": 20.031,
+          "full_snapshots": 302,
+          "entity_records": 3199632,
+          "removal_ids": 18,
+          "snapshot_bytes": 150394215,
+          "snapshot_KiB_s": 7336.617,
+          "tick_p50_ms": 3.06,
+          "tick_p95_ms": 4.638,
+          "tick_p99_ms": 6.496,
+          "p95_budget_pct": 9.275,
+          "phase_p95_ms": {
+            "input_drain_ms": 0.001,
+            "simulation_ms": 4.038,
+            "transfers_ms": 0.325,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 4.638
+          },
+          "phase_p99_ms": {
+            "input_drain_ms": 0.014,
+            "simulation_ms": 5.656,
+            "transfers_ms": 0.356,
+            "replication_ms": 0,
+            "shadow_cleanup_ms": 0,
+            "total_ms": 6.496
+          }
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "npcs": 9000,
+      "variant": "reference",
+      "slowest_p50_ms": 4.351,
+      "slowest_p95_ms": 5.771,
+      "slowest_p99_ms": 6.786,
+      "min_tick_hz": 19.995,
+      "min_snapshot_hz": 19.995
+    },
+    {
+      "npcs": 9000,
+      "variant": "candidate",
+      "slowest_p50_ms": 3.298,
+      "slowest_p95_ms": 5.011,
+      "slowest_p99_ms": 7.767,
+      "min_tick_hz": 19.981,
+      "min_snapshot_hz": 19.981
+    }
+  ],
+  "comparison": [
+    {
+      "npcs": 9000,
+      "p50_delta_ms": -1.053,
+      "p50_delta_pct": -24.2,
+      "p95_delta_ms": -0.76,
+      "p95_delta_pct": -13.2,
+      "p99_delta_ms": 0.981,
+      "p99_delta_pct": 14.5
+    }
+  ],
+  "reference_lockfile": "a2c478bf8f6e048fd370d9fda85e96aeeba133aa",
+  "windows_reference_entry_points_from": "a2c478bf8f6e048fd370d9fda85e96aeeba133aa"
+}
