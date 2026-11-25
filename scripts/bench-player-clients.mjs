@@ -3,9 +3,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 import { decodeBinaryFrame } from '../client/src/binary-protocol.ts';
 
-const levels = [3, 16, 32, 64, 128, 256];
+const levels = [3, 16, 32, 64, 128, 256, 384, 512];
 const pulses = 16;
 const intervalMs = 137; // Sample different phases of the 50 ms simulation tick.
+const rampTarget = { echo_p95_ms: 100, min_snapshot_hz: 18, min_server_hz: 18 };
 const round = n => Number(n.toFixed(3));
 
 function percentiles(samples) {
@@ -158,15 +159,22 @@ export async function benchmarkPlayers({ servers, host, total, metrics, signal: 
         server: m.server_id, tick_hz: round((m.tick - before[i].tick) / windowSeconds),
         rolling_200_tick_p95_ms: Object.fromEntries(Object.entries(m.phases).map(([k, v]) => [k, v.p95])),
       }));
-      rows.push({ clients: count, planned: count * pulses, sent: samples.reduce((n, s) => n + s.sent, 0), echoed: delays.length,
+      const row = { clients: count, planned: count * pulses,
+        sent: samples.reduce((n, s) => n + s.sent, 0), echoed: delays.length,
         min_client_echoes: Math.min(...samples.map(s => s.minEchoes)), echo_ms: percentiles(delays),
         min_snapshot_hz: round(Math.min(...samples.map(s => s.minHz))),
         snapshot_MiB_s: round(samples.reduce((n, s) => n + s.snapshotMiBs, 0)),
         measurement_seconds: round(Math.max(...samples.map(s => s.elapsed))),
-        driver_timer_late_ms: percentiles(samples.flatMap(s => s.timerDelay)), server_metrics: serverMetrics });
+        driver_timer_late_ms: percentiles(samples.flatMap(s => s.timerDelay)), server_metrics: serverMetrics };
+      rows.push(row);
+      if (row.echoed !== row.planned || row.echo_ms.p95 > rampTarget.echo_p95_ms ||
+          row.min_snapshot_hz < rampTarget.min_snapshot_hz || serverMetrics.some(m => m.tick_hz < rampTarget.min_server_hz)) {
+        stopped = { clients: count, reason: 'measured row missed the local ramp target' };
+        break;
+      }
     }
     return { servers: servers.length, npcs: total, load_drivers: drivers, pulses_per_client: pulses,
-      interval_ms: intervalMs, stopped, rows };
+      interval_ms: intervalMs, ramp_target: rampTarget, stopped, rows };
   } finally {
     closing = true;
     await Promise.all(workers.map(w => w.terminate()));
