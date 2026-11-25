@@ -1,5 +1,7 @@
 # ZZServerMeshing
 
+For sizing a regional game world, the capacity plan compares 10,000 players in separate groups, merging groups and one fully visible battle. It includes measured client traffic, worker scaling and a physical mTLS test configuration. [Kapazitätsplan und Regionskurven](docs/kapazitaetsplan.md)
+
 Run `npm run bench:profile -- --players 10000 --workers 32 --partitions 16 --ticks 40` to measure movement, checkpoints, spatial lookup and peer delivery on a common clock. Run `npm run bench:sockets -- --servers 8 --socket-drivers 8 --islands 5000 --seconds 10 --require-budget` for the 10,000-connection browser protocol test at 20 snapshots/s and five inputs/s per player. [Tickkosten, Grafiken und Abnahme](docs/tickprofil.md)
 
 Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)

@@ -1,5 +1,7 @@
 # Tickkosten und 10.000 Spieler
 
+Wie die Gruppengröße den Verkehr bestimmt, zeigen zusätzliche Messungen mit 1.024 bis 4.096 WebSocket-Clients. Für 10.000 mTLS-Sitzungen und eine gemeinsame Schlacht gibt es einen dimensionierten Testaufbau mit Abnahmekriterien. [Kapazitätsplan und Regionskurven](kapazitaetsplan.md)
+
 **10.000 gleichzeitige WebSocket-Spieler bestanden auf Debian alle vier Lastläufe mit 24 vCPUs, acht Sim-Servern und acht Lasttreibern.** Die Sollrate betrug 20 Snapshots und fünf Eingaben je Spieler und Sekunde. In drei Vier-Sekunden-Läufen und einem Zehn-Sekunden-Lauf kamen **1.100.000 von 1.100.000 geplanten Eingaben** zurück. Im längeren Lauf betrug das Eingabe-p95 **75,6 ms**, der langsamste Client empfing **19,6 Snapshots/s**. Die Spieler bildeten 5.000 räumlich getrennte Paare über Workergrenzen hinweg. Der interne Test des persistenten Bevy-Spiels prüft zusätzlich 10.000 bewegte Spieler in 625 Inseln mit eigener Sitzung, eigenem Inventar und einer sichtbaren Kopie auf einem zweiten Worker.
 
 ![Tickdauer und Phasen bei 10.000 aktiven Spielern](benchmarks/tickprofil-10000.png)
@@ -63,7 +65,7 @@ Bei gleicher Konfiguration mit **24 vCPUs** lagen die drei kurzen Eingabe-p95 be
 | 10.000 Spieler, 16 Server | 2.500 | 20 / 5 | 5,2 / 0 Hz | 11.786 / 200.000 | 7.671 ms |
 | 10.000 Spieler, 16 Server | 5.000 | 5 / 2 | 19,7 / 4,0 Hz | 75.602 / 80.000 | 521 ms |
 
-Bei 4.096 Spielern bestätigte der Server alle gesendeten Eingaben. Der Lasttreiber verpasste 33 geplante Sendezeitpunkte. Der höchste vollständig bestandene Windows-Lastpunkt lag deshalb bei 2.048. Im dünn besetzten 10.000er-Lauf sahen alle Spieler ihre eigene Bewegung und einen Nachbarn eines anderen Workers. Vor der separaten Entdeckung neu belegter Regionen sahen unter derselben Last nur 1.328 Spieler ihren Nachbarn. Jeder Lauf prüft die Sichtgrenze auch in den tatsächlich empfangenen Frames.
+Bei 4.096 Spielern bestätigte der Server alle gesendeten Eingaben. Der Lasttreiber verpasste 33 geplante Sendezeitpunkte. Der höchste vollständig bestandene Windows-Lastpunkt in dieser Reihe lag deshalb bei 2.048. Eine weitere Serie mit 4.096 Spielern in 2.048 getrennten Paaren bestand beide Läufe. Im dünn besetzten 10.000er-Lauf sahen alle Spieler ihre eigene Bewegung und einen Nachbarn eines anderen Workers. Vor der separaten Entdeckung neu belegter Regionen sahen unter derselben Last nur 1.328 Spieler ihren Nachbarn. Jeder Lauf prüft die Sichtgrenze auch in den tatsächlich empfangenen Frames. [Vergleich bei gleicher Gruppengröße](kapazitaetsplan.md)
 
 Bei 10.000 Spielern in 2.500 Inseln und 20 gewünschten Snapshots/s belegten die Windows-Sim-Prozesse zusammen **18,7 logische CPUs**, davon **0,45** auf dem Thread innerhalb des ECS-Schedules. Die Lasttreiber belegten weitere **3,26**. Durch kamen nur **23 Mbit/s WebSocket-Nutzdaten**, **39 Mbit/s** wurden für UDP eingereiht. Mit 5.000 Inseln und 5 gewünschten Snapshots/s waren es **10,7 Sim-CPUs**, **1,08** im Schedule, **7,16** für die Treiber und **56 / 130 Mbit/s**. Unter dieser Last kosten Versand, Empfang, Laufzeitplanung und die Verarbeitung vieler kleiner Nachrichten erheblich CPU. Für eine physische Netzwerkkarte liefert Loopback keine Sättigungsgrenze. Die Eingabelatenz ist nur für tatsächlich empfangene Echos definiert.
 
