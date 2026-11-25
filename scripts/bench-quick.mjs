@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform, release } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -26,7 +26,9 @@ try {
     'bench', '--client-ramp', '--servers', '3', '--npcs', '300', '--bin-dir', dirname(executables.get('sim-server'))], opts));
   const end = performance.now();
   const seconds = ms => Number((ms / 1000).toFixed(2));
-  const report = { version: 1, measured_at: new Date().toISOString(), os: `${platform()} ${release()} ${arch()}`,
+  const revision = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, encoding: 'utf8' });
+  const report = { version: 2, revision: revision.status === 0 ? revision.stdout.trim() : null,
+    measured_at: new Date().toISOString(), os: `${platform()} ${release()} ${arch()}`,
     cpu: cpus()[0]?.model, node: process.version, rustc: execFileSync('rustc', ['-V'], opts).trim(),
     profile: 'release', seconds: { build: seconds(ready-start), spatial: seconds(afterSpatial-ready),
       browser: seconds(end-afterSpatial), workload: seconds(end-ready) },
@@ -35,8 +37,10 @@ try {
   const staged = join(temp, 'report.json');
   writeFileSync(staged, JSON.stringify(report, null, 2)+'\n');
   renameSync(staged, output);
-  console.table(browser.rows.map(r => ({ players: r.clients, echoed: `${r.echoed}/${r.sent}`,
-    input_p95_ms: r.echo_ms.p95, min_snapshot_hz: r.min_snapshot_hz })));
+  console.table(browser.rows.map(r => ({ players: r.clients, planned: r.planned, echoed: `${r.echoed}/${r.sent}`,
+    input_p95_ms: r.echo_ms.p95, min_snapshot_hz: r.min_snapshot_hz,
+    min_server_hz: Math.min(...r.server_metrics.map(m => m.tick_hz)) })));
+  if (browser.stopped) console.warn(`Stopped at ${browser.stopped.clients} clients: ${browser.stopped.reason}`);
   console.log(`${report.seconds.workload}s workload, ${report.seconds.build}s build. ${output}`);
 } finally {
   rmSync(temp, { recursive: true, force: true });
