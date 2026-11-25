@@ -38,6 +38,8 @@ struct Scene {
 #[derive(Default)]
 struct Sample {
     ns: Vec<u64>,
+    simulate_publish_ns: u64,
+    delivery_ns: u64,
     topology_ns: Vec<u64>,
     with_topology_ns: Vec<u64>,
     queue: usize,
@@ -148,7 +150,10 @@ impl Scene {
         let delivery = Instant::now();
         let queued = self.pool.messages.len();
         assert_eq!(self.pool.deliver_all()?, queued, "frame rejected");
-        let step_ns = (step + delivery.elapsed()).as_nanos() as u64;
+        let deliver_ns = delivery.elapsed().as_nanos() as u64;
+        let step_ns = step.as_nanos() as u64 + deliver_ns;
+        stats.simulate_publish_ns += step.as_nanos() as u64;
+        stats.delivery_ns += deliver_ns;
         stats.ns.push(step_ns);
         let topology_start = Instant::now();
         let islands = self.pool.directory.islands();
@@ -265,12 +270,16 @@ impl Scene {
         // A worker serving several origins has no single destination island for this counter.
         let sites = self.members.len() / self.per_site;
         let foreign_home_frames = (self.workers.len() == 2 * sites).then_some(s.foreign_origin);
+        let mean_ms = |ns: u64| ns as f64 / ticks as f64 / 1e6;
+        let topology_mean = mean_ms(s.topology_ns.iter().sum());
         Ok(
             json!({"phase":name,"ticks":ticks,"players":self.members.len(),"players_per_origin":self.per_site,
             "workers":self.workers.len(),"end_islands":self.pool.directory.islands().len(),"peak_islands":s.peak_islands,
             "end_pairs":pairs,"peak_pairs":s.peak_pairs,"end_subscriptions":subs,"queue_peak":s.queue,
             "step_ms":percentiles(&mut s.ns),"topology_query_ms":percentiles(&mut s.topology_ns),
             "step_with_topology_ms":percentiles(&mut s.with_topology_ns),
+            "phase_mean_ms":{"simulate_publish":mean_ms(s.simulate_publish_ns),
+                "delivery_ack":mean_ms(s.delivery_ns),"topology":topology_mean},
             "frames":s.frames,"new_baselines":s.baselines,"first_worker_frames":s.observer,
             "foreign_home_frames":foreign_home_frames,"field_bytes":s.fields,"spatial_candidates":s.candidates}),
         )
@@ -280,15 +289,51 @@ impl Scene {
 fn travel(a: [i64; 3], b: [i64; 3], t: usize) -> [i64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t as i64 / TRAVEL as i64)
 }
+
+// Same actors, writers, update rates and worker worlds. Only the positions change.
+fn compare_layouts(ticks: usize) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    for players in [16, 32, 64, 128, 256, 384, 512, 768] {
+        let mut scene = Scene::new(4, players / 4, 8)?;
+        let separate = scene.segment("separated", ticks, |_, m| site(m.origin))?;
+        for _ in 0..6 {
+            scene.tick(&mut Sample::default(), |_| site(0))?;
+        }
+        let dense = scene.segment("dense", ticks, |_, _| site(0))?;
+        assert_eq!(separate["end_islands"], 4);
+        assert_eq!(dense["end_islands"], 1);
+        assert_eq!(separate["foreign_home_frames"], 0);
+        assert_eq!(separate["frames"], players * ticks);
+        assert_eq!(dense["frames"], 7 * players * ticks);
+        let over_budget = dense["step_with_topology_ms"]["p95"].as_f64().unwrap() >= 50.0;
+        rows.push(json!({"players":players, "separate":separate, "dense":dense}));
+        if players >= 256 && over_budget {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
 fn run() -> Result<()> {
-    let path = std::env::args_os()
-        .nth(1)
+    let mut args = std::env::args_os().skip(1);
+    let path = args
+        .next()
         .ok_or_else(|| invalid("supply output JSON path"))?;
+    let quick = match args.next() {
+        None => false,
+        Some(arg) if arg == "--quick" => true,
+        _ => return Err(invalid("expected an optional --quick")),
+    };
+    if args.next().is_some() {
+        return Err(invalid("unexpected benchmark argument"));
+    }
+    let separated_ticks = if quick { 32 } else { 120 };
+    let density_ticks = if quick { 32 } else { 100 };
     let mut independent = vec![];
     let mut first_worker_frames = None;
     for count in [1, 2, 4, 8] {
         let mut scene = Scene::new(count, PER_SITE, count * 2)?;
-        let r = scene.segment("separated", 120, |_, m| site(m.origin))?;
+        let r = scene.segment("separated", separated_ticks, |_, m| site(m.origin))?;
         assert_eq!(r["end_islands"], count);
         assert_eq!(r["end_pairs"], count * 2);
         assert_eq!(r["foreign_home_frames"], 0);
@@ -302,14 +347,14 @@ fn run() -> Result<()> {
     let mut shared = vec![];
     for workers in [2, 4, 8] {
         let mut scene = Scene::new(4, PER_SITE, workers)?;
-        let row = scene.segment("shared-workers", 120, |_, m| site(m.origin))?;
+        let row = scene.segment("shared-workers", separated_ticks, |_, m| site(m.origin))?;
         assert_eq!(row["end_islands"], 4);
         shared.push(row);
     }
     let mut density = vec![];
     for players in [16, 32, 64, 128, 256] {
         let mut scene = Scene::new(1, players, 2)?;
-        let row = scene.segment("dense", 100, |_, _| site(0))?;
+        let row = scene.segment("dense", density_ticks, |_, _| site(0))?;
         assert_eq!(row["end_islands"], 1);
         assert_eq!(row["end_subscriptions"], players);
         assert_eq!(row["new_baselines"], 0);
@@ -377,10 +422,17 @@ fn run() -> Result<()> {
             switches.push(row);
         }
     }
-    std::fs::write(path,serde_json::to_vec_pretty(&json!({"version":1,"os":std::env::consts::OS,
+    let mut report = json!({"version":1,"os":std::env::consts::OS,
         "arch":std::env::consts::ARCH,"per_site":PER_SITE,"separation_mm":DISTANCE,
         "warmup_ticks":6,"delivery_queue_limit":QUEUE,"independent":independent,"shared_workers":shared,"density":density,
-        "merge_split":merge,"exchange":switches})).map_err(|e| invalid(e.to_string()))?)?;
+        "merge_split":merge,"exchange":switches});
+    if quick {
+        report["matched_layouts"] = json!(compare_layouts(separated_ticks)?);
+    }
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&report).map_err(|e| invalid(e.to_string()))?,
+    )?;
     Ok(())
 }
 fn main() {
