@@ -133,6 +133,32 @@ impl Node {
 
 #[derive(Default)]
 pub(crate) struct Index(BTreeMap<Id, Node>);
+/// Moving-object broad phase. Large boxes keep their octree entry while their
+/// faces stay in the same grid cells. The directory supplies exact bounds for
+/// the narrow phase. The cover is derived from the box, so no proxy table is needed.
+#[derive(Default)]
+pub(crate) struct MovingIndex(Index);
+impl MovingIndex {
+    fn cover(mut b: Box3) -> Box3 {
+        const CELL: i64 = 2048;
+        for k in 0..3 {
+            if b.hi[k].saturating_sub(b.lo[k]) >= CELL * 2 {
+                b.lo[k] &= !(CELL - 1);
+                b.hi[k] |= CELL - 1;
+            }
+        }
+        b
+    }
+    pub fn replace(&mut self, id: Id, old: Option<Box3>, new: Box3) {
+        self.0.replace(id, old.map(Self::cover), Self::cover(new));
+    }
+    pub fn remove(&mut self, id: Id, b: Box3) {
+        self.0.remove(id, Self::cover(b));
+    }
+    pub fn candidates(&self, b: Box3) -> Vec<Id> {
+        self.0.query(b)
+    }
+}
 impl Index {
     pub fn replace(&mut self, id: Id, old: Option<Box3>, new: Box3) {
         if let Some(old) = old {

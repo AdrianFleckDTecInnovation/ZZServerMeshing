@@ -391,12 +391,17 @@ impl Pool {
         self.apply_delivery(msg, send_ack, owner)
     }
     fn apply_delivery(&mut self, msg: Delivery, send_ack: bool, owner: Authority) -> Result<bool> {
-        let u = &msg.update;
+        let u = msg.update;
         if owner.worker != msg.from || owner.generation != u.generation {
             return Ok(false);
         }
-        let ok = match msg.to {
-            Recipient::Client(id) => self.clients.entry(id).or_default().apply(u),
+        let (object, epoch, serial) = (u.object, u.epoch, u.serial);
+        let receipt = match msg.to {
+            Recipient::Client(id) => self
+                .clients
+                .entry(id)
+                .or_default()
+                .apply_checked(std::borrow::Cow::Owned(u), |_, _| Ok(()))?,
             Recipient::Worker(id) => {
                 let n = self
                     .nodes
@@ -405,23 +410,12 @@ impl Pool {
                 apply_view(n.app.world_mut(), &mut n.views, msg.group, u)?
             }
         };
-        if send_ack
-            && (ok
-                || match msg.to {
-                    Recipient::Client(id) => {
-                        self.clients.get(&id).is_some_and(|v| v.already_applied(u))
-                    }
-                    Recipient::Worker(w) => self
-                        .nodes
-                        .get(&w)
-                        .is_some_and(|n| n.views.already_applied(u)),
-                })
-        {
+        if send_ack && receipt != ApplyOutcome::Rejected {
             if let Some(n) = self.nodes.get_mut(&msg.from) {
-                n.publisher.ack(msg.to, u.object, u.epoch, u.serial);
+                n.publisher.ack(msg.to, object, epoch, serial);
             }
         }
-        Ok(ok)
+        Ok(receipt == ApplyOutcome::Installed)
     }
     pub fn deliver_all(&mut self) -> Result<usize> {
         let mut n = 0;
@@ -670,27 +664,49 @@ impl Pool {
         Ok(done)
     }
 }
-pub(crate) fn apply_view(w: &mut World, views: &mut Views, group: Id, u: &Update) -> Result<bool> {
-    views.apply_checked(u, |fields| {
-        let Some(fields) = fields else {
+pub(crate) fn apply_view(
+    w: &mut World,
+    views: &mut Views,
+    group: Id,
+    u: Update,
+) -> Result<ApplyOutcome> {
+    views.apply_checked(std::borrow::Cow::Owned(u), |u, baseline| {
+        if u.deleted {
             unload(w, u.object);
             return Ok(());
-        };
-        if w.resource::<MeshState>()
-            .entities
-            .get(&u.object)
-            .is_some_and(|e| w.get::<Simulated>(*e).is_some())
-        {
+        }
+        let entity = w.resource::<MeshState>().entities.get(&u.object).copied();
+        if entity.is_some_and(|e| w.get::<Simulated>(e).is_some()) {
             return Err(Error::Fenced);
         }
-        let r = Record {
-            id: u.object,
-            group,
-            revision: u.revision,
-            fields: fields.clone(),
-            deleted: false,
+        let result = if let Some(e) = entity.filter(|&e| {
+            w.get::<Replica>(e).is_some() && w.get::<Managed>(e).is_some_and(|m| m.group == group)
+        }) {
+            crate::bevy_runtime::patch_replica(w, e, u)
+        } else {
+            // A failed codec installation unloads the replica. On retry, rebuild
+            // it from the last acknowledged baseline plus this update.
+            let mut fields = if u.base.is_some() {
+                baseline.clone()
+            } else {
+                BTreeMap::new()
+            };
+            for (&id, value) in &u.fields {
+                if let Some(field) = value {
+                    fields.insert(id, field.clone());
+                } else {
+                    fields.remove(&id);
+                }
+            }
+            let record = Record {
+                id: u.object,
+                group,
+                revision: u.revision,
+                fields,
+                deleted: false,
+            };
+            crate::bevy_runtime::apply_records(w, [record], false)
         };
-        let result = crate::bevy_runtime::apply_records(w, [r], false);
         if result.is_err() {
             unload(w, u.object);
         }

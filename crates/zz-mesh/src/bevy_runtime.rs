@@ -36,7 +36,9 @@ pub struct Replica;
 pub struct Staged;
 #[derive(Component)]
 pub(crate) struct Paused;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Detail {
     Exact,
     Coarse,
@@ -176,7 +178,10 @@ impl MeshState {
         self.versions.get(&id).copied().unwrap_or(0)
     }
     pub fn authority(&self, g: Id) -> Option<Authority> {
-        self.groups.get(&g).map(|g| g.0)
+        self.group_state(g).map(|g| g.0)
+    }
+    pub(crate) fn group_state(&self, group: Id) -> Option<(Authority, u64)> {
+        self.groups.get(&group).copied()
     }
     pub fn diagnose(&mut self, s: String) {
         self.report(s)
@@ -681,6 +686,75 @@ pub(crate) fn demote(w: &mut World, group: Id) {
     w.resource_mut::<MeshState>().groups.remove(&group);
     w.resource_mut::<MeshState>().pins.remove(&group);
 }
+fn import_field(
+    world: &mut World,
+    state: &MeshState,
+    schemas: &Schemas,
+    entity: Entity,
+    schema: u32,
+    field: &Field,
+    previous: Option<&Field>,
+) -> Result<()> {
+    let entry = schemas
+        .entries
+        .get(&schema)
+        .ok_or_else(|| invalid(format!("missing codec {schema}")))?;
+    if entry.version != field.version {
+        return Err(invalid(format!("schema {schema} version mismatch")));
+    }
+    if previous != Some(field) {
+        (entry.import)(world, entity, &field.bytes, &state.entities)?;
+    }
+    Ok(())
+}
+
+/// Patch an already installed replica. The receiver keeps its last successfully
+/// installed bytes for removals and codec comparisons, reusing their allocation.
+pub(crate) fn patch_replica(w: &mut World, e: Entity, u: &Update) -> Result<()> {
+    w.resource_scope(|w, mut state: Mut<MeshState>| -> Result<()> {
+        let before = state.saved.get(&u.object);
+        w.resource_scope(|w, reg: Mut<Schemas>| -> Result<()> {
+            for (&id, value) in &u.fields {
+                let previous = before.and_then(|fields| fields.get(&id));
+                if let Some(f) = value {
+                    import_field(w, &state, &reg, e, id, f, previous)?;
+                } else if previous.is_some() {
+                    (reg.entries[&id].remove)(w, e);
+                }
+            }
+            if u.base.is_none() {
+                for id in before.into_iter().flat_map(|m| m.keys()) {
+                    if !u.fields.contains_key(id) {
+                        (reg.entries[id].remove)(w, e);
+                    }
+                }
+            }
+            for rebuild in &reg.rebuild {
+                rebuild(w, e)?;
+            }
+            Ok(())
+        })?;
+        let saved = state.saved.entry(u.object).or_default();
+        if u.base.is_none() {
+            saved.retain(|k, _| u.fields.contains_key(k));
+        }
+        for (&id, field) in &u.fields {
+            if let Some(f) = field {
+                if let Some(old) = saved.get_mut(&id) {
+                    old.version = f.version;
+                    old.bytes.clone_from(&f.bytes);
+                } else {
+                    saved.insert(id, f.clone());
+                }
+            } else {
+                saved.remove(&id);
+            }
+        }
+        state.versions.insert(u.object, u.revision);
+        Ok(())
+    })
+}
+
 pub(crate) fn apply_records(
     w: &mut World,
     records: impl AsRef<[Record]> + IntoIterator<Item = Record>,
@@ -729,16 +803,15 @@ pub(crate) fn apply_records(
                 }
                 let before = state.saved.get(&r.id);
                 for (id, f) in &r.fields {
-                    let entry = reg
-                        .entries
-                        .get(id)
-                        .ok_or_else(|| invalid(format!("missing codec {id}")))?;
-                    if entry.version != f.version {
-                        return Err(invalid(format!("schema {id} version mismatch")));
-                    }
-                    if before.and_then(|fields| fields.get(id)) != Some(f) {
-                        (entry.import)(w, e, &f.bytes, &state.entities)?;
-                    }
+                    import_field(
+                        w,
+                        &state,
+                        &reg,
+                        e,
+                        *id,
+                        f,
+                        before.and_then(|fields| fields.get(id)),
+                    )?;
                 }
                 for id in before.into_iter().flat_map(|v| v.keys()) {
                     if !r.fields.contains_key(id) {

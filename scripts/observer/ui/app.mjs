@@ -22,7 +22,7 @@ let latest,
   chosen = 1,
   selectedCluster = null,
   lastEvent = '',
-  lastTickTime = 0;
+  staleTimer;
 const map = new UniverseMap(el('universe'), (id) => {
   chosen = id;
   const p = shown?.players.find((p) => p.id === id);
@@ -317,6 +317,8 @@ el('end').onclick = async () => {
     });
     if (!response.ok) throw Error('stop');
     ended = true;
+    feed.close();
+    clearTimeout(staleTimer);
     el('freeze').disabled = true;
     status('Beendet', 'stopped');
     el('end').textContent = 'Test beendet';
@@ -326,28 +328,25 @@ el('end').onclick = async () => {
   }
 };
 new ResizeObserver(chart).observe(el('chart'));
-async function poll() {
-  if (ended) return;
-  try {
-    const response = await fetch('/api/state', { cache: 'no-store', signal: AbortSignal.timeout(2400) });
-    if (!response.ok) throw Error('http');
-    const frame = await response.json();
-    if (ended) return;
-    if (frame.status === 'live') {
-      if (!latest || frame.tick !== latest.tick) lastTickTime = performance.now();
-      const fresh = performance.now() - lastTickTime < 2400;
-      const changed = latest?.tick !== frame.tick;
-      latest = frame;
-      if (!paused && changed) render(frame);
-      status(
-        !fresh ? 'Daten veraltet' : paused ? 'Ansicht pausiert' : 'Live',
-        fresh && !paused ? 'live' : '',
-      );
-    }
-  } catch {
-    if (!ended) status('Verbindung unterbrochen', '');
-  } finally {
-    if (!ended) setTimeout(poll, document.hidden ? 1000 : 250);
-  }
+const feed = new EventSource('/api/live');
+function show(frame) {
+  if (ended || frame.status !== 'live') return;
+  latest = frame;
+  if (!paused) render(frame);
+  status(paused ? 'Ansicht pausiert' : 'Live', paused ? '' : 'live');
+  clearTimeout(staleTimer);
+  staleTimer = setTimeout(() => status('Daten veraltet', ''), 2400);
 }
-poll();
+feed.addEventListener('snapshot', (event) => show(JSON.parse(event.data)));
+feed.addEventListener('sample', (event) => {
+  const { point, ...frame } = JSON.parse(event.data);
+  if (!latest) return;
+  frame.history = latest.history.filter((p) => p.t >= frame.seconds - 60);
+  if (point) frame.history.push(point);
+  frame.events ??= latest.events;
+  show(frame);
+});
+feed.onerror = () => {
+  clearTimeout(staleTimer);
+  if (!ended) status('Verbindung unterbrochen', '');
+};

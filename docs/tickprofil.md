@@ -1,5 +1,7 @@
 # Tickkosten und 10.000 Spieler
 
+Die neueste Vergleichsmessung untersucht Änderungen an Octree, Replikation und Speicherbedarf. Der kurze Kerntest ermittelt auf dem Zielrechner, wie viele parallele Simulationsthreads das 50-ms-Budget einhalten. [Kernskalierung und AMD-EPYC-Planung](kernskalierung.md)
+
 Wie die Gruppengröße den Verkehr bestimmt, zeigen zusätzliche Messungen mit 1.024 bis 4.096 WebSocket-Clients. Für 10.000 mTLS-Sitzungen und eine gemeinsame Schlacht gibt es einen dimensionierten Testaufbau mit Abnahmekriterien. [Kapazitätsplan und Regionskurven](kapazitaetsplan.md)
 
 **10.000 gleichzeitige WebSocket-Spieler bestanden auf Debian alle vier Lastläufe mit 24 vCPUs, acht Sim-Servern und acht Lasttreibern.** Die Sollrate betrug 20 Snapshots und fünf Eingaben je Spieler und Sekunde. In drei Vier-Sekunden-Läufen und einem Zehn-Sekunden-Lauf kamen **1.100.000 von 1.100.000 geplanten Eingaben** zurück. Im längeren Lauf betrug das Eingabe-p95 **75,6 ms**, der langsamste Client empfing **19,6 Snapshots/s**. Die Spieler bildeten 5.000 räumlich getrennte Paare über Workergrenzen hinweg. Der interne Test des persistenten Bevy-Spiels prüft zusätzlich 10.000 bewegte Spieler in 625 Inseln mit eigener Sitzung, eigenem Inventar und einer sichtbaren Kopie auf einem zweiten Worker.

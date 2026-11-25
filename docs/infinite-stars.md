@@ -62,6 +62,7 @@ Ersetzbare Bewegung verwendet eine eigene Sequenz, einen servergeprüften Zeitst
 ### Übergabe
 
 1. Die Quelle eröffnet ein Ticket für die bestehende Generation und eine konkrete Ziel-Inkarnation. Sie simuliert während des Vorladens weiter.
+   Liegt eine bestätigte Aktion bereits im Store und wird erst im nächsten ECS-Tick sichtbar, melden `Preview` und `Freeze` den Zustand `Preparing`. Der mitgelieferte Controller wartet mit demselben Ticket auf die passende Revision. Erst dann darf er die Gruppe einfrieren.
 2. Das Ziel gleicht Datenmanifeste ab. Gleicher geprüfter Inhalt benötigt keine Bulk-Nutzlast. Eine geeignete ältere Basis erlaubt ein Delta. Fehlende Historie führt zum Snapshot. Die Voxelbasis enthält Seed, Generator, Konfiguration, Registry und Inhaltsversion. Das zweite Datenformat ist ein unveränderlicher Bauplan.
 3. Das Ziel prüft Inhalt, Pflichtreferenzen und Rekonstruktion im Staging. Änderungen der Gruppe, ihres Inhalts und ihrer Mitglieder fließen vor dem Umschalten ein. Für die lokale Vorbereitung sind vier Nachführungsrunden vorgesehen. Ein erschöpftes Budget liefert Backpressure.
 4. Der Speicher friert genau die erwartete Revision ein. Der endgültige Stand enthält kanonische Migrationsfelder, Löschinformationen, erforderliche Daten und Aktionsfortschritt. Das Ziel quittiert dessen SHA-256. Eine frühe Quittung für einen anderen Stand schlägt fehl.

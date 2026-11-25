@@ -289,9 +289,102 @@ impl Broker {
 }
 type Connector = Arc<dyn Fn(Worker) -> Result<Client> + Send + Sync>;
 type Task = (Worker, Request);
+/// Advance over a continuously changing backlog. An ACK removes only matching
+/// revisions, so a hot prefix can otherwise occupy every single report.
+fn report_page(pending: &BTreeMap<Id, u64>, cursor: &mut Option<Id>) -> Vec<(Id, u64)> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let start = cursor.map_or(Unbounded, Excluded);
+    let page: Vec<_> = pending
+        .range((start, Unbounded))
+        .chain(pending.iter())
+        .take(MAX_TARGETS.min(pending.len()))
+        .map(|(&id, &revision)| (id, revision))
+        .collect();
+    if let Some(&(last, _)) = page.last() {
+        *cursor = Some(last);
+    }
+    page
+}
 struct Lane {
     send: SyncSender<Task>,
-    receive: Receiver<(Worker, Result<Response>)>,
+    receive: Receiver<(Worker, Result<Response>, Option<Report>)>,
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn continuously_moving_prefix_cannot_starve_the_last_directory_page() {
+        let n = MAX_TARGETS * 3 + 7;
+        let mut pending: BTreeMap<_, _> = (0..n).map(|i| (Id::numbered(i as u128), 1)).collect();
+        let db = Store::open(":memory:").unwrap();
+        let directory = db.start_worker(1).unwrap();
+        let from = db.start_worker(2).unwrap();
+        let group = Id::numbered(1000);
+        let owner = db.create_group(group, from).unwrap();
+        let ids: Vec<_> = pending.keys().copied().collect();
+        let mut revision = 0;
+        for batch in ids.chunks(MAX_TARGETS) {
+            let records = batch.iter().map(|&id| Record::new(id, group)).collect();
+            revision = db.checkpoint(group, owner, revision, records).unwrap();
+        }
+        let mut broker = Broker::new(db, directory).unwrap();
+        let mut cursor = None;
+        for tick in 1..=n.div_ceil(MAX_TARGETS) {
+            pending.values_mut().for_each(|v| *v = tick as u64);
+            let page = report_page(&pending, &mut cursor);
+            assert_eq!(page.len(), MAX_TARGETS);
+            assert!(page.iter().all(|(_, v)| *v == tick as u64));
+            assert_eq!(
+                page.iter().copied().collect::<BTreeSet<_>>().len(),
+                page.len()
+            );
+            let changes = page
+                .iter()
+                .map(|&(id, revision)| {
+                    let point = [revision as i64; 3];
+                    let presence = Presence {
+                        id,
+                        owner: from,
+                        principal: id,
+                        bounds: Box3::new(group, point, point).unwrap(),
+                        velocity: [0; 3],
+                        ahead: 0,
+                    };
+                    (
+                        id,
+                        Some(Description {
+                            presence,
+                            group,
+                            area: None,
+                        }),
+                    )
+                })
+                .collect();
+            let report = Report {
+                directory: Some(directory),
+                sequence: tick as u64,
+                ack: 0,
+                changes,
+            };
+            for _ in 0..2 {
+                assert_eq!(
+                    broker
+                        .report(Role::Worker(from), report.clone())
+                        .unwrap()
+                        .sequence,
+                    tick as u64
+                );
+            }
+        }
+        assert!(pending
+            .keys()
+            .all(|&id| broker.index.presence(id).is_some()));
+        pending.retain(|id, _| u128::from_be_bytes(id.0) % 101 == 0);
+        let small = report_page(&pending, &mut cursor);
+        assert_eq!(small.into_iter().collect::<BTreeMap<_, _>>(), pending);
+    }
 }
 impl Lane {
     fn new(connect: Connector) -> Self {
@@ -322,7 +415,13 @@ impl Lane {
                 if reply.is_err() {
                     peers.remove(&w);
                 }
-                if out.send((w, reply)).is_err() {
+                // The control lane returns its original page for an exact replay on
+                // failure. Data batches can release their payload as soon as TLS returns.
+                let report = match msg {
+                    Request::Spatial(report) => Some(report),
+                    _ => None,
+                };
+                if out.send((w, reply, report)).is_err() {
                     break;
                 }
             }
@@ -355,12 +454,13 @@ pub struct PeerMesh {
     views: Views,
     publisher: Publisher,
     tick: u64,
-    pending: BTreeMap<Id, (u64, Option<Description>)>,
+    pending: BTreeMap<Id, u64>,
+    report_cursor: Option<Id>,
     change: u64,
     sequence: u64,
     ack: u64,
     broker: Option<Worker>,
-    inflight: Option<(Report, Vec<(Id, u64)>)>,
+    inflight: Option<Vec<(Id, u64)>>,
     retry: Option<(Report, Vec<(Id, u64)>)>,
     pub frames_out: u64,
     pub frames_in: u64,
@@ -383,6 +483,7 @@ impl PeerMesh {
             publisher: Publisher::new(LINKS),
             tick: 0,
             pending: Default::default(),
+            report_cursor: None,
             change: 0,
             sequence: 1,
             ack: 0,
@@ -405,9 +506,10 @@ impl PeerMesh {
         self.views = Views::default();
         self.publisher = Publisher::new(LINKS);
         self.own.subs.clear();
-        for (&id, d) in &self.own.descriptions {
+        self.report_cursor = None;
+        for &id in self.own.descriptions.keys() {
             self.change += 1;
-            self.pending.insert(id, (self.change, Some(d.clone())));
+            self.pending.insert(id, self.change);
         }
     }
     fn route(&mut self, w: &mut World, r: Route) -> Result<()> {
@@ -446,18 +548,18 @@ impl PeerMesh {
                     w.resource_mut::<MeshState>().dirty.extend(dirty);
                     return Err(Error::Busy("spatial report backlog"));
                 }
-                if let Some(d) = &desc {
-                    self.own.descriptions.insert(id, d.clone());
+                if let Some(d) = desc {
+                    self.own.descriptions.insert(id, d);
                 } else {
                     self.own.descriptions.remove(&id);
                 }
                 self.change += 1;
-                self.pending.insert(id, (self.change, desc));
+                self.pending.insert(id, self.change);
             }
             self.publisher.changed(&self.own, id, self.tick);
         }
-        while let Ok((_, response)) = self.control.receive.try_recv() {
-            let Some((report, sent)) = self.inflight.take() else {
+        while let Ok((_, response, Some(report))) = self.control.receive.try_recv() {
+            let Some(sent) = self.inflight.take() else {
                 continue;
             };
             match response {
@@ -480,7 +582,7 @@ impl PeerMesh {
                     self.views.watermark(self.ack);
                     self.sequence += 1;
                     for (id, version) in sent {
-                        if self.pending.get(&id).is_some_and(|(n, _)| *n == version) {
+                        if self.pending.get(&id) == Some(&version) {
                             self.pending.remove(&id);
                         }
                     }
@@ -493,37 +595,42 @@ impl PeerMesh {
         }
         if self.inflight.is_none() {
             let broker = self.db.worker(1)?;
-            let mut sent = vec![];
-            let changes = self
-                .pending
-                .iter()
-                .take(MAX_TARGETS)
-                .map(|(&id, (n, d))| {
-                    sent.push((id, *n));
-                    (id, d.clone())
-                })
-                .collect();
-            let (report, sent) = self.retry.take().unwrap_or((
-                Report {
-                    directory: self.broker,
-                    sequence: self.sequence,
-                    ack: self.ack,
-                    changes,
-                },
-                sent,
-            ));
-            if self
+            let (report, sent) = self.retry.take().unwrap_or_else(|| {
+                let sent = report_page(&self.pending, &mut self.report_cursor);
+                let changes = sent
+                    .iter()
+                    .map(|&(id, _)| (id, self.own.descriptions.get(&id).cloned()))
+                    .collect();
+                (
+                    Report {
+                        directory: self.broker,
+                        sequence: self.sequence,
+                        ack: self.ack,
+                        changes,
+                    },
+                    sent,
+                )
+            });
+            match self
                 .control
                 .send
-                .try_send((broker, Request::Spatial(report.clone())))
-                .is_ok()
+                .try_send((broker, Request::Spatial(report)))
             {
-                self.inflight = Some((report, sent));
-            } else {
-                self.retry = Some((report, sent));
+                Ok(()) => self.inflight = Some(sent),
+                Err(e) => {
+                    let (_, request) = match e {
+                        mpsc::TrySendError::Full(task) | mpsc::TrySendError::Disconnected(task) => {
+                            task
+                        }
+                    };
+                    let Request::Spatial(report) = request else {
+                        unreachable!()
+                    };
+                    self.retry = Some((report, sent));
+                }
             }
         }
-        while let Ok((to, response)) = self.updates.receive.try_recv() {
+        while let Ok((to, response, _)) = self.updates.receive.try_recv() {
             match response {
                 Ok(Response::Applied(acks)) => {
                     for (id, epoch, serial) in acks {
@@ -541,14 +648,23 @@ impl PeerMesh {
                 .map_or(0, |a| a.generation)
         })? {
             if let Recipient::Worker(to) = to {
-                for part in batch.chunks(MAX_TARGETS) {
+                let mut send = |part: Vec<Update>| {
+                    let count = part.len();
                     if self
                         .updates
                         .send
-                        .try_send((to, Request::Push(part.to_vec())))
+                        .try_send((to, Request::Push(part)))
                         .is_ok()
                     {
-                        self.frames_out += part.len() as u64;
+                        self.frames_out += count as u64;
+                    }
+                };
+                if batch.len() <= MAX_TARGETS {
+                    send(batch);
+                } else {
+                    let mut rest = batch.into_iter();
+                    while rest.len() != 0 {
+                        send(rest.by_ref().take(MAX_TARGETS).collect());
                     }
                 }
             }
@@ -580,11 +696,14 @@ impl PeerMesh {
             if owner.worker != from || owner.generation != u.generation {
                 continue;
             }
-            if crate::pool::apply_view(w, &mut self.views, group, &u)? {
-                self.frames_in += 1;
-                ack.push((u.object, u.epoch, u.serial));
-            } else if self.views.already_applied(&u) {
-                ack.push((u.object, u.epoch, u.serial));
+            let receipt = (u.object, u.epoch, u.serial);
+            match crate::pool::apply_view(w, &mut self.views, group, u)? {
+                ApplyOutcome::Installed => {
+                    self.frames_in += 1;
+                    ack.push(receipt);
+                }
+                ApplyOutcome::Duplicate => ack.push(receipt),
+                ApplyOutcome::Rejected => (),
             }
         }
         Ok(Response::Applied(ack))

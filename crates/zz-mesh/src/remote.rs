@@ -283,16 +283,28 @@ impl Endpoint for WorkerEndpoint {
             .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
     }
 }
-fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Snapshot> {
+fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Option<Snapshot>> {
     let mut snapshot = db.snapshot(t.group)?;
+    let (owner, revision) = world
+        .resource::<MeshState>()
+        .group_state(t.group)
+        .ok_or(Error::Fenced)?;
+    if owner != t.source {
+        return Err(Error::Fenced);
+    }
+    // A committed action can precede the source's next ECS tick, including a
+    // spawn or despawn. Never capture an older World under that newer revision.
+    if revision != snapshot.revision {
+        return Ok(None);
+    }
     for r in snapshot.records.iter_mut().filter(|r| !r.deleted) {
         let item = capture(world, r.id, view)?;
         if r.revision != item.revision {
-            return Err(Error::Busy("worker catching up to committed revision"));
+            return Ok(None);
         }
         *r = item;
     }
-    Ok(snapshot)
+    Ok(Some(snapshot))
 }
 fn flush_inputs(
     w: &mut World,
@@ -498,7 +510,8 @@ impl WorkerLoop {
             Command::Preview if here == t.source.worker => {
                 db.begin_handoff(t)?;
                 match db.handoff_phase(t)? {
-                    Phase::Preparing => Ok(Answer::Snapshot(exact(w, db, t, View::Migration)?)),
+                    Phase::Preparing => Ok(exact(w, db, t, View::Migration)?
+                        .map_or(Answer::State(Phase::Preparing), Answer::Snapshot)),
                     Phase::Frozen | Phase::Ready => Ok(Answer::Snapshot(db.frozen(t)?)),
                     p => Ok(Answer::State(p)),
                 }
@@ -546,11 +559,15 @@ impl WorkerLoop {
                 if matches!(db.handoff_phase(t)?, Phase::Frozen | Phase::Ready) {
                     return Ok(Answer::Snapshot(db.frozen(t)?));
                 }
-                let s = exact(w, db, t, View::Migration)?;
+                let Some(s) = exact(w, db, t, View::Migration)? else {
+                    return Ok(Answer::State(Phase::Preparing));
+                };
                 if s.required != known {
                     return Ok(Answer::State(Phase::Preparing));
                 }
-                let checkpoints = exact(w, db, t, View::Checkpoint)?;
+                let Some(checkpoints) = exact(w, db, t, View::Checkpoint)? else {
+                    return Ok(Answer::State(Phase::Preparing));
+                };
                 let snap = db.freeze_checkpoint(t, s.revision, &s.records, &checkpoints.records)?;
                 crate::bevy_runtime::pause_group(w, t.group, true);
                 self.paused.insert(t.group, t);
@@ -626,21 +643,32 @@ pub fn migrate(
     let mut payload = 0usize;
     let mut pause = None;
     for _ in 0..4 {
-        let s = match call(source, t, Command::Preview)? {
-            Answer::Snapshot(s) => s,
-            Answer::State(Phase::Switched) => {
-                call(target, t, Command::Activate)?;
-                return Ok(MigrationCost {
-                    payload,
-                    prepare: start.elapsed(),
-                    pause: Duration::ZERO,
-                    authority: Authority {
-                        worker: t.target,
-                        generation: t.source.generation + 1,
-                    },
-                });
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let s = loop {
+            match call(source, t, Command::Preview)? {
+                Answer::Snapshot(s) => break s,
+                Answer::State(Phase::Preparing) => {
+                    if Instant::now() >= deadline {
+                        return Err(Error::Busy(
+                            "source world has not reached the committed revision",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Answer::State(Phase::Switched) => {
+                    call(target, t, Command::Activate)?;
+                    return Ok(MigrationCost {
+                        payload,
+                        prepare: start.elapsed(),
+                        pause: Duration::ZERO,
+                        authority: Authority {
+                            worker: t.target,
+                            generation: t.source.generation + 1,
+                        },
+                    });
+                }
+                _ => return Err(Error::Fenced),
             }
-            _ => return Err(Error::Fenced),
         };
         for m in &s.required {
             let Answer::Cursor {
@@ -750,4 +778,57 @@ pub fn migrate(
         });
     }
     Err(Error::Busy("source changes exceed preparation rate"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preview_and_freeze_wait_for_a_committed_spawn_before_the_next_tick() -> Result<()> {
+        let db = Store::open(":memory:")?;
+        let from = db.start_worker(1)?;
+        let to = db.start_worker(2)?;
+        let group = Id::new();
+        let source = db.create_group(group, from)?;
+        let rev = db.checkpoint(group, source, 0, vec![Record::new(group, group)])?;
+        let mut app = bevy_app::App::new();
+        app.add_plugins(MeshPlugin::persistent(db.clone(), from));
+        restore_group(app.world_mut(), group)?;
+        let service = Arc::new(Service {
+            worker: from,
+            store: db.clone(),
+            actions: Default::default(),
+            providers: Default::default(),
+            replicas: Default::default(),
+            bulk: Default::default(),
+        });
+        let (_, mut worker) = worker(service, BlobCache::default());
+        let t = Handoff {
+            id: Id::new(),
+            group,
+            source,
+            target: to,
+        };
+        let added = Id::new();
+        let latest = db.checkpoint(group, source, rev, vec![Record::new(added, group)])?;
+        for cmd in [Command::Preview, Command::Freeze(vec![])] {
+            assert!(matches!(
+                worker.control(app.world_mut(), Role::Operator, t, cmd)?,
+                Answer::State(Phase::Preparing)
+            ));
+            assert_eq!(db.handoff_phase(t)?, Phase::Preparing);
+        }
+        app.update();
+        for cmd in [Command::Preview, Command::Freeze(vec![])] {
+            let Answer::Snapshot(snapshot) =
+                worker.control(app.world_mut(), Role::Operator, t, cmd)?
+            else {
+                panic!("source did not catch up")
+            };
+            assert!(snapshot.revision >= latest && snapshot.records.iter().any(|r| r.id == added));
+        }
+        assert_eq!(db.handoff_phase(t)?, Phase::Frozen);
+        assert_eq!(db.owner(group)?, source);
+        Ok(())
+    }
 }

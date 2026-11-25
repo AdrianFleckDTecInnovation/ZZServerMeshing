@@ -6,6 +6,21 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { clusterEvents, receive, Telemetry } from './telemetry.mjs';
 
+async function* streamFrames(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  assert.equal(response.headers.get('content-type'), 'text/event-stream');
+  let pending = '';
+  for await (const data of response.body.pipeThrough(new TextDecoderStream())) {
+    pending += data;
+    let end;
+    while ((end = pending.indexOf('\n\n')) !== -1) {
+      const [event, json] = pending.slice(0, end).split('\n');
+      pending = pending.slice(end + 2);
+      yield [event.slice(7), JSON.parse(json.slice(6))];
+    }
+  }
+}
+
 test('client counts a complete, correctly addressed frame only once', () => {
   const client = { id: 2, tick: 0, frames: 0, bytes: 0, own: null };
   const packet = Buffer.alloc(32);
@@ -191,6 +206,23 @@ test(
       last.events.some((e) => e.kind === 'merge') && last.events.some((e) => e.kind === 'split'),
     );
     assert.ok(last.players.every((p) => !p.neighbors.includes(p.id)));
+    for (let connection = 0; connection < 2; connection++) {
+      let initial;
+      for await (const [kind, frame] of streamFrames(address + 'api/live')) {
+        if (!initial) {
+          assert.equal(kind, 'snapshot');
+          assert.ok(frame.history.length && frame.events.length);
+          initial = frame;
+        } else {
+          assert.equal(kind, 'sample');
+          assert.ok(frame.tick > initial.tick);
+          assert.equal(frame.point.t, frame.seconds);
+          assert.equal(frame.history, undefined);
+          assert.equal(frame.players.length, initial.players.length);
+          break;
+        }
+      }
+    }
     const denied = await fetch(address + 'api/stop', { method: 'POST' });
     assert.equal(denied.status, 403);
     assert.ok((await stop()).ok);

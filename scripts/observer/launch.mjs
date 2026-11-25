@@ -61,7 +61,9 @@ async function main() {
       readFileSync(new URL('ui/' + name, import.meta.url)),
     ]);
   }
-  let live = '{"status":"starting"}',
+  let live = { status: 'starting' },
+    fullJSON,
+    lastEvent,
     lastViewer = performance.now(),
     ending = false;
   const children = [],
@@ -81,6 +83,37 @@ async function main() {
     sender: 0,
   }));
   const telemetry = new Telemetry();
+  const streams = new Map();
+  const snapshot = () => (fullJSON ??= JSON.stringify(live));
+  function sendSnapshot(res) {
+    res.write('event: snapshot\ndata: ' + snapshot() + '\n\n');
+  }
+  function publish(state) {
+    const first = live.status === 'starting';
+    live = { status: 'live', cycleSeconds: cycle, ...state };
+    fullJSON = undefined;
+    const changedEvents = state.events[0] !== lastEvent;
+    lastEvent = state.events[0];
+    let sample;
+    for (const res of streams.keys()) {
+      if (res.writableNeedDrain) {
+        // A reader can miss whole samples. Resume from the current snapshot.
+        streams.set(res, true);
+        continue;
+      }
+      if (first) sendSnapshot(res);
+      else {
+        if (sample === undefined) {
+          const { history, events, ...current } = live;
+          const point = history.at(-1);
+          if (point?.t === current.seconds) current.point = point;
+          if (changedEvents) current.events = events;
+          sample = 'event: sample\ndata: ' + JSON.stringify(current) + '\n\n';
+        }
+        res.write(sample);
+      }
+    }
+  }
   const server = createServer((req, res) => {
     const port = server.address()?.port;
     const authorities = [host + ':' + port, 'localhost:' + port];
@@ -114,7 +147,23 @@ async function main() {
     }
     if (req.url === '/api/state') {
       lastViewer = performance.now();
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end(live);
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(snapshot());
+    } else if (req.url === '/api/live') {
+      lastViewer = performance.now();
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.flushHeaders();
+      streams.set(res, false);
+      res.on('drain', () => {
+        if (streams.get(res)) {
+          streams.set(res, false);
+          sendSnapshot(res);
+        }
+      });
+      sendSnapshot(res);
+      res.once('close', () => {
+        streams.delete(res);
+        lastViewer = performance.now();
+      });
     } else if (assets.has(req.url)) {
       const [mime, bytes] = assets.get(req.url);
       res.writeHead(200, { 'Content-Type': mime }).end(bytes);
@@ -275,8 +324,7 @@ async function main() {
               stepMs: Math.max(...all.map((w) => w.stepMs)),
               peerApplied: all.reduce((total, w) => total + w.applied, 0),
             };
-            const state = telemetry.sample(frame, clients);
-            live = JSON.stringify({ status: 'live', cycleSeconds: cycle, ...state });
+            publish(telemetry.sample(frame, clients));
           }
         } catch (error) {
           fail(error);
@@ -292,7 +340,7 @@ async function main() {
     timer = setInterval(() => {
       if (
         (duration && performance.now() - started >= duration * 1000) ||
-        performance.now() - lastViewer > 600_000
+        (streams.size === 0 && performance.now() - lastViewer > 600_000)
       )
         stop();
     }, 500);

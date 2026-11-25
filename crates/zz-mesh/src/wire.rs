@@ -211,19 +211,25 @@ impl Endpoint for Service {
                 if updates.len() > MAX_TARGETS {
                     return Err(Error::Busy("state batch"));
                 }
-                let mut views = self.replicas.lock().map_err(|_| invalid("view mutex"))?;
-                let mut acknowledgements = vec![];
-                for u in updates {
-                    let group = self
-                        .store
-                        .group_of(u.object)?
+                self.store.check_worker(caller)?;
+                let ids: Vec<_> = updates.iter().map(|u| u.object).collect();
+                let owners = self.store.authorities(&ids)?;
+                for u in &updates {
+                    let (_, a) = owners
+                        .get(&u.object)
                         .ok_or_else(|| Error::Missing(u.object.to_string()))?;
-                    let a = self.store.owner(group)?;
                     if a.worker != caller || a.generation != u.generation {
                         return Err(Error::Fenced);
                     }
-                    if views.apply(&u) {
-                        acknowledgements.push((u.object, u.epoch, u.serial));
+                }
+                let mut views = self.replicas.lock().map_err(|_| invalid("view mutex"))?;
+                let mut acknowledgements = vec![];
+                for u in updates {
+                    let ack = (u.object, u.epoch, u.serial);
+                    if views.apply_checked(std::borrow::Cow::Owned(u), |_, _| Ok(()))?
+                        != ApplyOutcome::Rejected
+                    {
+                        acknowledgements.push(ack);
                     }
                 }
                 Ok(Response::Applied(acknowledgements))
@@ -231,6 +237,97 @@ impl Endpoint for Service {
         }
     }
 }
+#[cfg(test)]
+mod replication_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_push_repeats_ack_and_fenced_batch_keeps_baseline() {
+        let db = Store::open(":memory:").unwrap();
+        let from = db.start_worker(1).unwrap();
+        let to = db.start_worker(2).unwrap();
+        let id = Id::new();
+        let owner = db.create_group(id, from).unwrap();
+        db.checkpoint(id, owner, 0, vec![Record::new(id, id)])
+            .unwrap();
+        let service = Service {
+            store: db,
+            worker: to,
+            actions: Default::default(),
+            providers: Default::default(),
+            replicas: Default::default(),
+            bulk: Default::default(),
+        };
+        service.replicas.lock().unwrap().route(&InterestChange {
+            object: id,
+            to: Recipient::Worker(to),
+            epoch: 1,
+            subscription: Some(Subscription {
+                epoch: 1,
+                components: Default::default(),
+            }),
+        });
+        let field = Field::new(1, &55u32).unwrap();
+        let full = Update {
+            object: id,
+            epoch: 1,
+            generation: owner.generation,
+            revision: 1,
+            serial: 1,
+            base: None,
+            fields: [(1, Some(field.clone())), (2, Some(field.clone()))].into(),
+            deleted: false,
+        };
+        let push = |updates| service.dispatch(Role::Worker(from), Request::Push(updates));
+        for _ in 0..2 {
+            assert!(
+                matches!(push(vec![full.clone()]).unwrap(), Response::Applied(acks) if acks == [(id, 1, 1)])
+            );
+        }
+        let delta = Update {
+            serial: 2,
+            base: Some(1),
+            fields: [(2, None)].into(),
+            ..full.clone()
+        };
+        let stale = Update {
+            generation: owner.generation + 1,
+            ..delta.clone()
+        };
+        assert!(matches!(
+            push(vec![delta.clone(), stale]),
+            Err(Error::Fenced)
+        ));
+        assert_eq!(
+            service.replicas.lock().unwrap().fields(id).unwrap().len(),
+            2
+        );
+        push(vec![delta]).unwrap();
+        assert_eq!(
+            service.replicas.lock().unwrap().fields(id).unwrap().len(),
+            1
+        );
+        push(vec![Update {
+            serial: 3,
+            fields: [(3, Some(field))].into(),
+            ..full
+        }])
+        .unwrap();
+        assert_eq!(
+            service
+                .replicas
+                .lock()
+                .unwrap()
+                .fields(id)
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [3]
+        );
+    }
+}
+
 /// The in-process adapter transfers ownership of the typed message directly.
 pub fn direct(service: &dyn Endpoint, role: Role, req: Request) -> Result<Response> {
     service.dispatch(role, req)

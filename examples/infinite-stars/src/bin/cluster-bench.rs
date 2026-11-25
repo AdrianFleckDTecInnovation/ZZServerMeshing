@@ -257,6 +257,7 @@ impl Scene {
         path: impl Fn(usize, &Member) -> [i64; 3],
     ) -> Result<Value> {
         let mut s = Sample::default();
+        let before = self.pool.link_stats().0;
         for t in 1..=ticks {
             self.tick(&mut s, |m| path(t, m))?;
         }
@@ -279,7 +280,8 @@ impl Scene {
             "step_with_topology_ms":percentiles(&mut s.with_topology_ns),
             "phase_mean_ms":{"simulate_publish":mean_ms(s.simulate_publish_ns),
                 "delivery_ack":mean_ms(s.delivery_ns),"topology":topology_mean},
-            "frames":s.frames,"new_baselines":s.baselines,"first_worker_frames":s.observer,
+            "frames":s.frames,"component_projections":self.pool.link_stats().0-before,
+            "new_baselines":s.baselines,"first_worker_frames":s.observer,
             "foreign_home_frames":foreign_home_frames,"field_bytes":s.fields,"spatial_candidates":s.candidates}),
         )
     }

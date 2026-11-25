@@ -11,6 +11,7 @@
     "bench": "node scripts/local-mesh.mjs bench",
     "bench:quick": "node scripts/bench-quick.mjs",
     "bench:profile": "cargo run --release --locked -p infinite-stars --bin mesh-profile --",
+    "bench:cores": "node scripts/bench-cores.mjs",
     "bench:sockets": "node scripts/local-mesh.mjs bench --servers 16 --socket-players 10000",
     "bench:servers": "node scripts/compare-server-count.mjs",
     "bench:compare": "node scripts/compare-mesh.mjs",
