@@ -1,5 +1,7 @@
 # Leistungsprofil und Spielergrenze
 
+Die 10.000er-Reihe misst aktive und ruhende Spieler, parallele Referenzräume, durable Checkpoints und echte Socket-Empfänger. [Tickprofil mit Messkurven](tickprofil.md)
+
 Die Browser-Demo und das persistente Bevy-Spiel haben eigene Lastprofile. Die aktuellen Messungen für das Spiel mit Octree und separatem Authority-Dienst stehen im ersten Abschnitt. Der anschließende Vergleich der Browser-Demo beschreibt echte WebSocket-Verbindungen. [Betriebsmodell und Abnahme](produktionsabnahme.md)
 
 ## Octree und gerichtete Replikation

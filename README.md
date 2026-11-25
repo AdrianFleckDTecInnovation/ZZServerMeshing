@@ -1,5 +1,7 @@
 # ZZServerMeshing
 
+Run `npm run bench:profile -- --players 10000 --workers 32 --partitions 16 --ticks 40` to measure movement, checkpoints, spatial lookup and peer delivery on a common clock. Run `npm run bench:sockets -- --servers 8 --socket-drivers 8 --islands 5000 --seconds 10 --require-budget` for the 10,000-connection browser protocol test at 20 snapshots/s and five inputs/s per player. [Tickkosten, Grafiken und Abnahme](docs/tickprofil.md)
+
 Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)
 
 Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. The game library uses an integer 3D octree, directed component subscriptions and a fenced authority service for workers on separate machines. Run `npm run bench:quick` for WebSocket input latency and player density, or `npm run bench:distributed` for real TLS traffic with separate storage directories. [Deployment and acceptance](docs/produktionsabnahme.md) · [Infinite Stars guide](docs/infinite-stars.md) · [Performance graphs and results](docs/cluster-performance.md)

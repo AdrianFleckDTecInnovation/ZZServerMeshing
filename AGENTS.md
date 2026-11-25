@@ -13,6 +13,7 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | Compare one and three sim-servers with the same 300 moving clients and 300 NPCs | `npm run bench:servers` |
 | Compare the original browser demo with the working tree | `npm run bench:compare` |
 | Exercise player density, moving clusters and directed TLS traffic | `npm run bench:clusters` and `npm run bench:cluster-wire` |
+| Profile 10,000 session-bound Bevy players and test actual socket delivery | `npm run bench:profile -- --partitions 16 --ticks 40` and `npm run bench:sockets` |
 | Measure OS workers with separate credential directories and an mTLS authority service | `npm run bench:distributed` |
 
 Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal before using the same ports for another run. Each launch prints its own log directory under `target/`. See [the quick start](docs/quickstart.md) for endpoints, controls and individual commands.
