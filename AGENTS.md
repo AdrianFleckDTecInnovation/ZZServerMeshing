@@ -6,6 +6,7 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | --- | --- |
 | Install client and scenario dependencies from their lockfiles | `npm run setup` |
 | Start the coordinator, three sim-servers and Vite in the foreground | `npm start` |
+| Watch a live Bevy test with real octree islands and per-client receive rates | `npm run observe` |
 | Run Rust tests, TypeScript checks and the client production build | `npm test` |
 | Exercise input acknowledgements and peer replication on a fresh mesh | `npm run smoke` |
 | Measure release binaries with three clients and 3,000 NPCs | `npm run bench -- --servers 3 --npcs 3000 --seconds 15` |

@@ -4,6 +4,8 @@
   "scripts": {
     "setup": "npm --prefix client ci && npm --prefix tools ci",
     "start": "node scripts/local-mesh.mjs start",
+    "observe": "node scripts/observer/launch.mjs",
+    "test:observe": "cargo build --locked --release -p infinite-stars --example universe_monitor && node --test scripts/observer/observer.test.mjs",
     "stop": "node scripts/local-mesh.mjs stop",
     "smoke": "node scripts/local-mesh.mjs smoke",
     "bench": "node scripts/local-mesh.mjs bench",

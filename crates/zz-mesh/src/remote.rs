@@ -127,6 +127,13 @@ fn allowed(service: &Service, role: Role, t: Handoff) -> Result<()> {
     service.store.check_worker(service.worker)
 }
 impl WorkerEndpoint {
+    /// Inspect the directory on its host when it is idle. No requests or sampling
+    /// are scheduled by the mesh. Keep the callback short as it borrows the index.
+    pub fn try_inspect_directory<T>(&self, read: impl FnOnce(&crate::Directory) -> T) -> Option<T> {
+        let broker = self.broker.as_ref()?.try_lock().ok()?;
+        Some(read(&broker.index))
+    }
+
     fn bulk(&self, t: Handoff, c: &Command) -> Result<Option<Answer>> {
         let (m, source) = match c {
             Command::MakeDelta { next, .. } => (next, true),

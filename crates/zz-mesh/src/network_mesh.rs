@@ -74,7 +74,7 @@ type Edge = (Recipient, Id);
 pub struct Broker {
     here: Worker,
     db: Store,
-    index: Directory,
+    pub(crate) index: Directory,
     sources: BTreeMap<Edge, Worker>,
     pending: BTreeMap<Worker, BTreeMap<(Worker, Recipient, Id), Route>>,
     needs_snapshot: BTreeSet<Worker>,

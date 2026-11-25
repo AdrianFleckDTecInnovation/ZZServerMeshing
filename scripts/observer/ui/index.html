@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>Universumsansicht · Infinite Stars</title>
+    <link rel="stylesheet" href="/monitor.css" />
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="orbit" aria-hidden="true"></span>Infinite Stars</div>
+      <span class="product">Mesh-Monitor</span>
+      <div class="session">
+        <span id="status" class="status">Startet</span><span id="clock">00:00</span>
+      </div>
+      <button id="end" class="stop"><i aria-hidden="true"></i>Test beenden</button>
+    </header>
+    <main>
+      <div class="heading">
+        <div>
+          <h1>Universumsansicht</h1>
+          <p>Serverperspektive <b>·</b> Lokaler Bevy-Test</p>
+        </div>
+        <div class="phase">
+          <span class="phase-label">Testphase</span><strong id="phase">Startet</strong>
+          <div id="phaseSteps" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+      </div>
+      <section class="kpis" aria-label="Aktuelle Kennzahlen">
+        <article>
+          <div>Testspieler</div>
+          <strong id="playerCount">–</strong><small id="workerCount">Worker werden gestartet</small>
+        </article>
+        <article>
+          <div>Räumliche Cluster</div>
+          <strong id="clusterCount">–</strong><small>Physische Inseln im Octree</small>
+        </article>
+        <article>
+          <div><i class="mark server"></i>Server-Takt</div>
+          <strong><span id="serverHz">–</span><em>Hz</em></strong
+          ><small id="tickCost">Tickdauer wird gemessen</small>
+        </article>
+        <article>
+          <div><i class="mark client"></i>Client-Empfang</div>
+          <strong><span id="clientHz">–</span><em>Hz</em></strong
+          ><small id="slowest">Median der Testclients</small>
+        </article>
+      </section>
+      <div class="workspace">
+        <section class="card map-card">
+          <div class="card-title map-title">
+            <h2><span class="cross-icon" aria-hidden="true">⌖</span> Universumskarte</h2>
+            <div class="map-actions">
+              <label for="color">Farbe</label
+              ><select id="color" aria-label="Punkte färben nach">
+                <option value="worker">Server</option>
+                <option value="cluster">Cluster</option>
+                <option value="hz">Client-Hz</option>
+              </select>
+              <button
+                id="freeze"
+                class="icon-button"
+                aria-label="Ansicht anhalten"
+                title="Ansicht anhalten"
+              >
+                Ⅱ
+              </button>
+            </div>
+          </div>
+          <div class="map-shell">
+            <canvas
+              id="universe"
+              aria-label="Interaktive X/Z-Karte der autoritativen Spielerpositionen"
+              tabindex="0"
+            ></canvas>
+            <span class="plane">X / Z <span>·</span> Meter</span>
+            <div id="mapLegend" class="map-legend" hidden></div>
+            <div class="zoom">
+              <button id="zoomIn" aria-label="Vergrößern" title="Vergrößern">+</button
+              ><button id="zoomOut" aria-label="Verkleinern" title="Verkleinern">−</button
+              ><button id="fit" aria-label="Gesamte Karte einpassen" title="Gesamte Karte einpassen">
+                ⌖
+              </button>
+            </div>
+          </div>
+          <div class="map-foot">
+            <div class="layers">
+              <label><input type="checkbox" id="grid" checked />Raster</label
+              ><label><input type="checkbox" id="hulls" checked />Konturen</label
+              ><label><input type="checkbox" id="links" checked />Sichtlinien</label
+              ><label><input type="checkbox" id="trails" />Spuren</label>
+            </div>
+            <span id="tick">Tick –</span>
+          </div>
+        </section>
+        <aside class="card distribution">
+          <div class="card-title">
+            <h2>Verteilung</h2>
+            <span id="totalSide"></span>
+          </div>
+          <h3>Cluster &amp; Serveranteile <small>Spieler</small></h3>
+          <div id="clusters" class="cluster-list"></div>
+          <h3 class="worker-head">Serverprozesse</h3>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Instanz</th>
+                <th scope="col">Hz</th>
+                <th scope="col">Autoritativ</th>
+                <th scope="col">Replikas</th>
+              </tr>
+            </thead>
+            <tbody id="workers"></tbody>
+          </table>
+          <div class="replication">
+            <span>Gerichtete Replikationsrouten</span><strong id="peerLinks">–</strong>
+          </div>
+        </aside>
+      </div>
+      <div class="secondary">
+        <section class="card history-card">
+          <div class="card-title">
+            <h2>Tickverlauf</h2>
+            <span>Letzte 60 s</span>
+          </div>
+          <canvas
+            id="chart"
+            aria-label="Gemessene Server- und Clientraten der letzten 60 Sekunden"
+          ></canvas>
+          <div class="chart-key">
+            <span><i class="mark server"></i>Langsamster Server</span
+            ><span><i class="mark client"></i>Client-Median</span
+            ><span><i class="mark slow"></i>Langsamster Client</span>
+          </div>
+        </section>
+        <section class="card inspect">
+          <div class="card-title">
+            <h2>Spielerinspektor</h2>
+            <select id="player" aria-label="Spieler auswählen">
+              <option value="">Spieler wählen</option>
+            </select>
+          </div>
+          <div id="inspector" class="inspect-body">
+            Wähle einen Punkt auf der Karte oder einen Spieler aus der Liste.
+          </div>
+        </section>
+      </div>
+      <section class="card log">
+        <div class="card-title">
+          <h2>Topologieereignisse</h2>
+          <span id="peerFrames"></span>
+        </div>
+        <div id="events"></div>
+      </section>
+    </main>
+  </body>
+</html>
