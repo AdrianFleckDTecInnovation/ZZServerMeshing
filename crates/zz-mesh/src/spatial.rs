@@ -106,7 +106,9 @@ pub struct Directory {
     subs: BTreeMap<Id, BTreeMap<Recipient, Subscription>>,
     clock: u64,
     changes: BTreeMap<(Recipient, Id), InterestChange>,
+    area_recipients: BTreeMap<Recipient, usize>,
     pending: Option<BTreeMap<Id, bool>>,
+    initial_recipients: usize,
     reserved: usize,
     pub candidates: u64,
     limit: Option<usize>,
@@ -116,6 +118,7 @@ impl Directory {
     /// Re-evaluate each affected object once after all its observers have moved.
     pub(crate) fn batch(&mut self, edit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
         debug_assert!(self.pending.is_none());
+        self.initial_recipients = self.area_recipients.len();
         self.pending = Some(BTreeMap::new());
         let result = edit(self);
         self.flush_pending();
@@ -128,18 +131,25 @@ impl Directory {
         for (id, force) in ids {
             self.refresh_now(id, force);
         }
+        self.initial_recipients = self.area_recipients.len();
     }
     // A flush can change retained membership. The caller recomputes its operation
     // before applying it when a conservative reservation reaches the queue bound.
-    fn reserve(&mut self, cost: usize) -> Result<bool> {
+    fn reserve(&mut self, cost: usize, affected: usize, new_recipient: bool) -> Result<bool> {
         let limit = self.limit.unwrap_or(1_000_000);
-        if self
-            .changes
-            .len()
-            .saturating_add(self.reserved)
-            .saturating_add(cost)
-            > limit
-        {
+        let mut required = self.reserved.saturating_add(cost);
+        if let Some(pending) = &self.pending {
+            // An object can lose each original recipient and gain each final recipient
+            // at most once. Many overlapping areas of one worker share a single route.
+            let recipients =
+                self.initial_recipients + self.area_recipients.len() + usize::from(new_recipient);
+            let route_bound = pending
+                .len()
+                .saturating_add(affected)
+                .saturating_mul(recipients);
+            required = required.min(route_bound);
+        }
+        if self.changes.len().saturating_add(required) > limit {
             if self.reserved > 0 {
                 self.flush_pending();
                 return Ok(true);
@@ -147,7 +157,7 @@ impl Directory {
             return Err(Error::Busy("drain pending interest changes"));
         }
         if self.pending.is_some() {
-            self.reserved += cost;
+            self.reserved = required;
         }
         Ok(false)
     }
@@ -216,7 +226,11 @@ impl Directory {
                 touched.insert(object);
             }
         }
-        if self.reserve(touched.len().saturating_mul(2))? {
+        if self.reserve(
+            touched.len().saturating_mul(2),
+            touched.len(),
+            !self.area_recipients.contains_key(&a.to),
+        )? {
             return self.register_area(a);
         }
         // A newly assigned recipient must first enter the required range itself.
@@ -236,9 +250,16 @@ impl Directory {
     }
     fn index_area(&mut self, area: Area) {
         let id = area.id;
+        let to = area.to;
         let needed = area.needed();
         let retained = area.retained();
         let old = self.areas.insert(id, area);
+        if old.as_ref().map(|a| a.to) != Some(to) {
+            if let Some(previous) = &old {
+                self.remove_recipient_area(previous.to);
+            }
+            *self.area_recipients.entry(to).or_default() += 1;
+        }
         let old_retained = old.as_ref().map(Area::retained);
         self.area_faces
             .replace(old.as_ref().map(Area::needed), Some(needed));
@@ -250,8 +271,19 @@ impl Directory {
             self.area_index.insert(id, retained);
         }
     }
+    fn remove_recipient_area(&mut self, to: Recipient) {
+        let count = self
+            .area_recipients
+            .get_mut(&to)
+            .expect("indexed recipient");
+        *count -= 1;
+        if *count == 0 {
+            self.area_recipients.remove(&to);
+        }
+    }
     pub fn remove_area(&mut self, id: Id) {
         if let Some(a) = self.areas.remove(&id) {
+            self.remove_recipient_area(a.to);
             self.area_faces.replace(Some(a.needed()), None);
             self.area_faces.replace(Some(a.retained()), None);
             self.area_index.remove(id, a.retained());
@@ -283,6 +315,8 @@ impl Directory {
             candidates
                 .len()
                 .saturating_add(self.object_areas.get(&p.id).map_or(0, BTreeSet::len)),
+            1,
+            false,
         )? {
             return self.upsert(p);
         }
@@ -636,7 +670,8 @@ mod batch_tests {
     }
     #[test]
     fn dense_edits_reaggregate_each_object_once_and_keep_stable_epochs() {
-        let mut d = Directory::default();
+        // Area/object overlap pairs exceed 600 while all distinct routes fit comfortably.
+        let mut d = Directory::bounded(600);
         for (together, x) in [(false, 0), (true, 0), (true, 10000), (false, 10000)] {
             let before = d.candidates;
             d.batch(|d| {
