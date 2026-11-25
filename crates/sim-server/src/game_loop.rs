@@ -226,7 +226,7 @@ impl DemoWorker {
         world.init_resource::<OutboundCoordMessages>();
         world.init_resource::<EntityOwnership>();
 
-        // Spawn initial NPCs. Use a capped range (±800) so NPCs cluster near the
+        // Spawn initial NPCs. Use a capped range (±400) so NPCs cluster near the
         // origin where players spawn. With AoI filtering (500 unit radius), spreading
         // NPCs across the full WORLD_EXTENT (±5000) would leave <2% visible to any client.
         //

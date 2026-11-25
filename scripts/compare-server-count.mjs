@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform, release } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,16 +45,17 @@ for (const players of counts) {
         '--bin-dir', binDir], options));
       report.runs.push({ players, pair, ...data });
       report.workload_seconds = Number(((performance.now() - start) / 1000).toFixed(2));
-      writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
+      const staged = `${output}.${process.pid}.tmp`;
+      writeFileSync(staged, JSON.stringify(report, null, 2) + '\n');
+      renameSync(staged, output);
       const row = data.rows[0];
       if (!row) {
         console.log(`${players} players, ${servers} sim(s): ${data.stopped.reason}`);
         continue;
       }
-      const tick = Math.max(...row.server_metrics.map(m => m.tick_mean_ms));
-      const snapshots = Math.max(...row.server_metrics.map(m => m.snapshot_mean_ms));
-      console.log(`${players} players, ${servers} sim(s): ${row.echoed}/${row.planned} echoes, ` +
-        `${row.echo_ms.p95} ms input p95, ${snapshots}/${tick} ms mean snapshot/tick on slowest for each metric, ` +
+      const slowest = row.server_metrics.reduce((a, b) => a.tick_mean_ms >= b.tick_mean_ms ? a : b);
+      console.log(`${players} players, ${servers} sim(s): ${row.echoed} echoed, ${row.sent} sent, ${row.planned} planned, ` +
+        `${row.echo_ms.p95} ms input p95, mean snapshot/tick ${slowest.snapshot_mean_ms}/${slowest.tick_mean_ms} ms on slowest sim, ` +
         `${row.snapshot_MiB_s} MiB/s`);
     }
   }

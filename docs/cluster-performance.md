@@ -1,8 +1,40 @@
 # Leistungsprofil und Spielergrenze
 
-**384 gleichzeitig verbundene Spieler** erfüllten im lokalen Browser-Test auf Windows und Debian das gewählte Ziel. Alle 6.144 Eingabesequenzen erschienen im Snapshot des richtigen Spielers. Bei **512 Verbindungen** überschritt die Eingabelatenz auf beiden Systemen das Ziel. Für das persistente Bevy-Spiel zählt zusätzlich die Dichte. Dieselben **384 bewegten Spielfiguren auf acht Workern** brauchten über vier Inseln verteilt 21,6 / 42,3 ms p95 pro Schritt (Windows / Debian). Zusammen an einem Ort waren es 120,2 / 128,8 ms. Bei 20 Hz stehen 50 ms zur Verfügung.
+**Ein einzelner Sim-Server bediente 300 Spieler und 300 NPCs** im lokalen Windows-Vergleich. Mit drei Sim-Servern sank die mittlere Tickzeit des langsamsten Prozesses von 46,8 auf 15,5 ms. Bei **384 Spielern am selben Ort** schwankte die Eingabelatenz erheblich. Die erste Rampe erreichte ihr Ziel auf Windows und Debian. Im Windows-Festlastvergleich mit vier Decoder-Threads erreichten drei Server das Ziel in einem von drei Läufen. Für das persistente Bevy-Spiel zählt ebenfalls die Dichte. Dieselben **384 bewegten Spielfiguren auf acht Workern** brauchten über vier Inseln verteilt 21,6 / 42,3 ms p95 pro Schritt (Windows / Debian). Zusammen an einem Ort waren es 120,2 / 128,8 ms. Bei 20 Hz stehen 50 ms zur Verfügung.
 
 Das Repo eignet sich zur Integration in ein eigenes Bevy-0.15-Spiel und für einen Pilotbetrieb auf einem Host. `zz-mesh` verwaltet dauerhafte Objekt-IDs, Schreibzuständigkeit, räumliche Abonnements, private Komponenten, Übergaben und Wiederanlauf. Das Infinite-Stars-Beispiel implementiert unter anderem Inventar, Handel, Planeten und Voxel-Chunks. Die persistente Referenz verwendet eine gemeinsame lokale SQLite-WAL-Datei. Für eine öffentliche Welt über mehrere Hosts fehlen ein verteilter dauerhafter Speicher und ein Kapazitätsnachweis mit dem eigenen Gameplay, WAN und längerer Laufzeit. [Integration mit ausführbarem Beispiel](../crates/zz-mesh/README.md) · [Betriebsmodell](infinite-stars.md)
+
+## Ein oder drei Sim-Server für dieselbe Spielergruppe?
+
+Alle neuen Browser-Spieler starten am Ursprung. Der Benchmark bewegt sie in derselben Richtung und wechselt regelmäßig die Richtung. Bei 500 Einheiten Sichtweite bleiben alle Spieler füreinander sichtbar. Auch die 300 NPCs starten im Quadrat von −400 bis +400 auf beiden Bodenachsen. Ein Sim-Server und drei Sim-Server erhielten dieselbe Gesamtzahl an Spielern, NPCs, Eingaben und Decoder-Threads. Der Koordinator lief in beiden Varianten auf demselben Windows-Rechner. Die zufälligen NPC-Positionen variieren zwischen Starts. [Spieler-Spawn](../crates/sim-server/src/network.rs) · [NPC-Spawn](../crates/sim-server/src/game_loop.rs) · [Sichtradius](../crates/shared/src/spatial.rs)
+
+| Spieler | Sim-Server | Tick gesamt / davon Client-Snapshots | Langsamster Server / Client | Eingabe p95 | Empfangene Snapshot-Nutzlast | Läufe im Ziel |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 | 1 | 46,8 / 46,5 ms | 20,0 / 19,6 Hz | 92 ms | 157 MiB/s | 3 von 3 |
+| 300 | 3 | 15,5 / 14,9 ms | 19,8 / 19,7 Hz | 67 ms | 148 MiB/s | 3 von 3 |
+| 384 | 1 | 68,1 / 67,8 ms | 14,7 / 14,3 Hz | 123 ms | 170 MiB/s | 0 von 3 |
+| 384 | 3 | 22,6 / 22,1 ms | 20,0 / 19,7 Hz | 172 ms | 218 MiB/s | 1 von 3 |
+
+Nach 3,2 Sekunden Warmlauf mit bewegten Spielern schickte jeder Protokoll-Client 16 Eingaben im Abstand von 137 ms. Das Messziel verlangt alle 16 Echos, ein p95 bis 100 ms sowie mindestens 18 Ticks/s je Server und 18 empfangene Snapshots/s je Client. Die Clients dekodierten die regulären Browser-Frames ohne Rendering.
+
+Die Tabelle zeigt Mediane aus drei abwechselnden Vergleichspaaren je Spielerzahl. Die Tickzeiten sind Mittelwerte im exakten Messfenster des jeweils langsamsten Prozesses. Die gesamte gemessene Tickzeit endet am Metrikpunkt vor der Pflege der Liste übernehmbarer Spieler. Die Werte sind verstrichene Zeit. Der eigentliche Socketversand läuft asynchron. Die Client-Snapshotzeit umfasst Zustände sammeln, Sichtfilterung, Delta-Auswahl, Kodierung und Einreihen für den WebSocket-Versand. Das Eingabe-p95 misst die Zeit bis zum Echo im empfangenen Snapshot. Alle 4.800 bzw. 6.144 Eingaben erschienen in jedem der zwölf Läufe. In einem vorangestellten Kontrollpaar bei 300 Spielern lag das Eingabe-p95 bei 118 / 78 ms für einen / drei Server. [Einzelwerte und Kontrollläufe](benchmarks/browser-server-count-2026-11-25.json)
+
+![Tickzeit, Eingabelatenz, Bandbreite und Entity-Zustände mit einem und drei Sim-Servern](benchmarks/mesh-serververgleich.png)
+
+**Warum wächst die Bandbreite so schnell?** Im Ein-Server-Lauf mit 300 Spielern enthielt ein Snapshot im Median der Läufe 591 Entity-Zustände. Jeder kostet 47 Byte. Bei 20 Hz ergeben 300 Empfänger × 591 Zustände × 47 Byte × 20 rund **159 MiB/s** vor Headern. Gemessen waren es **157 MiB/s**. Alle empfangenen Frames waren in diesen drei Läufen vollständige Zustandslisten. Der Server wählt unter anderem dann einen vollständigen Snapshot, wenn sich über 80 % der sichtbaren Zustände geändert haben. Mit drei Prozessen waren **82 %** der empfangenen Frames vollständige Snapshots. Die Nutzlast betrug **148 MiB/s**. Die Aufteilung verschafft den Sim-Servern Zeit, während jeder Client weiterhin seine Nachbarn empfangen muss. Bei 384 Spielern lieferte ein Server weniger Daten pro Sekunde, weil sein Tick auf rund 15 Hz fiel. [Sichtfilter und Delta-Auswahl](../crates/sim-server/src/systems/snapshot.rs) · [47-Byte-Format](../crates/sim-server/src/encoding.rs)
+
+**Wie stark bremst der Lastgenerator?** Die vier Decoder-Threads verarbeiteten die Snapshots aller Clients auf dem Server-Rechner. Bei 384 Spielern auf drei Sim-Servern lag das Eingabe-p95 in den einzelnen Läufen bei 76, 259 und 172 ms. In den beiden langsamen Läufen wachten die 137-ms-Sendetimer um 208 bzw. 116 ms p95 zu spät auf. In einem Kontrolllauf mit acht Decoder-Threads lag die Eingabe bei 82 ms p95 und die Timer-Verspätung bei 6 ms. Bei 512 Spielern und acht Threads hielt ein Sim-Server im Mittel 9,2 Hz. Drei erreichten 19,5 Hz und 357 MiB/s Client-Nutzlast, die Lastgeneratoren setzten in ihrem Zeitfenster 5.952 von 8.192 geplanten Eingaben ab. 5.940 erschienen im Snapshot, mit 632 ms p95. Das einzelne Kontrollpaar belegt die Empfindlichkeit dieser Messung gegenüber der Clientlast. [Messfenster und alle Zähler](benchmarks/browser-server-count-2026-11-25.json)
+
+**Was bedeutet das für eine große Welt?** Für die Client-Ausgabe zählen Spieler × übertragene sichtbare Entities × Bytes pro Zustand × Sendefrequenz. Bleibt die lokale Nachbarschaft bei weiteren Inseln gleich groß, wächst diese Datenmenge ungefähr linear mit der Gesamtspielerzahl. Treffen sich alle bewegten Spieler an einem Ort und sehen einander, kann allein der Spieleranteil quadratisch wachsen. Der Nachweis zur Isolation weiter unten gilt für die persistente Bevy-Bibliothek. Die WebSocket-Vergleiche messen die Browser-Demo auf einem Rechner. Über weitere physische Server verteilte Simulation, separate Uplinks, Endgeräte und die Gameplay-Kosten des eigenen Spiels benötigen eine eigene Kapazitätsmessung.
+
+Eine Wiederholung der ursprünglichen Vier-Thread-Rampe mit schrittweise zugeschalteten Clients ergab bei 384 Spielern **71 ms p95**, bei 512 Spielern **1.663 ms p95** und 10,1 Snapshots/s am langsamsten Client. Die Festlastläufe starten jede Variante frisch und wärmen die gesamte Gruppe in Bewegung auf. Beide Verfahren und ihre Rohwerte stehen im selben Bericht.
+
+`npm run bench:servers` misst ein kurzes Vergleichspaar mit 300 Spielern und schreibt `target/server-count.json`. `MESH_BENCH_DRIVERS` bestimmt die Zahl der Decoder-Threads und steht standardmäßig auf vier. Die zwölf Starts der vollständigen Messreihe dauerten einschließlich Hochfahren und Aufwärmen 130 Sekunden, im Mittel 22 Sekunden je Vergleichspaar. Mit den folgenden Befehlen lassen sich die Tabelle prüfen und der Graph für die eigene Hardware erzeugen.
+
+```sh
+npm run bench:servers -- --players 300,384 --pairs 3
+python scripts/plot-mesh-profile.py --server-count target/server-count.json
+```
 
 ## Wie viele Spieler verkraftet die Browser-Demo?
 

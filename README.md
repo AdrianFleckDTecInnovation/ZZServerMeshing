@@ -4,6 +4,8 @@ Integrating the mesh into your own Bevy 0.15 game starts with a single crate and
 
 Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. Run `npm run bench:quick` to measure live WebSocket input latency, separated player islands and dense crowds on your hardware. The report graphs player capacity, merge and split costs, NPC and object scaling on Windows and Linux. [Infinite Stars guide](docs/infinite-stars.md) · [Performance graphs and results](docs/cluster-performance.md)
 
+`npm run bench:servers` compares one and three native sim-server processes with the same 300 players and 300 NPCs. It measures how much tick time each process spends preparing client snapshots and how many bytes the clients actually receive. [Single-server comparison](docs/cluster-performance.md#ein-oder-drei-sim-server-für-dieselbe-spielergruppe)
+
 ## Browser demo
 
 

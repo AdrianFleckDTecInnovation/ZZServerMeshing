@@ -4,6 +4,7 @@ import argparse
 import json
 from math import ceil
 from pathlib import Path
+from statistics import median
 
 import matplotlib
 
@@ -198,12 +199,59 @@ def draw_entities(data, out, selected):
     plt.close(fig)
 
 
+def draw_server_count(report, out):
+    fig, (ticks, echo, rate, full) = panels("Eine Spielergruppe auf einem oder drei Sim-Servern")
+    counts = sorted({run["players"] for run in report["runs"]})
+    for index, servers in enumerate([1, 3]):
+        name = f"{servers} Sim-Server"
+        color = BLUE if servers == 1 else TEAL
+        for group, count in enumerate(counts):
+            rows = [row for run in report["runs"] if run["players"] == count and run["servers"] == servers
+                    for row in run["rows"]]
+            if not rows:
+                continue
+            slowest = [max(r["server_metrics"], key=lambda m: m["tick_mean_ms"]) for r in rows]
+            values_by_axis = [
+                (ticks, [m["tick_mean_ms"] for m in slowest]),
+                (echo, [r["echo_ms"]["p95"] for r in rows if r["echo_ms"]["p95"] is not None]),
+                (rate, [r["snapshot_MiB_s"] for r in rows]),
+                (full, [r["received"]["records"] / r["received"]["frames"] for r in rows if r["received"]["frames"]]),
+            ]
+            x = group + (index - .5) * .38
+            for ax, values in values_by_axis:
+                if values:
+                    ax.bar(x, median(values), width=.34, color=color, label=name if group == 0 else None)
+                    ax.scatter([x] * len(values), values, color="white", edgecolor=color, linewidth=1.3, s=27, zorder=3)
+    for ax in (ticks, echo, rate, full):
+        ax.set_xticks(range(len(counts)), counts)
+        ax.set_ylim(bottom=0)
+    ticks.axhline(50, color=GREY, linestyle=":", label="20-Hz-Budget")
+    echo.axhline(100, color=GREY, linestyle=":", label="Messziel p95")
+    for ax in (ticks, echo, rate, full):
+        legend(ax)
+    xlabel = f"Gleichzeitige Spieler · {report['npcs']} NPCs"
+    label(ticks, "Tickzeit des langsamsten Sim-Servers", xlabel, "Mittelwert je Lauf (ms / Tick)")
+    label(echo, "Eingabe bis zum eigenen Sequenz-Echo", xlabel, "p95 je Lauf (ms)")
+    label(rate, "Empfangene Snapshot-Nutzlast aller Clients", xlabel, "MiB/s")
+    label(full, "Übertragene Entity-Zustände je Snapshot", xlabel, "Mittlere Anzahl · 47 Byte je Zustand")
+    fig.supxlabel("Balken zeigen den Median, Punkte die einzelnen Läufe.", fontsize=10, color=GREY)
+    fig.savefig(out / "mesh-serververgleich.png", dpi=155)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=ROOT / "docs/benchmarks/mesh-profile-2026-11-25.json")
-    parser.add_argument("--quick", type=Path, help="Replace this platform's spatial and input measurements")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--quick", type=Path, help="Replace this platform's spatial and input measurements")
+    mode.add_argument("--server-count", type=Path, help="Plot a bench:servers report")
     parser.add_argument("--output", type=Path, default=ROOT / "target/mesh-profile")
     args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.server_count:
+        draw_server_count(json.loads(args.server_count.read_bytes()), args.output)
+        print(args.output / "mesh-serververgleich.png")
+        raise SystemExit(0)
     data = json.loads(args.data.read_text(encoding="utf8"))
     system = "windows"
     if args.quick:
@@ -212,7 +260,6 @@ if __name__ == "__main__":
         if system not in SYSTEMS:
             parser.error("expected a Windows or Linux quick profile")
         data["quick"][system] = fresh
-    args.output.mkdir(parents=True, exist_ok=True)
     for draw in [draw_space, draw_latency, draw_entities]:
         draw(data, args.output, system)
     print(args.output)
