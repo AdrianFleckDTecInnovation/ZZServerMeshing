@@ -120,30 +120,32 @@ pub fn service(db: &Store, w: Worker) -> Arc<Service> {
 }
 pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
     let worker = db.start_worker(slot)?;
-    let mut app = world(db, worker);
-    if slot == 1 && matches!(db.owner(GROUP), Err(mesh::Error::Missing(_))) {
-        seed(&mut app)?;
+    if slot == 1 {
+        match db.owner(GROUP) {
+            Err(mesh::Error::Missing(_)) => {
+                // Persist the initial records, then use the same rebuild path as a restart.
+                seed(&mut world(db, worker))?;
+                db.owner(GROUP)?;
+            }
+            result => {
+                result?;
+            }
+        }
     }
+    let mut app = world(db, worker);
     for group in db.owned(slot)? {
-        db.recover(group, worker)?;
-        load_group(&mut app, db, group, worker)?;
+        mesh::restore_group(app.world_mut(), group)?;
     }
     Ok((worker, app))
 }
 pub fn load_group(app: &mut App, db: &Store, group: Id, w: Worker) -> mesh::Result<()> {
-    let snap = db.snapshot(group)?;
-    for m in &snap.required {
-        let p = app.world().resource::<Providers>().get(m.key.provider)?;
-        app.world_mut()
-            .resource_mut::<BlobCache>()
-            .fetch(m, p.as_ref())?;
-    }
-    let p = prepare_world(app.world_mut(), &snap)?;
     let owner = db.owner(group)?;
     if owner.worker != w {
         return Err(mesh::Error::Fenced);
     }
-    p.activate(app.world_mut(), db, owner)
+    db.snapshot(group)?
+        .prepare_with_data(app.world_mut())?
+        .activate(app.world_mut(), db, owner)
 }
 pub fn listen(
     dir: PathBuf,

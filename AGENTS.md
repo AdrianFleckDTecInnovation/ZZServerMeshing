@@ -16,7 +16,7 @@ Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal bef
 
 ## Infinite Stars
 
-`crates/zz-mesh` exposes the Bevy 0.15 library. `examples/infinite-stars` consumes its public API. Start the persistent example with `cargo run --locked -p infinite-stars`. Run `cargo test --locked -p zz-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [game integration guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
+`crates/zz-mesh` exposes the Bevy 0.15 library. Start with the [game integration guide](crates/zz-mesh/README.md) for a standalone consumer. `examples/infinite-stars` is the multiplayer reference game. Run `cargo run --locked -p infinite-stars` for its persistent demo and `cargo test --locked -p zz-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [operations guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
 
 ## Where to look
 

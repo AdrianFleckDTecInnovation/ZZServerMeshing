@@ -1,4 +1,12 @@
-//! Bevy 0.15 workers with spatial subscriptions and fenced durable actions.
+#![doc = include_str!("../README.md")]
+
+/// Imports for registering game components and running a persistent worker.
+pub mod prelude {
+    pub use crate::{
+        checkpoint_group, restore_group, ComponentCodec, Id, Managed, MeshApp, MeshPlugin,
+        MeshState, Replica, Rules, Simulated, Staged, Store, Visibility,
+    };
+}
 mod bevy_runtime;
 mod bulk;
 mod store;

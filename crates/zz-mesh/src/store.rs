@@ -12,6 +12,32 @@ use std::{
 #[derive(Clone, Resource)]
 pub struct Store(pub(crate) Arc<Mutex<Connection>>);
 
+const STORE_FORMAT: i64 = 1;
+
+fn has_current_format(c: &Connection) -> Result<bool> {
+    let marked = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='zz_mesh_format')",
+        [], |row| row.get::<_, bool>(0),
+    )?;
+    if !marked {
+        return Ok(false);
+    }
+    let version: Option<i64> = c
+        .query_row(
+            "SELECT version FROM zz_mesh_format WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match version {
+        Some(STORE_FORMAT) => Ok(true),
+        Some(other) => Err(invalid(format!(
+            "unsupported mesh store format {other}, expected {STORE_FORMAT}"
+        ))),
+        None => Err(invalid("mesh store format marker is empty")),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub group: Id,
@@ -125,10 +151,24 @@ pub(crate) fn snapshot(c: &Connection, g: Id) -> Result<Snapshot> {
     })
 }
 impl Store {
+    /// Open or initialize a persistent world. The first open of an unmarked v1
+    /// store records its format atomically, keeping existing IDs and revisions.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let c = Connection::open(path)?;
+        let mut c = Connection::open(path)?;
         c.busy_timeout(Duration::from_secs(5))?;
-        c.execute_batch(include_str!("schema.sql"))?;
+        c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+        if !has_current_format(&c)? {
+            let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !has_current_format(&tx)? {
+                tx.execute_batch(include_str!("schema.sql"))?;
+                tx.execute(
+                    "INSERT INTO zz_mesh_format(singleton,version) VALUES(1,?)",
+                    [STORE_FORMAT],
+                )?;
+            }
+            tx.commit()?;
+        }
+        c.execute_batch("PRAGMA journal_mode=WAL;")?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -141,6 +181,8 @@ impl Store {
         tx.commit()?;
         Ok(value)
     }
+    /// Start the next incarnation of a one-based slot, fencing its previous writer.
+    /// Call this once per worker process and reuse the returned identity.
     pub fn start_worker(&self, slot: u32) -> Result<Worker> {
         if slot == 0 {
             return Err(invalid("worker slots start at one"));

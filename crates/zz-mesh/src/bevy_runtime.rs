@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+/// Stable object ID and the group that moves with it between workers.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Managed {
     pub id: Id,
@@ -24,10 +25,13 @@ impl Default for Managed {
         Self { id, group: id }
     }
 }
+/// The authoritative copy. Filter game simulation systems with `With<Simulated>`.
 #[derive(Component)]
 pub struct Simulated;
+/// A subscribed view of an object simulated by another worker.
 #[derive(Component)]
 pub struct Replica;
+/// Imported data that has not yet received the simulation grant.
 #[derive(Component)]
 pub struct Staged;
 #[derive(Component)]
@@ -255,6 +259,26 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
     }
     Ok(())
 }
+
+/// Restore a group assigned to the local worker slot before starting simulation.
+/// Register its codecs, rebuild hooks and data providers first. A retry on an
+/// already active grant preserves live ECS changes. Opening a newer incarnation
+/// of the same slot fences the previous worker.
+pub fn restore_group(w: &mut World, group: Id) -> Result<Authority> {
+    let Node(db, worker) = w
+        .get_resource::<Node>()
+        .cloned()
+        .ok_or_else(|| invalid("restore_group requires MeshPlugin"))?;
+    let owner = db.recover(group, worker)?;
+    if w.resource::<MeshState>().authority(group) == Some(owner) {
+        crate::store::fence(&*db.lock()?, group, owner, true)?;
+        return Ok(owner);
+    }
+    let snapshot = db.snapshot(group)?;
+    snapshot.prepare_with_data(w)?.activate(w, &db, owner)?;
+    Ok(owner)
+}
+
 #[derive(Resource, Clone)]
 struct Node(Store, Worker);
 #[derive(Default)]
@@ -262,6 +286,8 @@ pub struct MeshPlugin {
     node: Option<Node>,
 }
 impl MeshPlugin {
+    /// Install after starting this worker, then register the game's component schemas.
+    /// Call [`restore_group`] for each previously owned group before the first tick.
     pub fn persistent(store: Store, worker: Worker) -> Self {
         Self {
             node: Some(Node(store, worker)),
@@ -673,13 +699,24 @@ pub fn capture(w: &World, id: Id, view: View) -> Result<Record> {
         .ok_or_else(|| Error::Missing(id.to_string()))?;
     let mut r = Record::new(id, m.group);
     r.revision = st.versions.get(&id).copied().unwrap_or(0);
-    for (schema, entry) in &w.resource::<Schemas>().entries {
+    r.fields = capture_fields(w, e, w.resource::<Schemas>(), view)?;
+    Ok(r)
+}
+
+fn capture_fields(
+    w: &World,
+    e: Entity,
+    schemas: &Schemas,
+    view: View,
+) -> Result<BTreeMap<u32, Field>> {
+    let mut fields = BTreeMap::new();
+    for (schema, entry) in &schemas.entries {
         if let Some(d) = entry.rules.detail(view) {
             if let Some(bytes) = (entry.capture)(w, e, d)? {
                 if bytes.len() > MAX_FIELD {
                     return Err(Error::Busy("component bytes"));
                 }
-                r.fields.insert(
+                fields.insert(
                     *schema,
                     Field {
                         version: entry.version,
@@ -689,7 +726,7 @@ pub fn capture(w: &World, id: Id, view: View) -> Result<Record> {
             }
         }
     }
-    Ok(r)
+    Ok(fields)
 }
 pub fn project_component(w: &World, id: Id, schema: u32, view: View) -> Result<Option<Field>> {
     let s = w.resource::<Schemas>();
@@ -853,8 +890,17 @@ fn flush(w: &mut World) {
         }
     }
 }
+struct PreparedMember {
+    entity: Entity,
+    revision: u64,
+    checkpoint: BTreeMap<u32, Field>,
+}
+
+/// Staged entities belong to the preparing world. Activate or discard them in that world.
+#[must_use = "activate or discard the prepared group in the same world"]
 pub struct Prepared {
-    entities: BTreeMap<Id, Entity>,
+    world: bevy_ecs::world::WorldId,
+    entities: BTreeMap<Id, PreparedMember>,
     pub(crate) manifest: Digest,
     group: Id,
     revision: u64,
@@ -865,23 +911,41 @@ impl Prepared {
         self.manifest
     }
     pub fn discard(self, w: &mut World) {
-        for (_, e) in self.entities {
-            w.despawn(e);
+        if self.world == w.id() {
+            for member in self.entities.into_values() {
+                w.despawn(member.entity);
+            }
         }
     }
     /// Activation verifies the durable owner and final revision again after the cutover.
     pub fn activate(self, w: &mut World, db: &Store, owner: Authority) -> Result<()> {
-        let valid = crate::store::fence(&*db.lock()?, self.group, owner, true)
-            .is_ok_and(|v| v == self.revision);
-        if !valid {
+        if self.world != w.id() {
+            return Err(invalid("use the world that prepared this group"));
+        }
+        let validation = db.lock().and_then(|conn| {
+            let rev = crate::store::fence(&conn, self.group, owner, true)?;
+            if rev != self.revision {
+                return Err(Error::Fenced);
+            }
+            Ok(())
+        });
+        if let Err(err) = validation {
             self.discard(w);
-            return Err(Error::Fenced);
+            return Err(err);
         }
         if let Some(Node(_, local)) = w.get_resource::<Node>() {
             if *local != owner.worker {
                 self.discard(w);
                 return Err(Error::Denied);
             }
+        }
+        if self
+            .entities
+            .values()
+            .any(|member| w.get::<Staged>(member.entity).is_none())
+        {
+            self.discard(w);
+            return Err(invalid("staged group member disappeared before activation"));
         }
         let previous: Vec<_> = w
             .query_filtered::<(Entity, &Managed), Without<Staged>>()
@@ -892,21 +956,19 @@ impl Prepared {
         for (e, m) in previous {
             let mut st = w.resource_mut::<MeshState>();
             st.mapped.remove(&e);
-            st.entities.remove(&m.id);
+            st.forget_view(m.id);
             st.pending.remove(&m.id);
             w.despawn(e);
         }
-        for (id, e) in self.entities {
-            let m = *w.get::<Managed>(e).unwrap();
-            let v = w.get::<ImportedRevision>(e).unwrap().0;
+        for (id, member) in self.entities {
+            let e = member.entity;
             w.entity_mut(e).remove::<Staged>().insert(Simulated);
             let mut st = w.resource_mut::<MeshState>();
             st.entities.insert(id, e);
-            st.versions.insert(id, v);
-            st.mapped.insert(e, m);
+            st.versions.insert(id, member.revision);
+            st.mapped.insert(e, Managed::new(id, self.group));
             st.dirty.insert(id);
-            let fields = capture(w, id, View::Checkpoint)?.fields;
-            w.resource_mut::<MeshState>().saved.insert(id, fields);
+            st.saved.insert(id, member.checkpoint);
         }
         w.resource_mut::<MeshState>()
             .pins
@@ -917,8 +979,19 @@ impl Prepared {
         Ok(())
     }
 }
-#[derive(Component)]
-struct ImportedRevision(u64);
+impl Snapshot {
+    /// Synchronously fetch and verify required provider data before staging a stored group.
+    /// For a live handoff, prefetch off the tick path and use [`prepare_world`].
+    pub fn prepare_with_data(&self, w: &mut World) -> Result<Prepared> {
+        for manifest in &self.required {
+            let provider = w.resource::<Providers>().get(manifest.key.provider)?;
+            w.resource_mut::<BlobCache>()
+                .fetch(manifest, provider.as_ref())?;
+        }
+        prepare_world(w, self)
+    }
+}
+
 pub fn prepare_world(w: &mut World, s: &Snapshot) -> Result<Prepared> {
     let mut pins = vec![];
     for required in &s.required {
@@ -948,22 +1021,23 @@ pub fn prepare_world(w: &mut World, s: &Snapshot) -> Result<Prepared> {
     map.retain(|_, e| w.get::<Managed>(*e).is_some_and(|m| m.group != s.group));
     for r in &s.records {
         if !r.deleted {
-            let e = w
-                .spawn((
-                    Managed::new(r.id, s.group),
-                    Staged,
-                    ImportedRevision(r.revision),
-                ))
-                .id();
+            let e = w.spawn((Managed::new(r.id, s.group), Staged)).id();
             map.insert(r.id, e);
-            entities.insert(r.id, e);
+            entities.insert(
+                r.id,
+                PreparedMember {
+                    entity: e,
+                    revision: r.revision,
+                    checkpoint: BTreeMap::new(),
+                },
+            );
         } else {
             map.remove(&r.id);
         }
     }
     let result = w.resource_scope(|w, schemas: Mut<Schemas>| -> Result<()> {
         for r in s.records.iter().filter(|r| !r.deleted) {
-            let e = entities[&r.id];
+            let e = entities[&r.id].entity;
             for (id, value) in &r.fields {
                 let entry = schemas
                     .entries
@@ -975,14 +1049,19 @@ pub fn prepare_world(w: &mut World, s: &Snapshot) -> Result<Prepared> {
                 (entry.import)(w, e, &value.bytes, &map)?;
             }
         }
-        for e in entities.values() {
+        for member in entities.values() {
             for f in &schemas.rebuild {
-                f(w, *e)?;
+                f(w, member.entity)?;
             }
+        }
+        // Game codecs can fail. Finish all fallible work while the source still owns the group.
+        for member in entities.values_mut() {
+            member.checkpoint = capture_fields(w, member.entity, &schemas, View::Checkpoint)?;
         }
         Ok(())
     });
     let prepared = Prepared {
+        world: w.id(),
         entities,
         manifest,
         group: s.group,

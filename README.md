@@ -1,6 +1,8 @@
-# Server Meshing Prototype
+# ZZServerMeshing
 
-The reusable Rust library and the standalone Infinite Stars game target Bevy 0.15. Run `cargo run -p infinite-stars` for a persistent two-worker handoff or `cargo run -p infinite-stars --example survey_probe` to try adding a new game type. Development, restart and benchmark commands are in the [Infinite Stars guide](docs/infinite-stars.md).
+Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)
+
+Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. The game guide covers separate processes, certificates, recovery and the wire format. The benchmark report includes independent player clusters, moving players, and cluster merges. [Infinite Stars guide](docs/infinite-stars.md) · [Cluster benchmarks](docs/cluster-performance.md)
 
 ## Browser demo
 

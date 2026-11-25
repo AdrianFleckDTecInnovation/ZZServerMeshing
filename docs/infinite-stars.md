@@ -1,5 +1,7 @@
 # Infinite Stars mit Bevy 0.15
 
+Für den Einstieg in ein eigenes Spiel gibt es ein kompaktes Beispiel mit einer persistenten Komponente. Dieser Leitfaden beschreibt anschließend den Betrieb mehrerer Worker und die Erweiterung um eigene Aktionen, Daten und Abonnements. [Spielintegration](../crates/zz-mesh/README.md) · [Ausführbarer Einstieg](../crates/zz-mesh/examples/persistent_game.rs) · [Clustermessungen](cluster-performance.md)
+
 `zz-mesh` ist eine Rust-Bibliothek für ein persistentes Spiel. Ein Worker besitzt eine Bevy-World. Eine Gruppe kann mehrere Entities enthalten. Ein Worker darf viele Gruppen in verschiedenen Regionen simulieren. Die eigenständige Beispiel-Crate implementiert Spieler, Inventare, Werkzeuge, Planeten, Chunks, zusammengesetzte Voxelobjekte, Abbau, Bau, Drop, Pickup und Handel. [Bibliothek](../crates/zz-mesh/src/lib.rs) · [Spiel-Plugin](../examples/infinite-stars/src/lib.rs)
 
 ## Starten
