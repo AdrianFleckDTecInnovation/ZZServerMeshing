@@ -175,6 +175,7 @@ impl Store {
             tx.commit()?;
         }
         c.execute_batch("PRAGMA journal_mode=WAL;")?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS draining_slots(slot INTEGER PRIMARY KEY)")?;
         Ok(Self(Arc::new(Backend::Local(Mutex::new(c)))))
     }
     /// Connect a trusted worker to the authoritative volume via mutually authenticated TLS.
@@ -200,6 +201,45 @@ impl Store {
     /// Cumulative TLS and payload counters for this worker's authority link, including reconnects.
     pub fn network_traffic(&self) -> Option<Arc<wire::Traffic>> {
         self.remote_connection().map(|c| c.traffic.clone())
+    }
+    /// Operator inventory of advertised current incarnations. The controller probes liveness over TLS.
+    pub fn advertised_workers(&self) -> Result<Vec<(Worker, std::net::SocketAddr, bool)>> {
+        let c = self.lock()?;
+        let mut q = c.prepare("SELECT w.slot,w.incarnation,a.address,d.slot IS NOT NULL FROM workers w JOIN addresses a ON a.slot=w.slot AND a.inc=w.incarnation LEFT JOIN draining_slots d ON d.slot=w.slot ORDER BY w.slot")?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                Worker {
+                    slot: r.get(0)?,
+                    incarnation: r.get(1)?,
+                },
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (w, a, draining) = row?;
+            result.push((
+                w,
+                a.parse().map_err(|_| invalid("stored worker address"))?,
+                draining,
+            ));
+        }
+        Ok(result)
+    }
+    /// Persistently exclude a slot from new ownership. Cancel inbound preparations
+    /// and release their frozen sources in the same transaction as the drain decision.
+    pub fn set_draining(&self, w: Worker, draining: bool) -> Result<()> {
+        self.write(|c| {
+            live(c, w)?;
+            if draining {
+                c.execute("INSERT OR IGNORE INTO draining_slots VALUES(?)", [w.slot])?;
+                let target = encode(&w)?;
+                c.execute("UPDATE units SET frozen=NULL WHERE frozen IN (SELECT ticket FROM handoffs WHERE target=? AND phase<3)", [&target])?;
+                c.execute("UPDATE handoffs SET phase=4 WHERE target=? AND phase<3", [&target])?;
+            } else { c.execute("DELETE FROM draining_slots WHERE slot=?", [w.slot])?; }
+            Ok(())
+        })
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         let Backend::Local(conn) = &*self.0 else {
@@ -376,6 +416,7 @@ impl Store {
         }
         self.write(|c| {
             live(c, w)?;
+            accepting(c, w)?;
             c.execute(
                 "INSERT INTO units(id,slot,inc,gen) VALUES(?,?,?,1)",
                 params![g, w.slot, w.incarnation],
@@ -790,6 +831,14 @@ fn check_reader(c: &Connection, group: Id, reader: Option<Worker>) -> Result<()>
         if authority(c, group)?.worker != w {
             return Err(Error::Denied);
         }
+    }
+    Ok(())
+}
+pub(crate) fn accepting(c: &Connection, w: Worker) -> Result<()> {
+    if c.prepare_cached("SELECT EXISTS(SELECT 1 FROM draining_slots WHERE slot=?)")?
+        .query_row([w.slot], |r| r.get::<_, bool>(0))?
+    {
+        return Err(Error::Busy("worker is draining"));
     }
     Ok(())
 }

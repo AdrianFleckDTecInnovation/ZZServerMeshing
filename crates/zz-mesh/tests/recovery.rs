@@ -190,3 +190,37 @@ fn concurrent_workers_open_one_new_world() {
     drop(db);
     std::fs::remove_file(path).unwrap();
 }
+#[test]
+fn draining_a_slot_aborts_inbound_frozen_work_and_persists_across_incarnations() {
+    use zz_mesh::*;
+    let db = Store::open(":memory:").unwrap();
+    let a = db.start_worker(1).unwrap();
+    let b = db.start_worker(2).unwrap();
+    let g = Id::new();
+    let owner = db.create_group(g, a).unwrap();
+    let ticket = Handoff {
+        id: Id::new(),
+        group: g,
+        source: owner,
+        target: b,
+    };
+    db.begin_handoff(ticket).unwrap();
+    db.freeze(ticket, 0, &[]).unwrap();
+    db.set_draining(b, true).unwrap();
+    assert_eq!(db.handoff_phase(ticket).unwrap(), Phase::Aborted);
+    assert!(db.switch(ticket).is_err());
+    assert_eq!(db.checkpoint(g, owner, 0, vec![]).unwrap(), 1);
+    let next = db.start_worker(2).unwrap();
+    let retry = Handoff {
+        id: Id::new(),
+        target: next,
+        ..ticket
+    };
+    assert!(matches!(db.begin_handoff(retry), Err(Error::Busy(_))));
+    assert!(matches!(
+        db.create_group(Id::new(), next),
+        Err(Error::Busy(_))
+    ));
+    db.set_draining(next, false).unwrap();
+    db.begin_handoff(retry).unwrap();
+}

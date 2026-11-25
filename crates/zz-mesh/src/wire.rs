@@ -53,6 +53,10 @@ pub enum Request {
     Join {
         public_key: Vec<u8>,
     },
+    Load {
+        group: Option<Id>,
+        required: Vec<Manifest>,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -88,6 +92,7 @@ pub enum Response {
         worker: Worker,
         certificate: Vec<u8>,
     },
+    Load(WorkerLoad),
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -103,7 +108,7 @@ pub struct Service {
 impl Endpoint for Service {
     fn dispatch(&self, role: Role, r: Request) -> Result<Response> {
         match r {
-            Request::Storage(_) | Request::Join { .. } => Err(Error::Denied),
+            Request::Storage(_) | Request::Join { .. } | Request::Load { .. } => Err(Error::Denied),
             Request::Sync { .. }
             | Request::Diagnostics
             | Request::Spatial(_)

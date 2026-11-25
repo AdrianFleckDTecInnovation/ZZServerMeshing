@@ -68,6 +68,7 @@ pub struct WorkerEndpoint {
     downloads: Arc<Mutex<Downloads>>,
 }
 pub struct WorkerLoop {
+    tick_us: u64,
     pub peers: Option<crate::network_mesh::PeerMesh>,
     service: Arc<Service>,
     rx: Receiver<Job>,
@@ -98,6 +99,7 @@ pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>
             downloads: downloads.clone(),
         }),
         WorkerLoop {
+            tick_us: 0,
             peers: None,
             service,
             rx,
@@ -245,6 +247,14 @@ impl Endpoint for WorkerEndpoint {
                 .map(Response::Routes);
         }
         match &request {
+            Request::Load { required, .. } => {
+                if role != Role::Operator {
+                    return Err(Error::Denied);
+                }
+                if required.len() > MAX_TARGETS {
+                    return Err(Error::Busy("placement probe manifests"));
+                }
+            }
             Request::Control(t, c) => {
                 allowed(&self.service, role, *t)?;
                 if let Some(a) = self.bulk(*t, c)? {
@@ -278,6 +288,9 @@ fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Snapshot> 
     Ok(snapshot)
 }
 impl WorkerLoop {
+    pub fn record_tick(&mut self, elapsed: Duration) {
+        self.tick_us = (self.tick_us * 7 + elapsed.as_micros() as u64) / 8;
+    }
     /// A bounded round-robin turn per logical session. One atomic request may finish
     /// after the soft deadline. Both its target count and its bytes have hard limits.
     pub fn pump(&mut self, w: &mut World, max: usize, time: Duration) {
@@ -339,6 +352,33 @@ impl WorkerLoop {
             }
             self.queued -= 1;
             let result = match req {
+                Request::Load { group, required } => {
+                    let cache = w.resource::<BlobCache>();
+                    let policy = w
+                        .get_resource::<BalancePolicy>()
+                        .copied()
+                        .unwrap_or_default();
+                    let hints = w.get_resource::<GroupTimings>();
+                    Ok(Response::Load(WorkerLoad {
+                        worker: self.service.worker,
+                        budget_us: policy.tick_budget_us,
+                        memory_bytes: policy.memory_bytes,
+                        tick_us: self
+                            .tick_us
+                            .max(hints.map_or(0, |h| h.0.values().copied().sum())),
+                        cache_bytes: cache.bytes() as u64,
+                        groups: w.resource::<MeshState>().owned_groups().count(),
+                        group_us: group.and_then(|g| hints?.0.get(&g).copied()),
+                        affinity: group
+                            .and_then(|g| Some(self.peers.as_ref()?.affinity(g)))
+                            .unwrap_or_default(),
+                        cached_required: required
+                            .iter()
+                            .filter(|m| cache.ready(m))
+                            .map(|m| m.length)
+                            .sum(),
+                    }))
+                }
                 Request::Sync { session, group } => match role {
                     Role::Player(id) => {
                         reconcile(w, session, id, group).map(|(revision, sequence, actor)| {

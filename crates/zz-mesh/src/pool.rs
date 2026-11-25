@@ -22,7 +22,7 @@ pub struct SpatialProfile {
 pub struct SpatialRule(pub fn(&World, Entity) -> Option<SpatialProfile>);
 #[derive(Resource, Default)]
 pub struct GroupTimings(pub BTreeMap<Id, u64>);
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Resource)]
 pub struct BalancePolicy {
     pub every: u64,
     pub dwell: u64,

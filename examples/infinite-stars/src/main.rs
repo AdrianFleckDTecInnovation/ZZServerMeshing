@@ -11,9 +11,10 @@ use zz_mesh::{
     wire::{Client, Request, Response},
     *,
 };
+mod supervisor;
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | abort DIR SLOT | status DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {
@@ -36,6 +37,19 @@ fn run() -> Result<()> {
     fs::create_dir_all(&dir)?;
     match mode.as_str() {
         "demo" => demo(&dir),
+        "balance" => {
+            let once = match args.next().as_deref() {
+                None => false,
+                Some("--once") => true,
+                _ => return Err(invalid("balance accepts --once")),
+            };
+            supervisor::balance(&dir, once)
+        }
+        "drain" => supervisor::drain(&dir, argument(args.next(), "worker slot")?),
+        "resume" => {
+            let db = Store::open(dir.join("world.sqlite"))?;
+            db.set_draining(db.worker(argument(args.next(), "worker slot")?)?, false)
+        }
         "authority" => deployment::serve(
             &dir,
             argument(args.next(), "authority listen address")?,
@@ -100,8 +114,11 @@ fn demo(dir: &Path) -> Result<()> {
     Ok(())
 }
 fn print_cost(cost: MigrationCost) {
+    print_group_cost(GROUP, cost);
+}
+fn print_group_cost(group: Id, cost: MigrationCost) {
     println!(
-        "Group {GROUP} on worker {}, generation {}. {} bulk bytes, preparation {:?}, pause {:?}.",
+        "Group {group} on worker {}, generation {}. {} bulk bytes, preparation {:?}, pause {:?}.",
         cost.authority.worker.slot,
         cost.authority.generation,
         cost.payload,
@@ -125,7 +142,7 @@ fn connect(dir: &Path, addr: SocketAddr, credential: &str) -> Result<Client> {
 fn control(dir: &Path) -> Result<Connection> {
     let c = Connection::open(dir.join("controller.sqlite"))?;
     c.busy_timeout(Duration::from_secs(5))?;
-    c.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS pending(slot INTEGER PRIMARY KEY, ticket BLOB NOT NULL)")?;
+    c.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS pending(slot INTEGER PRIMARY KEY, ticket BLOB NOT NULL); CREATE TABLE IF NOT EXISTS last_moves(unit BLOB PRIMARY KEY, tick INTEGER NOT NULL)")?;
     Ok(c)
 }
 fn forget(c: &Connection, t: Handoff) -> Result<()> {
@@ -137,13 +154,24 @@ fn forget(c: &Connection, t: Handoff) -> Result<()> {
 }
 fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Result<()> {
     let db = Store::open(dir.join("world.sqlite"))?;
-    let control = control(dir)?;
     let proposal = Handoff {
         id: Id::new(),
         group: GROUP,
         source: db.owner(GROUP)?,
         target: db.worker(slot)?,
     };
+    transfer(dir, &db, proposal, source, target, 16 << 20)
+}
+fn transfer(
+    dir: &Path,
+    db: &Store,
+    proposal: Handoff,
+    source: SocketAddr,
+    target: SocketAddr,
+    budget: usize,
+) -> Result<()> {
+    let mut control = control(dir)?;
+    let slot = proposal.target.slot;
     control.execute(
         "INSERT OR IGNORE INTO pending VALUES(?,?)",
         rusqlite::params![slot, encode(&proposal)?],
@@ -153,10 +181,13 @@ fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Res
             row.get(0)
         })?;
     let t: Handoff = decode(&bytes)?;
-    if matches!(db.handoff_phase(t), Ok(Phase::Switched)) && db.owner(GROUP)?.worker != t.target {
+    if t.group != proposal.group {
+        return Err(Error::Busy("another transfer uses the target slot"));
+    }
+    if matches!(db.handoff_phase(t), Ok(Phase::Switched)) && db.owner(t.group)?.worker != t.target {
         println!(
             "Transfer already committed. Current authority {:?}",
-            db.owner(GROUP)?
+            db.owner(t.group)?
         );
         forget(&control, t)?;
         return Ok(());
@@ -164,9 +195,16 @@ fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Res
     let key = controller_credential(dir, t);
     let mut from = connect(dir, source, &key)?;
     let mut to = connect(dir, target, &key)?;
-    let cost = zz_mesh::remote::migrate(&mut from, &mut to, t, 16 << 20)?;
-    print_cost(cost);
-    forget(&control, t)
+    let cost = zz_mesh::remote::migrate(&mut from, &mut to, t, budget)?;
+    print_group_cost(t.group, cost);
+    let tx = control.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO last_moves VALUES(?,?)",
+        rusqlite::params![t.group, supervisor::tick()?],
+    )?;
+    forget(&tx, t)?;
+    tx.commit()?;
+    Ok(())
 }
 fn abort(dir: &Path, slot: u32) -> Result<()> {
     let control = control(dir)?;

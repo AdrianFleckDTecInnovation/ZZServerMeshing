@@ -531,6 +531,11 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     run("migrate", &authority, &[&aa, &ba, "2"]);
     let before = db.owner(GROUP).unwrap();
     assert_eq!(before.worker.slot, 2);
+    fs::write(
+        second.join("capacity.json"),
+        r#"{"tick_budget_us":1,"memory_bytes":268435456}"#,
+    )
+    .unwrap();
     let (_replacement, newer) = start("worker", &second, &[&store_addr, any], "b2");
     let after = db.owner(GROUP).unwrap();
     assert!(
@@ -549,6 +554,27 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
         panic!("actor missing")
     };
     assert_eq!(r.get::<Inventory>(INVENTORY, 1).unwrap().0[&STONE], 7);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while db.owner(GROUP).unwrap().worker.slot == 2 {
+        assert!(
+            Instant::now() < deadline,
+            "eligible group never left overloaded worker"
+        );
+        run("balance", &authority, &["--once"]);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let on_first = db.owner(GROUP).unwrap().worker;
+    assert_eq!(on_first.slot, 1);
+    fs::remove_file(second.join("capacity.json")).unwrap();
+    let (_available, _) = start("worker", &second, &[&store_addr, any], "b3");
+    assert!(run("drain", &authority, &["1"]).contains("Slot 1 drained"));
+    assert_eq!(db.owner(GROUP).unwrap().worker.slot, 2);
+    assert!(matches!(
+        db.create_group(Id::new(), on_first),
+        Err(zz_mesh::Error::Busy(_))
+    ));
+    run("resume", &authority, &["1"]);
+    db.create_group(Id::new(), on_first).unwrap();
     for dir in [&first, &second, &player] {
         for file in ["world.sqlite", "issuer.pem", "operator.key", "store.key"] {
             assert!(!dir.join(file).exists());

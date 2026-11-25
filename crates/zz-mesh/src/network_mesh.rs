@@ -596,4 +596,26 @@ impl PeerMesh {
     pub fn counts(&self) -> (usize, u64, u64) {
         (self.views.len(), self.frames_out, self.frames_in)
     }
+    pub(crate) fn affinity(&self, group: Id) -> BTreeMap<Worker, u64> {
+        let mut totals = BTreeMap::new();
+        for (id, routes) in &self.own.subs {
+            if self
+                .own
+                .descriptions
+                .get(id)
+                .is_some_and(|d| d.group == group)
+            {
+                for (to, sub) in routes {
+                    if let Recipient::Worker(w) = to {
+                        *totals.entry(*w).or_default() += sub
+                            .components
+                            .values()
+                            .map(|d| 100 / u64::from(d.period))
+                            .sum::<u64>();
+                    }
+                }
+            }
+        }
+        totals
+    }
 }

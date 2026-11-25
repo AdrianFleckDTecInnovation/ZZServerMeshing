@@ -177,6 +177,28 @@ pub(crate) fn run_node(
     addr: std::net::SocketAddr,
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Limits {
+        tick_budget_us: u64,
+        memory_bytes: u64,
+    }
+    match fs::read(dir.join("capacity.json")) {
+        Ok(bytes) => {
+            let limits: Limits = serde_json::from_slice(&bytes)
+                .map_err(|e| invalid(format!("capacity.json: {e}")))?;
+            if limits.tick_budget_us == 0 || limits.memory_bytes == 0 {
+                return Err(invalid("capacity budgets must be positive"));
+            }
+            app.insert_resource(BalancePolicy {
+                tick_budget_us: limits.tick_budget_us,
+                memory_bytes: limits.memory_bytes,
+                ..Default::default()
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
+    }
     let player = digest(&fs::read(dir.join("player.der"))?);
     let distributed = dir.join("enrol.der").exists();
     let operator = if distributed {
@@ -240,6 +262,7 @@ pub(crate) fn run_node(
     let mut next = std::time::Instant::now();
     while !thread.is_finished() {
         if std::time::Instant::now() >= next {
+            let tick_start = std::time::Instant::now();
             app.update();
             if let Some(peers) = event_loop.peers.as_mut() {
                 if let Err(e) = peers.step(app.world_mut()) {
@@ -248,7 +271,8 @@ pub(crate) fn run_node(
                         .diagnose(e.to_string());
                 }
             }
-            next = std::time::Instant::now() + std::time::Duration::from_millis(50);
+            event_loop.record_tick(tick_start.elapsed());
+            next = tick_start + std::time::Duration::from_millis(50);
         }
         event_loop.pump(app.world_mut(), 16, std::time::Duration::from_millis(3));
         std::thread::sleep(std::time::Duration::from_millis(1));

@@ -1,4 +1,5 @@
 use crate::*;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
@@ -23,6 +24,20 @@ pub struct GroupLoad {
     /// Estimated communication cost saved each tick if colocated with this peer.
     pub affinity: BTreeMap<Worker, u64>,
     pub cached: BTreeMap<Worker, u64>,
+}
+/// On-demand metrics for a provisioning controller. Group hints are game-supplied
+/// microseconds. Affinity is derived from the worker's actual directed subscriptions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkerLoad {
+    pub worker: Worker,
+    pub tick_us: u64,
+    pub budget_us: u64,
+    pub memory_bytes: u64,
+    pub cache_bytes: u64,
+    pub groups: usize,
+    pub group_us: Option<u64>,
+    pub affinity: BTreeMap<Worker, u64>,
+    pub cached_required: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
@@ -73,9 +88,22 @@ pub fn place(
                     <= transfer_budget
                 && c.tick_us.saturating_add(group.cost_us) <= c.budget_us
         })
-        .min_by_key(|c| (score(c), c.worker));
+        .min_by(|a, b| {
+            let a_relative = u128::from(score(a)) * u128::from(b.budget_us);
+            let b_relative = u128::from(score(b)) * u128::from(a.budget_us);
+            a_relative
+                .cmp(&b_relative)
+                .then_with(|| a.worker.cmp(&b.worker))
+        });
     match best {
-        Some(c) if current.draining || score(c) < current.tick_us => Placement::Move(c.worker),
+        Some(c)
+            if current.draining
+                || current.used > current.memory
+                || u128::from(score(c)) * u128::from(current.budget_us)
+                    < u128::from(current.tick_us) * u128::from(c.budget_us) =>
+        {
+            Placement::Move(c.worker)
+        }
         _ => Placement::Overloaded,
     }
 }

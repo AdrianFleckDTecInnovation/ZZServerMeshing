@@ -59,7 +59,7 @@ impl Store {
         }
         self.write(|c|{if let Ok(p)=status(c,t){return if p==Phase::Aborted{Err(Error::Fenced)}else{Ok(())}}
             if t.source.worker==t.target{return Err(invalid("handoff to same worker"))}
-            fence(c,t.group,t.source,true)?;live(c,t.target)?;
+            fence(c,t.group,t.source,true)?;live(c,t.target)?;crate::store::accepting(c,t.target)?;
             c.execute("DELETE FROM handoffs WHERE unit=? AND phase>=3 AND ticket NOT IN (SELECT ticket FROM handoffs WHERE unit=? ORDER BY rowid DESC LIMIT 15)",params![t.group,t.group])?;
             c.execute("INSERT INTO handoffs(ticket,unit,source,target,phase) VALUES(?,?,?,?,0)",params![t.id,t.group,encode(&t.source)?,encode(&t.target)?])?;Ok(())})
     }
