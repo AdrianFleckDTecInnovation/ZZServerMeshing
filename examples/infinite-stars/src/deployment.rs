@@ -268,7 +268,7 @@ pub fn connect_worker(
     store_addr: SocketAddr,
 ) -> mesh::Result<(Store, Worker, Identity)> {
     let ca = fs::read(dir.join("ca.der"))?;
-    let mut join = Client::connect(store_addr, STORE_DNS, &ca, &identity(&dir, "enrol")?)?;
+    let mut join = Client::connect(store_addr, STORE_DNS, &ca, &identity(dir, "enrol")?)?;
     let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
     let Response::Joined {
         worker,

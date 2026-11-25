@@ -430,17 +430,12 @@ impl MeshApp for App {
 #[derive(Component)]
 struct AwaitingGrant;
 
-fn discover(
-    w: &mut World,
-    added: &mut QueryState<
-        (Entity, &Managed),
-        (
-            Or<(Added<Managed>, With<AwaitingGrant>)>,
-            Without<Replica>,
-            Without<Staged>,
-        ),
-    >,
-) {
+type Unclaimed = (
+    Or<(Added<Managed>, With<AwaitingGrant>)>,
+    Without<Replica>,
+    Without<Staged>,
+);
+fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>) {
     let fresh: Vec<_> = added.iter(w).map(|(e, m)| (e, *m)).collect();
     if fresh.is_empty() {
         return;

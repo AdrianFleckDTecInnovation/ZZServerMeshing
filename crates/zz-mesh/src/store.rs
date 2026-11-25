@@ -11,11 +11,12 @@ use std::{
 };
 
 #[derive(Clone, Resource)]
-pub struct Store(Arc<Backend>);
+pub struct Store(Backend);
 
+#[derive(Clone)]
 enum Backend {
-    Local(Mutex<Connection>),
-    Network(Remote),
+    Local(Arc<Mutex<Connection>>),
+    Network(Arc<Remote>),
 }
 
 const STORE_FORMAT: i64 = 1;
@@ -176,7 +177,7 @@ impl Store {
         }
         c.execute_batch("PRAGMA journal_mode=WAL;")?;
         c.execute_batch("CREATE TABLE IF NOT EXISTS draining_slots(slot INTEGER PRIMARY KEY)")?;
-        Ok(Self(Arc::new(Backend::Local(Mutex::new(c)))))
+        Ok(Self(Backend::Local(Arc::new(Mutex::new(c)))))
     }
     /// Connect a trusted worker to the authoritative volume via mutually authenticated TLS.
     pub fn connect(
@@ -185,7 +186,7 @@ impl Store {
         ca: Vec<u8>,
         credential: wire::Identity,
     ) -> Self {
-        Self(Arc::new(Backend::Network(Remote::new(
+        Self(Backend::Network(Arc::new(Remote::new(
             addr,
             server_name,
             ca,
@@ -193,7 +194,7 @@ impl Store {
         ))))
     }
     pub(crate) fn remote_connection(&self) -> Option<&Remote> {
-        match &*self.0 {
+        match &self.0 {
             Backend::Network(c) => Some(c),
             Backend::Local(_) => None,
         }
@@ -242,7 +243,7 @@ impl Store {
         })
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        let Backend::Local(conn) = &*self.0 else {
+        let Backend::Local(conn) = &self.0 else {
             return Err(invalid("operation requires the local authority store"));
         };
         conn.lock().map_err(|_| invalid("storage mutex poisoned"))
