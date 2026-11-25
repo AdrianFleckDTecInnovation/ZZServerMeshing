@@ -290,29 +290,38 @@ fn travel(a: [i64; 3], b: [i64; 3], t: usize) -> [i64; 3] {
 }
 
 // Same actors, writers, update rates and worker worlds. Only the positions change.
+fn compare_layout(players: usize, ticks: usize) -> Result<Value> {
+    let mut scene = Scene::new(4, players / 4, 8)?;
+    let separate = scene.segment("separated", ticks, |_, m| site(m.origin))?;
+    let merge_step = scene.segment("merge", 1, |_, _| site(0))?;
+    for _ in 1..6 {
+        scene.tick(&mut Sample::default(), |_| site(0))?;
+    }
+    let dense = scene.segment("dense", ticks, |_, _| site(0))?;
+    assert_eq!(separate["end_islands"], 4);
+    assert_eq!(dense["end_islands"], 1);
+    assert_eq!(separate["foreign_home_frames"], 0);
+    assert_eq!(separate["frames"], players * ticks);
+    assert_eq!(dense["frames"], 7 * players * ticks);
+    let split_step = scene.segment("split", 1, |_, m| site(m.origin))?;
+    assert_eq!(merge_step["end_islands"], 1);
+    assert_eq!(split_step["end_islands"], 4);
+    assert_eq!(merge_step["new_baselines"], 6 * players);
+    assert_eq!(split_step["new_baselines"], 0);
+    assert_eq!(split_step["frames"], players);
+    Ok(
+        json!({"players":players, "separate":separate, "dense":dense, "merge_step":merge_step, "split_step":split_step}),
+    )
+}
 fn compare_layouts(ticks: usize) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     for players in [16, 32, 64, 128, 256, 384, 512, 768, 1024] {
-        let mut scene = Scene::new(4, players / 4, 8)?;
-        let separate = scene.segment("separated", ticks, |_, m| site(m.origin))?;
-        let merge_step = scene.segment("merge", 1, |_, _| site(0))?;
-        for _ in 1..6 {
-            scene.tick(&mut Sample::default(), |_| site(0))?;
-        }
-        let dense = scene.segment("dense", ticks, |_, _| site(0))?;
-        assert_eq!(separate["end_islands"], 4);
-        assert_eq!(dense["end_islands"], 1);
-        assert_eq!(separate["foreign_home_frames"], 0);
-        assert_eq!(separate["frames"], players * ticks);
-        assert_eq!(dense["frames"], 7 * players * ticks);
-        let over_budget = dense["step_with_topology_ms"]["p95"].as_f64().unwrap() >= 50.0;
-        let split_step = scene.segment("split", 1, |_, m| site(m.origin))?;
-        assert_eq!(merge_step["end_islands"], 1);
-        assert_eq!(split_step["end_islands"], 4);
-        assert_eq!(merge_step["new_baselines"], 6 * players);
-        assert_eq!(split_step["new_baselines"], 0);
-        assert_eq!(split_step["frames"], players);
-        rows.push(json!({"players":players, "separate":separate, "dense":dense, "merge_step":merge_step, "split_step":split_step}));
+        let row = compare_layout(players, ticks)?;
+        let over_budget = row["dense"]["step_with_topology_ms"]["p95"]
+            .as_f64()
+            .unwrap()
+            >= 50.0;
+        rows.push(row);
         if players >= 256 && over_budget {
             break;
         }
@@ -328,7 +337,21 @@ fn run() -> Result<()> {
     let quick = match args.next() {
         None => false,
         Some(arg) if arg == "--quick" => true,
-        _ => return Err(invalid("expected an optional --quick")),
+        Some(arg) if arg == "--crowd" => {
+            let players: usize = args
+                .next()
+                .and_then(|n| n.to_str()?.parse().ok())
+                .filter(|n| (8..=1024).contains(n) && n % 4 == 0)
+                .ok_or_else(|| invalid("--crowd needs 8..=1024 players, divisible by four"))?;
+            if args.next().is_some() {
+                return Err(invalid("unexpected benchmark argument"));
+            }
+            return write_report(
+                path,
+                &json!({"version":2,"os":std::env::consts::OS,"matched_layouts":[compare_layout(players,32)?]}),
+            );
+        }
+        _ => return Err(invalid("expected --quick or --crowd PLAYERS")),
     };
     if args.next().is_some() {
         return Err(invalid("unexpected benchmark argument"));
@@ -448,6 +471,9 @@ fn run() -> Result<()> {
         }
         report["island_scaling"] = json!(rows);
     }
+    write_report(path, &report)
+}
+fn write_report(path: std::ffi::OsString, report: &Value) -> Result<()> {
     std::fs::write(
         path,
         serde_json::to_vec_pretty(&report).map_err(|e| invalid(e.to_string()))?,
