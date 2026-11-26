@@ -14,12 +14,14 @@ const { values } = parseArgs({
     runs: { type: 'string', default: '2' },
     output: { type: 'string', default: 'target/core-scaling.json' },
     native: { type: 'boolean' },
+    mode: { type: 'string', default: 'strong' },
+    'cpu-budget': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
 if (values.help) {
   console.log(
-    'npm run bench:cores -- [--players 10000] [--workers 32] [--ticks 32] [--runs 2] [--native] [--output target/core-scaling.json]',
+    'npm run bench:cores -- [--mode strong|weak] [--players 10000] [--workers 32] [--cpu-budget 8] [--ticks 32] [--runs 2] [--native] [--output target/core-scaling.json]',
   );
   process.exit(0);
 }
@@ -34,13 +36,16 @@ const players = integer('players', 16, 65536),
   runs = integer('runs', 1, 10);
 if (players % 16) throw Error('--players muss durch die Inselgröße 16 teilbar sein');
 const logical = availableParallelism();
-const automatic = 2 ** Math.floor(Math.log2(Math.min(logical, players / 16, 128)));
+const budget = values['cpu-budget'] === undefined ? logical : integer('cpu-budget', 1, logical);
+const weak = values.mode === 'weak';
+if (!weak && values.mode !== 'strong') throw Error('--mode expects strong or weak');
+const automatic = 2 ** Math.floor(Math.log2(Math.min(budget, players / 16, 128)));
 const workers = values.workers === undefined ? 2 * automatic : integer('workers', 2, 256);
 if (workers % 2) throw Error('--workers muss gerade sein');
 const partitions = Array.from(
   { length: Math.min(workers / 2, players / 16) },
   (_, i) => i + 1,
-).filter((n) => workers % (2 * n) === 0 && (values.workers !== undefined || n <= logical));
+).filter((n) => workers % (2 * n) === 0 && n <= budget && (!weak || players*n<=65536));
 const env = { ...process.env };
 if (values.native) {
   if (env.CARGO_ENCODED_RUSTFLAGS !== undefined) {
@@ -79,12 +84,14 @@ for (let r = 0; r < runs; r++) {
   for (const threads of r % 2 ? [...partitions].reverse() : partitions) {
     const args = [
       '--players',
-      players,
+      weak ? players * threads : players,
       '--island-size',
       16,
       '--workers',
-      workers,
+      weak ? 2 * threads : workers,
       '--partitions',
+      threads,
+      '--cpu-budget',
       threads,
       '--ticks',
       ticks,
@@ -94,10 +101,13 @@ for (let r = 0; r < runs; r++) {
     samples.push({
       run: r + 1,
       threads,
+      players: data.players, workers: data.workers,
       p50_ms: data.tick_ms.p50,
       p95_ms: data.tick_ms.p95,
+      p99_ms: data.tick_ms.p99,
       max_ms: data.tick_ms.max,
       over_50ms: data.ticks_over_50ms,
+      barrier_and_validation_p95_ms: data.barrier_and_checks_ms?.p95 ?? 0,
       cpu_ms_per_tick: profiles.reduce((n, p) => n + p.worker_cpu_ms_per_tick, 0),
       allocations_per_tick: profiles.reduce(
         (n, p) => n + Object.values(p.stages).reduce((s, x) => s + x.rust_allocations_per_tick, 0),
@@ -113,14 +123,22 @@ const summary = partitions.map((threads) => {
   const set = samples.filter((s) => s.threads === threads);
   return {
     threads,
+    players: set[0].players, workers: set[0].workers,
     p50_ms: median(set.map((s) => s.p50_ms)),
     p95_ms: median(set.map((s) => s.p95_ms)),
+    p99_ms: median(set.map((s) => s.p99_ms)),
     worst_run_p95_ms: Math.max(...set.map((s) => s.p95_ms)),
     max_ms: Math.max(...set.map((s) => s.max_ms)),
     over_50ms: set.reduce((n, s) => n + s.over_50ms, 0),
     cpu_ms_per_tick: median(set.map((s) => s.cpu_ms_per_tick)),
+    barrier_and_validation_p95_ms: median(set.map(s=>s.barrier_and_validation_p95_ms)),
   };
 });
+for (const row of summary) {
+  row.player_ticks_per_second = row.players * 1000 / row.p50_ms;
+  row.speedup = row.player_ticks_per_second / summary[0].player_ticks_per_second;
+  row.efficiency = row.speedup / row.threads;
+}
 const lscpu =
   platform() === 'linux'
     ? spawnSync('lscpu', ['--json'], { ...opts, env: { ...env, LC_ALL: 'C' } })
@@ -146,6 +164,7 @@ const report = {
   cpu: cpus()[0]?.model,
   os: `${platform()} ${release()}`,
   logical_cpus_available: logical,
+  cpu_budget: budget, scaling: values.mode,
   topology,
   rustc: execFileSync('rustc', ['-V'], opts).trim(),
   target_cpu_native: Boolean(values.native),

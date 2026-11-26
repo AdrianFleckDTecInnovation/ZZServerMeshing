@@ -24,15 +24,15 @@ struct LocalStore {
     connection: Mutex<Connection>,
     writer: Option<checkpoint_writer::Writer>,
 }
-const STORE_FORMAT: i64 = 1;
+const STORE_FORMAT: i64 = 2;
 
-fn has_current_format(c: &Connection) -> Result<bool> {
+fn store_format(c: &Connection) -> Result<i64> {
     let marked = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='zz_mesh_format')",
         [], |row| row.get::<_, bool>(0),
     )?;
     if !marked {
-        return Ok(false);
+        return Ok(0);
     }
     let version: Option<i64> = c
         .query_row(
@@ -42,11 +42,62 @@ fn has_current_format(c: &Connection) -> Result<bool> {
         )
         .optional()?;
     match version {
-        Some(STORE_FORMAT) => Ok(true),
+        Some(version @ (1 | STORE_FORMAT)) => Ok(version),
         Some(other) => Err(invalid(format!(
             "unsupported mesh store format {other}, expected {STORE_FORMAT}"
         ))),
         None => Err(invalid("mesh store format marker is empty")),
+    }
+}
+
+const RECORD_TAG: &[u8; 5] = b"ZZCP\x01";
+pub(crate) fn checkpoint_body(record: &Record) -> Result<Vec<u8>> {
+    let mut body = encode(record)?;
+    let checksum = digest(&body);
+    body.extend_from_slice(&checksum.0);
+    body.extend_from_slice(RECORD_TAG);
+    Ok(body)
+}
+
+fn read_checkpoint(body: &[u8]) -> Result<Record> {
+    let framed = body
+        .strip_suffix(RECORD_TAG)
+        .ok_or_else(|| invalid("unsupported checkpoint record format"))?;
+    let end = framed
+        .len()
+        .checked_sub(32)
+        .ok_or_else(|| invalid("truncated checkpoint record"))?;
+    let (payload, expected) = framed.split_at(end);
+    if digest(payload).0.as_slice() != expected {
+        return Err(invalid("checkpoint checksum mismatch"));
+    }
+    decode(payload)
+}
+
+// The transaction upgrades one bounded page at a time, including an interrupted handoff.
+fn upgrade_checkpoint_rows(db: &Connection, table: &str) -> Result<()> {
+    let mut page = db.prepare(&format!(
+        "SELECT rowid,body FROM {table} WHERE rowid>? ORDER BY rowid LIMIT 32"
+    ))?;
+    let mut save = db.prepare(&format!("UPDATE {table} SET body=? WHERE rowid=?"))?;
+    let mut after = 0i64;
+    loop {
+        let rows = page
+            .query_map([after], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for (key, body) in rows {
+            after = key;
+            // An unmarked, already framed database may have been restored from an older tool.
+            if read_checkpoint(&body).is_ok() {
+                continue;
+            }
+            save.execute(params![checkpoint_body(&decode(&body)?)?, key])?;
+        }
     }
 }
 
@@ -130,7 +181,7 @@ fn record(c: &Connection, id: Id) -> Result<Option<Record>> {
         .prepare_cached("SELECT body FROM documents WHERE id=?")?
         .query_row([id], |r| r.get(0))
         .optional()?;
-    raw.map(|b| decode(&b)).transpose()
+    raw.map(|b| read_checkpoint(&b)).transpose()
 }
 pub(crate) fn snapshot(c: &Connection, g: Id) -> Result<Snapshot> {
     let (revision, prog): (u64, Option<Vec<u8>>) =
@@ -140,7 +191,7 @@ pub(crate) fn snapshot(c: &Connection, g: Id) -> Result<Snapshot> {
     let mut q = c.prepare("SELECT body FROM documents WHERE unit=? ORDER BY id")?;
     let mut records = Vec::new();
     for raw in q.query_map([g], |r| r.get::<_, Vec<u8>>(0))? {
-        records.push(decode(&raw?)?);
+        records.push(read_checkpoint(&raw?)?);
     }
     let mut q=c.prepare("SELECT key,manifest FROM requirements WHERE unit=?1 UNION SELECT key,manifest FROM member_data WHERE unit=?1 ORDER BY key")?;
     let mut required = Vec::new();
@@ -163,25 +214,27 @@ pub(crate) fn snapshot(c: &Connection, g: Id) -> Result<Snapshot> {
     })
 }
 impl Store {
-    /// Open or initialize a persistent world. The first open of an unmarked v1
-    /// store records its format atomically, keeping existing IDs and revisions.
+    /// Open a persistent world and atomically upgrade v1 records to checksummed v2 storage.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let mut c = Connection::open(path)?;
         c.busy_timeout(Duration::from_secs(5))?;
         c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
-        if !has_current_format(&c)? {
+        if store_format(&c)? != STORE_FORMAT {
             let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if !has_current_format(&tx)? {
-                tx.execute_batch(include_str!("schema.sql"))?;
-                tx.execute(
-                    "INSERT INTO zz_mesh_format(singleton,version) VALUES(1,?)",
-                    [STORE_FORMAT],
-                )?;
+            let version = store_format(&tx)?;
+            if version != STORE_FORMAT {
+                if version == 0 {
+                    tx.execute_batch(include_str!("schema.sql"))?;
+                }
+                upgrade_checkpoint_rows(&tx, "documents")?;
+                upgrade_checkpoint_rows(&tx, "handoff_checkpoints")?;
+                tx.execute("INSERT INTO zz_mesh_format(singleton,version) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version",[STORE_FORMAT])?;
             }
             tx.commit()?;
         }
         c.execute_batch("PRAGMA journal_mode=WAL;")?;
         c.execute_batch("CREATE TABLE IF NOT EXISTS draining_slots(slot INTEGER PRIMARY KEY)")?;
+        c.execute_batch(include_str!("control_schema.sql"))?;
         let writer = c
             .path()
             .filter(|p| !p.is_empty())
@@ -255,6 +308,25 @@ impl Store {
             Ok(())
         })
     }
+    pub(crate) fn drain_status(&self, w: Worker) -> Result<(bool, usize)> {
+        if let Some(remote) = self.remote_connection() {
+            return remote.call(Op::DrainStatus(w));
+        }
+        let db = self.lock()?;
+        db.query_row("SELECT EXISTS(SELECT 1 FROM draining_slots WHERE slot=?1),(SELECT count(*) FROM units WHERE slot=?1) FROM workers WHERE slot=?1 AND incarnation=?2",params![w.slot,w.incarnation],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Fenced)
+    }
+    /// Fence a drained incarnation atomically before closing its listener.
+    pub(crate) fn retire(&self, w: Worker) -> Result<()> {
+        if let Some(remote) = self.remote_connection() {
+            return remote.call(Op::Retire(w));
+        }
+        self.write(|c|{
+            live(c,w)?;
+            let updated=c.execute("UPDATE workers SET incarnation=incarnation+1 WHERE slot=?1 AND incarnation=?2 AND EXISTS(SELECT 1 FROM draining_slots WHERE slot=?1) AND NOT EXISTS(SELECT 1 FROM units WHERE slot=?1)",params![w.slot,w.incarnation])?;
+            if updated!=1{return Err(Error::Busy("drain all assigned groups before shutdown"));}
+            Ok(())
+        })
+    }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         let Backend::Local(conn) = &self.0 else {
             return Err(invalid("operation requires the local authority store"));
@@ -322,7 +394,7 @@ impl Store {
         Ok(states)
     }
     /// Resolve object identities and owners against one consistent authority snapshot.
-    pub(crate) fn authorities(&self, ids: &[Id]) -> Result<BTreeMap<Id, (Id, Authority)>> {
+    pub fn authorities(&self, ids: &[Id]) -> Result<BTreeMap<Id, (Id, Authority)>> {
         if ids.len() > MAX_TARGETS {
             return Err(Error::Busy("authority batch"));
         }
@@ -586,7 +658,7 @@ impl Store {
             let mut q =
                 tx.prepare("SELECT body FROM documents WHERE unit=? AND rev>? ORDER BY id")?;
             for row in q.query_map(params![g, base], |r| r.get::<_, Vec<u8>>(0))? {
-                rows.push(decode(&row?)?);
+                rows.push(read_checkpoint(&row?)?);
             }
         }
         {
@@ -726,7 +798,7 @@ impl Store {
             r.revision = to.2 + 1;
             c.execute(
                 "UPDATE documents SET unit=?,rev=?,body=? WHERE id=?",
-                params![r.group, r.revision, encode(&r)?, id],
+                params![r.group, r.revision, checkpoint_body(&r)?, id],
             )?;
             c.execute("UPDATE names SET unit=? WHERE id=?", params![r.group, id])?;
             c.execute(
@@ -908,13 +980,56 @@ impl Store {
         if batch.len() > MAX_BATCH || encode(&batch)?.len() > MAX_FRAME {
             return Err(Error::Busy("action batch"));
         }
-        self.write(|c| {
-            let mut replies = Vec::with_capacity(batch.len());
-            for intent in batch {
-                replies.push(decide(c, registry, principal, writer, now, intent)?);
+        let mut plans: Vec<Option<ActionPlan>> = (0..batch.len()).map(|_| None).collect();
+        for _ in 0..(batch.len() * 3 + 1) {
+            // A conflict may concern a record written by an earlier intent in
+            // this same batch. Capture that provisional value before rollback.
+            let (index, input) = {
+                let mut connection = self.lock()?;
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut replies = Vec::with_capacity(batch.len());
+                let mut prepare = None;
+                for (index, intent) in batch.iter().enumerate() {
+                    match decide(&tx, principal, writer, intent, plans[index].as_ref())? {
+                        Decision::Reply(reply) => replies.push(reply),
+                        Decision::Prepare(input) => {
+                            prepare = Some((index, input));
+                            break;
+                        }
+                    }
+                }
+                if let Some(work) = prepare {
+                    work
+                } else {
+                    tx.commit()?;
+                    return Ok(replies);
+                }
+            };
+            let mut overlay = input;
+            for (offset, intent) in batch[index..].iter().enumerate() {
+                if offset > 0 {
+                    // Speculate only for intents of the already verified session,
+                    // primary group and the next contiguous sequence numbers.
+                    if plans[index + offset].is_some()
+                        || intent.group != batch[index].group
+                        || intent.key.session != batch[index].key.session
+                        || Some(intent.key.seq) != batch[index].key.seq.checked_add(offset as u64)
+                    {
+                        break;
+                    }
+                }
+                let plan = prepare_action(self, registry, principal, now, intent, &overlay)?;
+                if plan.result.is_ok() {
+                    for (&id, r) in &plan.changes {
+                        overlay.insert(id, Some(r.clone()));
+                    }
+                }
+                plans[index + offset] = Some(plan);
             }
-            Ok(replies)
-        })
+        }
+        Err(Error::Busy(
+            "action inputs changed during preparation; retry batch",
+        ))
     }
 }
 fn check_reader(c: &Connection, group: Id, reader: Option<Worker>) -> Result<()> {
@@ -986,7 +1101,7 @@ fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
         }
         let updated = c.prepare_cached(
             "UPDATE documents SET rev=?,deleted=?,body=? WHERE id=? AND unit=? AND rev=? AND deleted=0"
-        )?.execute(params![rev, r.deleted, encode(&r)?, r.id, r.group, expected])?;
+        )?.execute(params![rev, r.deleted, checkpoint_body(&r)?, r.id, r.group, expected])?;
         if updated != 1 {
             return Err(Error::Fenced);
         }
@@ -1025,7 +1140,7 @@ fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
         r.fields.clear()
     }
     c.prepare_cached("INSERT INTO documents VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET rev=excluded.rev,deleted=excluded.deleted,body=excluded.body")?.execute(
-        params![r.id,r.group,rev,r.deleted,encode(&r)?])?;
+        params![r.id,r.group,rev,r.deleted,checkpoint_body(&r)?])?;
     Ok(())
 }
 
@@ -1057,7 +1172,9 @@ impl Actions {
 }
 /// Restricted transaction overlay. Reads see earlier edits in the same action.
 pub struct Edit<'a> {
-    c: &'a Connection,
+    store: &'a Store,
+    base: &'a ReadSet,
+    reads: std::cell::RefCell<ReadSet>,
     pub actor: Id,
     pub now: u64,
     pub group: Id,
@@ -1067,12 +1184,23 @@ pub struct Edit<'a> {
 }
 impl Edit<'_> {
     pub fn read(&self, id: Id) -> Result<Record> {
-        self.changes
-            .get(&id)
-            .cloned()
-            .map(Some)
-            .map(Ok)
-            .unwrap_or_else(|| record(self.c, id))?
+        let value = if let Some(r) = self.changes.get(&id) {
+            Some(r.clone())
+        } else {
+            let mut reads = self.reads.borrow_mut();
+            if !reads.contains_key(&id) && reads.len() >= MAX_TARGETS {
+                return Err(Error::Busy("action read set"));
+            }
+            let value = if let Some(r) = reads.get(&id).or_else(|| self.base.get(&id)) {
+                r.clone()
+            } else {
+                let db = self.store.lock()?;
+                record(&db, id)?
+            };
+            reads.insert(id, value.clone());
+            value
+        };
+        value
             .filter(|r| !r.deleted)
             .ok_or_else(|| Error::Missing(format!("object {id}")))
     }
@@ -1096,14 +1224,64 @@ impl Edit<'_> {
         Ok(())
     }
 }
-fn decide(
-    c: &Connection,
+type ReadSet = BTreeMap<Id, Option<Record>>;
+struct ActionPlan {
+    reads: ReadSet,
+    changes: BTreeMap<Id, Record>,
+    datasets: BTreeMap<(Id, DataKey), Manifest>,
+    result: std::result::Result<Vec<u8>, String>,
+}
+enum Decision {
+    Reply(Reply),
+    Prepare(ReadSet),
+}
+fn prepare_action(
+    store: &Store,
     reg: &Actions,
     actor: Id,
-    a: Authority,
     now: u64,
     i: &Intent,
-) -> Result<Reply> {
+    base: &ReadSet,
+) -> Result<ActionPlan> {
+    let mut edit = Edit {
+        store,
+        base,
+        reads: Default::default(),
+        actor,
+        now,
+        group: i.group,
+        key: i.key,
+        changes: BTreeMap::new(),
+        datasets: BTreeMap::new(),
+    };
+    let result = (|| {
+        let (version, run) = reg
+            .0
+            .get(&i.kind)
+            .ok_or_else(|| invalid(format!("unknown action {}", i.kind)))?;
+        if *version != i.version {
+            return Err(invalid(format!("unsupported action version {}", i.version)));
+        }
+        run(&mut edit, &i.bytes)
+    })();
+    let result = match result {
+        Err(Error::Sql(e)) => return Err(e.into()),
+        other => other.map_err(|e| e.to_string()),
+    };
+    Ok(ActionPlan {
+        reads: edit.reads.into_inner(),
+        changes: edit.changes,
+        datasets: edit.datasets,
+        result,
+    })
+}
+fn decide(
+    c: &Connection,
+    actor: Id,
+    a: Authority,
+    i: &Intent,
+    plan: Option<&ActionPlan>,
+) -> Result<Decision> {
     let id = i.key.session;
     let seq = i.key.seq;
     let session: Option<(Id, u64)> = c
@@ -1127,112 +1305,118 @@ fn decide(
             )
             .optional()?;
         return match old {
-            Some((hash, data)) if hash == fingerprint.0 => Ok(Reply::Decided(decode(&data)?)),
+            Some((hash, data)) if hash == fingerprint.0 => {
+                Ok(Decision::Reply(Reply::Decided(decode(&data)?)))
+            }
             Some(_) => Err(invalid("action ID reused for different intent")),
-            None => Ok(Reply::Resync(last)),
+            None => Ok(Decision::Reply(Reply::Resync(last))),
         };
     }
     if seq != last + 1 {
-        return Ok(Reply::Expected(last + 1));
+        return Ok(Decision::Reply(Reply::Expected(last + 1)));
     }
     let base = match fence(c, i.group, a, true) {
         Ok(v) => v,
-        Err(e) => return Ok(Reply::Retry(e.to_string())),
+        Err(e) => return Ok(Decision::Reply(Reply::Retry(e.to_string()))),
     };
-    let mut e = Edit {
-        c,
-        actor,
-        now,
-        group: i.group,
-        key: i.key,
-        changes: BTreeMap::new(),
-        datasets: BTreeMap::new(),
-    };
-    let evaluated = (|| {
-        if let Some(dep) = i.after {
-            let receipt: Option<Vec<u8>> = c
-                .query_row(
-                    "SELECT receipt FROM results WHERE session=? AND seq=?",
-                    params![id, dep],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if !matches!(
-                receipt
-                    .map(|x| decode::<Receipt>(&x))
-                    .transpose()?
-                    .map(|r| r.outcome),
-                Some(Outcome::Committed(_))
-            ) {
-                return Err(invalid("dependency unconfirmed or rejected"));
-            }
+    let mut dependency = true;
+    if let Some(dep) = i.after {
+        let receipt: Option<Vec<u8>> = c
+            .query_row(
+                "SELECT receipt FROM results WHERE session=? AND seq=?",
+                params![id, dep],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if !matches!(
+            receipt
+                .map(|x| decode::<Receipt>(&x))
+                .transpose()?
+                .map(|r| r.outcome),
+            Some(Outcome::Committed(_))
+        ) {
+            dependency = false;
         }
-        let (version, run) = reg
-            .0
-            .get(&i.kind)
-            .ok_or_else(|| invalid(format!("unknown action {}", i.kind)))?;
-        if *version != i.version {
-            return Err(invalid(format!("unsupported action version {}", i.version)));
-        }
-        run(&mut e, &i.bytes)
-    })();
+    }
     let mut versions = BTreeMap::from([(i.group, base + 1)]);
-    let outcome = match evaluated {
-        Err(Error::Sql(err)) => return Err(err.into()),
-        Err(err) => Outcome::Rejected(err.to_string()),
-        Ok(result) => {
-            if result.len() > MAX_FIELD {
-                return Err(Error::Busy("action result"));
+    let outcome = if !dependency {
+        Outcome::Rejected("dependency unconfirmed or rejected".into())
+    } else {
+        let Some(e) = plan else {
+            return Ok(Decision::Prepare(ReadSet::new()));
+        };
+        let mut corrected = ReadSet::new();
+        for (&id, previous) in &e.reads {
+            let current = record(c, id)?;
+            if &current != previous {
+                corrected.insert(id, current);
             }
-            for group in e
-                .changes
-                .values()
-                .map(|r| r.group)
-                .chain(e.datasets.keys().map(|k| k.0))
-            {
-                if versions.contains_key(&group) {
-                    continue;
+        }
+        if !corrected.is_empty() {
+            let mut input = e.reads.clone();
+            input.extend(corrected);
+            return Ok(Decision::Prepare(input));
+        }
+        match &e.result {
+            Err(err) => Outcome::Rejected(err.clone()),
+            Ok(result) => {
+                if result.len() > MAX_FIELD {
+                    return Err(Error::Busy("action result"));
                 }
-                let permit:Option<(u32,u64,u64,u64)>=c.query_row("SELECT slot,inc,gen,rev FROM permits WHERE unit=? AND session=? AND seq=? AND request=?",
-                  params![group,id,seq,fingerprint.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-                let Some((slot, incarnation, generation, rev)) = permit else {
-                    return Ok(Reply::Retry(format!("waiting for writer of {group}")));
-                };
-                if fence(
-                    c,
-                    group,
-                    Authority {
-                        worker: Worker { slot, incarnation },
-                        generation,
-                    },
-                    true,
-                )
-                .ok()
-                    != Some(rev)
+                for group in e
+                    .changes
+                    .values()
+                    .map(|r| r.group)
+                    .chain(e.datasets.keys().map(|k| k.0))
                 {
-                    return Ok(Reply::Retry("remote writer changed".into()));
+                    if versions.contains_key(&group) {
+                        continue;
+                    }
+                    let permit:Option<(u32,u64,u64,u64)>=c.query_row("SELECT slot,inc,gen,rev FROM permits WHERE unit=? AND session=? AND seq=? AND request=?",
+                  params![group,id,seq,fingerprint.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+                    let Some((slot, incarnation, generation, rev)) = permit else {
+                        return Ok(Decision::Reply(Reply::Retry(format!(
+                            "waiting for writer of {group}"
+                        ))));
+                    };
+                    if fence(
+                        c,
+                        group,
+                        Authority {
+                            worker: Worker { slot, incarnation },
+                            generation,
+                        },
+                        true,
+                    )
+                    .ok()
+                        != Some(rev)
+                    {
+                        return Ok(Decision::Reply(Reply::Retry(
+                            "remote writer changed".into(),
+                        )));
+                    }
+                    versions.insert(group, rev + 1);
                 }
-                versions.insert(group, rev + 1);
-            }
-            for (_, r) in e.changes {
-                let rev = versions[&r.group];
-                put(c, r, rev)?;
-            }
-            for ((g, k), m) in e.datasets {
-                let key = encode(&k)?;
-                let bytes = encode(&m)?;
-                let count = c.execute(
-                    "UPDATE member_data SET manifest=? WHERE unit=? AND key=?",
-                    params![bytes, g, key],
-                )?;
-                if count == 0 {
-                    c.execute(
-                        "INSERT OR REPLACE INTO requirements VALUES(?,?,?)",
-                        params![g, key, bytes],
+                for r in e.changes.values() {
+                    let rev = versions[&r.group];
+                    put(c, r.clone(), rev)?;
+                }
+                for ((g, k), m) in &e.datasets {
+                    let key = encode(&k)?;
+                    let bytes = encode(&m)?;
+                    let count = c.execute(
+                        "UPDATE member_data SET manifest=? WHERE unit=? AND key=?",
+                        params![bytes, g, key],
                     )?;
+                    if count == 0 {
+                        c.execute(
+                            "INSERT OR REPLACE INTO requirements VALUES(?,?,?)",
+                            params![g, key, bytes],
+                        )?;
+                    }
                 }
+                Outcome::Committed(result.clone())
             }
-            Outcome::Committed(result)
         }
     };
     for (g, r) in versions {
@@ -1259,5 +1443,5 @@ fn decide(
         "DELETE FROM permits WHERE session=? AND seq<=?",
         params![id, seq],
     )?;
-    Ok(Reply::Decided(receipt))
+    Ok(Decision::Reply(Reply::Decided(receipt)))
 }

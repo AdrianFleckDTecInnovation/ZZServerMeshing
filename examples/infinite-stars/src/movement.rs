@@ -1,4 +1,5 @@
 use super::*;
+pub const DRIVE: u32 = 10;
 /// Input leases last four simulation ticks. Session and applied sequence migrate
 /// exactly, so a retried sample cannot extend an old lease.
 #[derive(Component, Clone, Default, Serialize, Deserialize)]
@@ -12,7 +13,7 @@ pub struct Drive {
 pub struct MovementPlugin;
 impl Plugin for MovementPlugin {
     fn build(&self, app: &mut App) {
-        app.mesh_component::<Drive>(10, 1, rules(Visibility::Private), Default::default())
+        app.mesh_component::<Drive>(DRIVE, 1, rules(Visibility::Private), Default::default())
             .unwrap()
             .insert_resource(InputHandler(|w, actor, i, _| {
                 let state = w.resource::<MeshState>();

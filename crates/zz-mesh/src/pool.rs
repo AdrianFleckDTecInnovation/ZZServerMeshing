@@ -22,6 +22,19 @@ pub struct SpatialProfile {
 pub struct SpatialRule(pub fn(&World, Entity) -> Option<SpatialProfile>);
 #[derive(Resource, Default)]
 pub struct GroupTimings(pub BTreeMap<Id, u64>);
+impl GroupTimings {
+    /// Report one aggregate sample for a group, e.g. once every 16 game steps.
+    /// The sample represents work for one tick, measured across the entire group.
+    pub fn observe(&mut self, group: Id, work: Duration) {
+        let us = work.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.0
+            .entry(group)
+            .and_modify(|previous| {
+                *previous = ((7 * u128::from(*previous) + u128::from(us)) / 8) as u64;
+            })
+            .or_insert(us);
+    }
+}
 /// Completed portions of a local pool tick. A stage can finish once per worker.
 #[derive(Clone, Copy, Debug)]
 pub enum TickStage {
@@ -96,7 +109,28 @@ pub struct MigrationCost {
     pub authority: Authority,
 }
 impl Pool {
+    pub(crate) fn subscriber_spatial_versions(&self) -> Result<Vec<(Worker, u64)>> {
+        self.nodes
+            .iter()
+            .map(|(&worker, node)| {
+                let source = node
+                    .app
+                    .world()
+                    .get_resource::<SubscriberSource>()
+                    .ok_or_else(|| {
+                        invalid(
+                            "install SubscriberSource in each worker before serving subscribers",
+                        )
+                    })?;
+                Ok((worker, source.spatial))
+            })
+            .collect()
+    }
     pub fn new(store: Store, limit: usize) -> Self {
+        Self::with_bulk_executor(store, limit, BulkExecutor::new(2))
+    }
+    /// Several independently simulated regions can share one bounded bulk worker.
+    pub fn with_bulk_executor(store: Store, limit: usize, bulk: BulkExecutor) -> Self {
         Self {
             nodes: BTreeMap::new(),
             directory: Default::default(),
@@ -109,7 +143,7 @@ impl Pool {
             balancing: None,
             moved: Default::default(),
             limit,
-            bulk: BulkExecutor::new(2),
+            bulk,
             preparing: BTreeSet::new(),
             sources: Default::default(),
         }
@@ -161,7 +195,11 @@ impl Pool {
                 let mut changed =
                     std::mem::take(&mut node.app.world_mut().resource_mut::<MeshState>().dirty)
                         .into_iter();
-                while let Some(id) = changed.next() {
+                while let Some((id, change)) = changed.next() {
+                    if !change.spatial {
+                        dirty.push((worker, id, change.fields));
+                        continue;
+                    }
                     if let Some(description) =
                         crate::network_mesh::describe::<false>(node.app.world(), worker, id)
                     {
@@ -170,11 +208,11 @@ impl Pool {
                             directory.describe_physics(description.presence, description.area)
                         {
                             let mut state = node.app.world_mut().resource_mut::<MeshState>();
-                            state.dirty.insert(id);
+                            state.dirty.insert(id, change);
                             state.dirty.extend(changed);
                             return Err(e);
                         }
-                        dirty.push((worker, id));
+                        dirty.push((worker, id, change.fields));
                     } else {
                         directory.remove_owned(worker, id);
                     }
@@ -227,12 +265,13 @@ impl Pool {
                 Recipient::Client(id) => self.clients.entry(id).or_default().watermark(mark),
             }
         }
-        for (w, id) in dirty {
-            self.nodes
-                .get_mut(&w)
-                .unwrap()
-                .publisher
-                .changed(&self.directory, id, self.tick);
+        for (w, id, fields) in dirty {
+            self.nodes.get_mut(&w).unwrap().publisher.changed_fields(
+                &self.directory,
+                id,
+                self.tick,
+                fields.slice(),
+            );
         }
         spatial?;
         finished(TickStage::Routes);
@@ -293,7 +332,13 @@ impl Pool {
         let mut caps = Vec::new();
         for (&worker, n) in &self.nodes {
             let w = n.app.world();
-            let hints = w.resource::<GroupTimings>().0.values().sum::<u64>();
+            let hints = w
+                .resource::<GroupTimings>()
+                .0
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(0);
             caps.push(Capacity {
                 worker,
                 tick_us: n.smoothed_us.max(hints),
@@ -548,6 +593,13 @@ impl Pool {
         self.app_mut(t.target)?.insert_resource(cache);
         // Capture exact migration fields from the source world, including components
         // that use infrequent checkpoints. Membership and revisions are checked at freeze.
+        if self
+            .app(t.source.worker)?
+            .world()
+            .contains_resource::<AsyncCheckpoints>()
+        {
+            checkpoint_group(self.app_mut(t.source.worker)?.world_mut(), t.group)?;
+        }
         let mut s = self.store.snapshot(t.group)?;
         let source = self.app(t.source.worker)?.world();
         for r in s.records.iter_mut().filter(|r| !r.deleted) {

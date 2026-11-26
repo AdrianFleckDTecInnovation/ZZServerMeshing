@@ -1,6 +1,8 @@
 use crate::*;
+mod checkpoint_io;
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
+pub use checkpoint_io::AsyncCheckpoints;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     any::TypeId,
@@ -137,37 +139,99 @@ pub struct MeshState {
     groups: BTreeMap<Id, (Authority, u64)>,
     mark: u64,
     tick: u64,
-    pub(crate) dirty: BTreeSet<Id>,
+    pub(crate) dirty: BTreeMap<Id, ObjectChange>,
     retry_groups: BTreeSet<Id>,
     pub(crate) external_staging: BTreeSet<Id>,
     pins: BTreeMap<Id, Vec<BlobPin>>,
     saved: BTreeMap<Id, BTreeMap<u32, Field>>,
     input_sessions: HashMap<Id, Id>,
+    transient_names: BTreeSet<Id>,
 }
 const CHECKPOINT_PERIOD: usize = 20;
+/// All registered fields read by the game's spatial and sight rules.
+/// Without this opt-in, custom rules retain their conservative invalidation.
+#[derive(Resource)]
+pub struct SpatialDependencies(pub BTreeSet<u32>);
+
+pub(crate) struct ObjectChange {
+    pub(crate) spatial: bool,
+    // None denotes a lifecycle change that invalidates every field.
+    pub(crate) fields: ChangedFields,
+}
+// Most moving entities change exactly position and input. Keep that pair inline.
+#[derive(Default)]
+pub(crate) enum ChangedFields {
+    #[default]
+    All,
+    Inline([u32; 2]),
+    More(Box<Vec<u32>>),
+}
+impl ChangedFields {
+    fn new(id: u32) -> Self {
+        Self::Inline([id, 0])
+    }
+    fn add(&mut self, id: u32) {
+        match self {
+            Self::All => (),
+            Self::Inline(v) if v.contains(&id) => (),
+            Self::Inline(v) if v[1] == 0 => v[1] = id,
+            Self::Inline(v) => *self = Self::More(Box::new(vec![v[0], v[1], id])),
+            Self::More(v) => {
+                if !v.contains(&id) {
+                    v.push(id)
+                }
+            }
+        }
+    }
+    pub(crate) fn slice(&self) -> Option<&[u32]> {
+        match self {
+            Self::All => None,
+            Self::Inline(v) => Some(if v[1] == 0 { &v[..1] } else { v }),
+            Self::More(v) => Some(v),
+        }
+    }
+}
+impl ObjectChange {
+    fn lifecycle() -> Self {
+        Self {
+            spatial: true,
+            fields: ChangedFields::All,
+        }
+    }
+}
 #[derive(Default)]
 struct Checkpoints {
-    due: [BTreeSet<Id>; CHECKPOINT_PERIOD],
+    due: [BTreeMap<Id, ChangedFields>; CHECKPOINT_PERIOD],
     urgent: BTreeSet<Id>,
 }
 impl Checkpoints {
     fn slot(group: Id) -> usize {
         (u128::from_be_bytes(group.0) % CHECKPOINT_PERIOD as u128) as usize
     }
-    fn changed(&mut self, m: &Managed) {
-        self.due[Self::slot(m.group)].insert(m.id);
+    fn changed(&mut self, m: &Managed, schema: u32) {
+        self.due[Self::slot(m.group)]
+            .entry(m.id)
+            .and_modify(|f| f.add(schema))
+            .or_insert_with(|| ChangedFields::new(schema));
     }
     fn remove(&mut self, id: &Id, group: Id) {
         self.due[Self::slot(group)].remove(id);
         self.urgent.remove(id);
     }
-    fn take_due(&mut self, tick: u64) -> BTreeSet<Id> {
+    fn take_due(&mut self, tick: u64) -> BTreeMap<Id, ChangedFields> {
         let mut ids = std::mem::take(&mut self.due[(tick % CHECKPOINT_PERIOD as u64) as usize]);
-        ids.append(&mut self.urgent);
+        ids.extend(
+            std::mem::take(&mut self.urgent)
+                .into_iter()
+                .map(|id| (id, ChangedFields::All)),
+        );
         ids
     }
 }
 impl MeshState {
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
     pub(crate) fn forget_view(&mut self, id: Id) {
         self.entities.remove(&id);
         self.input_sessions.remove(&id);
@@ -199,7 +263,7 @@ impl MeshState {
 #[derive(Resource)]
 pub struct InputHandler(pub fn(&mut World, Id, &Input, u64) -> Result<InputAck>);
 pub fn apply_input(w: &mut World, actor: Id, input: &Input, now: u64) -> Result<InputAck> {
-    let node = w.resource::<Node>().clone();
+    let node = storage_node(w)?.clone();
     let (group, owner) = input_binding(w, &node, actor, input, now)?;
     node.0.check_authority(group, owner, true)?;
     let handler = w
@@ -254,7 +318,7 @@ pub fn apply_inputs(
     if inputs.len() > MAX_TARGETS {
         return Err(Error::Busy("input batch"));
     }
-    let node = w.resource::<Node>().clone();
+    let node = storage_node(w)?.clone();
     let handler = w
         .get_resource::<InputHandler>()
         .ok_or_else(|| invalid("game input handler missing"))?
@@ -302,7 +366,7 @@ pub fn apply_inputs(
 pub fn reconcile(w: &World, session: Id, actor: Id, group: Id) -> Result<(u64, u64, Record)> {
     let st = w.resource::<MeshState>();
     let (owner, seen) = *st.groups.get(&group).ok_or(Error::Fenced)?;
-    let node = w.resource::<Node>();
+    let node = storage_node(w)?;
     node.0.session(session, actor)?;
     let (rev, seq) = node.0.progress(session, actor, group, owner)?;
     if rev != seen {
@@ -323,9 +387,11 @@ pub fn reconcile(w: &World, session: Id, actor: Id, group: Id) -> Result<(u64, u
     Ok((rev, seq, r))
 }
 pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
-    let n = w.resource::<Node>().clone();
+    let n = storage_node(w)?.clone();
+    checkpoint_io::barrier(w, group)?;
     let mut ids: Vec<_> = w.resource::<MeshState>().pending.due[Checkpoints::slot(group)]
-        .union(&w.resource::<MeshState>().pending.urgent)
+        .keys()
+        .chain(&w.resource::<MeshState>().pending.urgent)
         .copied()
         .filter(|id| {
             w.resource::<MeshState>()
@@ -335,7 +401,16 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
                 .is_some_and(|m| m.group == group)
         })
         .collect();
-    if ids.is_empty() {
+    ids.sort_unstable();
+    ids.dedup();
+    let removed: Vec<_> = w
+        .resource::<MeshState>()
+        .removed
+        .iter()
+        .filter(|(_, g)| **g == group)
+        .map(|(&id, _)| id)
+        .collect();
+    if ids.is_empty() && removed.is_empty() {
         return Ok(());
     }
     let (owner, mut base) = w
@@ -351,15 +426,20 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
             records.push(r);
         }
     }
+    for id in removed {
+        let mut r = Record::new(id, group);
+        r.deleted = true;
+        r.revision = w.resource::<MeshState>().version(id);
+        records.push(r);
+    }
     for batch in records.chunks_mut(MAX_TARGETS) {
         base = write_checkpoint(w, &n.0, group, owner, base, batch)?;
-        let mut state = w.resource_mut::<MeshState>();
+        checkpoint_io::acknowledge(w, group, owner, base, batch);
         for r in batch {
-            state.versions.insert(r.id, base);
-            state.saved.insert(r.id, std::mem::take(&mut r.fields));
+            let mut state = w.resource_mut::<MeshState>();
+            state.removed.remove(&r.id);
             state.pending.remove(&r.id, group);
         }
-        state.groups.insert(group, (owner, base));
     }
     Ok(())
 }
@@ -385,16 +465,29 @@ pub fn restore_group(w: &mut World, group: Id) -> Result<Authority> {
 
 #[derive(Resource, Clone)]
 struct Node(Store, Worker);
+fn storage_node(w: &World) -> Result<&Node> {
+    w.get_resource::<Node>()
+        .ok_or_else(|| invalid("operation requires MeshPlugin::persistent"))
+}
 #[derive(Default)]
 pub struct MeshPlugin {
     node: Option<Node>,
+    transient: bool,
 }
 impl MeshPlugin {
+    /// A standalone authoritative World with no database, network or recovery service.
+    pub fn transient() -> Self {
+        Self {
+            node: None,
+            transient: true,
+        }
+    }
     /// Install after starting this worker, then register the game's component schemas.
     /// Call [`restore_group`] for each previously owned group before the first tick.
     pub fn persistent(store: Store, worker: Worker) -> Self {
         Self {
             node: Some(Node(store, worker)),
+            transient: false,
         }
     }
 }
@@ -405,21 +498,38 @@ impl Plugin for MeshPlugin {
             .init_resource::<Actions>()
             .init_resource::<Providers>()
             .init_resource::<BlobCache>();
-        let n = self.node.clone().unwrap_or_else(|| {
-            let db = Store::open(":memory:").expect("local mesh database");
-            let w = db.start_worker(1).expect("first worker");
-            Node(db, w)
-        });
-        app.insert_resource(n.0.clone()).insert_resource(n);
-        app.add_systems(PreUpdate, (pull, discover).chain())
-            .add_systems(
-                PostUpdate,
-                (track_despawns, flush).chain().after(TrackFields),
-            );
+        if !self.transient {
+            let n = self.node.clone().unwrap_or_else(|| {
+                let db = Store::open(":memory:").expect("local mesh database");
+                let w = db.start_worker(1).expect("first worker");
+                Node(db, w)
+            });
+            app.insert_resource(n.0.clone()).insert_resource(n);
+        }
+        app.add_systems(
+            PreUpdate,
+            (pull, discover).chain().in_set(MeshSystems::Authority),
+        )
+        .add_systems(
+            PostUpdate,
+            (track_despawns, flush)
+                .chain()
+                .after(TrackFields)
+                .in_set(MeshSystems::Track),
+        );
     }
 }
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
-struct TrackFields;
+pub enum MeshSystems {
+    /// Restore and fence ownership, then discover newly spawned objects in PreUpdate.
+    Authority,
+    /// Validate external control before ordinary gameplay runs in Update.
+    Control,
+    /// PostUpdate field tracking and storage checkpoint barrier.
+    Track,
+}
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub(crate) struct TrackFields;
 pub trait MeshApp {
     fn mesh_component<T: Component>(
         &mut self,
@@ -554,7 +664,23 @@ fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>
                 return Err(invalid(format!("duplicate live identity {}", m.id)));
             }
             let Some(Node(db, worker)) = &node else {
-                return Ok(None);
+                let mut state = w.resource_mut::<MeshState>();
+                if !state.transient_names.insert(m.id) {
+                    return Err(invalid(format!(
+                        "transient object ID {} already used",
+                        m.id
+                    )));
+                }
+                return Ok(Some((
+                    Authority {
+                        worker: Worker {
+                            slot: 1,
+                            incarnation: 1,
+                        },
+                        generation: 1,
+                    },
+                    0,
+                )));
             };
             if !matches!(db.lookup(m.id)?, Lookup::Unknown) {
                 return Err(invalid(format!(
@@ -578,8 +704,10 @@ fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>
                 let mut st = w.resource_mut::<MeshState>();
                 st.entities.insert(m.id, entity);
                 st.mapped.insert(entity, m);
-                st.pending.urgent.insert(m.id);
-                st.dirty.insert(m.id);
+                if node.is_some() {
+                    st.pending.urgent.insert(m.id);
+                    st.dirty.insert(m.id, ObjectChange::lifecycle());
+                }
                 if let Some((a, rev)) = grant {
                     st.groups.entry(m.group).or_insert((a, rev));
                 }
@@ -618,6 +746,7 @@ fn pull(w: &mut World) {
     let Some(Node(db, worker)) = w.get_resource::<Node>().cloned() else {
         return;
     };
+    checkpoint_io::collect(w);
     let mark = w.resource::<MeshState>().mark;
     let notices = match db.notices(worker, mark) {
         Ok(n) => n,
@@ -638,7 +767,7 @@ fn pull(w: &mut World) {
         }
     }
     for g in groups {
-        if w.resource::<MeshState>().external_staging.contains(&g) {
+        if w.resource::<MeshState>().external_staging.contains(&g) || checkpoint_io::pending(w, g) {
             w.resource_mut::<MeshState>().retry_groups.insert(g);
             continue;
         }
@@ -677,6 +806,9 @@ pub(crate) fn demote(w: &mut World, group: Id) {
         .map(|(e, m)| (e, m.id))
         .collect();
     for (e, id) in members {
+        if let Some(mut source) = w.get_resource_mut::<SubscriberSource>() {
+            source.remove(id);
+        }
         w.entity_mut(e)
             .remove::<(Simulated, Paused)>()
             .insert(Replica);
@@ -684,7 +816,7 @@ pub(crate) fn demote(w: &mut World, group: Id) {
         st.mapped.remove(&e);
         st.input_sessions.remove(&id);
         st.pending.remove(&id, group);
-        st.dirty.insert(id);
+        st.dirty.insert(id, ObjectChange::lifecycle());
     }
     w.resource_mut::<MeshState>().groups.remove(&group);
     w.resource_mut::<MeshState>().pins.remove(&group);
@@ -780,7 +912,10 @@ pub(crate) fn apply_records(
                     state.pending.remove(&r.id, r.group);
                     state.saved.remove(&r.id);
                     state.versions.remove(&r.id);
-                    state.dirty.insert(r.id);
+                    state.dirty.insert(r.id, ObjectChange::lifecycle());
+                    if let Some(mut source) = w.get_resource_mut::<SubscriberSource>() {
+                        source.remove(r.id);
+                    }
                     w.despawn(e);
                 }
             } else if let std::collections::btree_map::Entry::Vacant(slot) =
@@ -796,7 +931,12 @@ pub(crate) fn apply_records(
             }
         }
         w.resource_scope(|w, reg: Mut<Schemas>| -> Result<()> {
-            for r in records.into_iter().filter(|r| !r.deleted) {
+            for mut r in records.into_iter().filter(|r| !r.deleted) {
+                if active {
+                    r.fields.retain(|id, _| {
+                        reg.entries.get(id).is_none_or(|entry| entry.rules.persist)
+                    });
+                }
                 let e = state.entities[&r.id];
                 if w.get::<Managed>(e).is_some_and(|m| m.group != r.group) {
                     w.entity_mut(e).insert(Managed::new(r.id, r.group));
@@ -817,7 +957,7 @@ pub(crate) fn apply_records(
                     )?;
                 }
                 for id in before.into_iter().flat_map(|v| v.keys()) {
-                    if !r.fields.contains_key(id) {
+                    if !r.fields.contains_key(id) && (!active || reg.entries[id].rules.persist) {
                         (reg.entries[id].remove)(w, e);
                     }
                 }
@@ -827,7 +967,9 @@ pub(crate) fn apply_records(
                 state.saved.insert(r.id, r.fields);
                 state.versions.insert(r.id, r.revision);
                 if active {
-                    state.dirty.insert(r.id);
+                    if !state.mapped.contains_key(&e) {
+                        state.dirty.insert(r.id, ObjectChange::lifecycle());
+                    }
                     state.mapped.insert(e, Managed::new(r.id, r.group));
                 }
             }
@@ -838,28 +980,73 @@ pub(crate) fn apply_records(
 fn track<T: Component>(
     changed: Query<&Managed, (Changed<T>, With<Simulated>)>,
     mut removed: RemovedComponents<T>,
+    schemas: Res<Schemas>,
+    spatial: Option<Res<SpatialDependencies>>,
+    node: Option<Res<Node>>,
+    mut source: Option<ResMut<SubscriberSource>>,
     mut s: ResMut<MeshState>,
 ) {
+    if node.is_none() && source.is_none() {
+        removed.clear();
+        return;
+    }
+    let schema = schemas.types[&TypeId::of::<T>()];
+    let rules = schemas.entries[&schema].rules;
+    let spatial = spatial.is_none_or(|inputs| inputs.0.contains(&schema));
+    let mut mark = |s: &mut MeshState, m: &Managed| {
+        if let Some(source) = source.as_deref_mut() {
+            source.changed(m.id, schema, rules.visibility, spatial, s.tick);
+        }
+        if node.is_none() {
+            return;
+        }
+        if rules.persist {
+            s.pending.changed(m, schema);
+        }
+        if !spatial && matches!(rules.visibility, Visibility::Local | Visibility::Private) {
+            return;
+        }
+        s.dirty
+            .entry(m.id)
+            .and_modify(|change| {
+                change.spatial |= spatial;
+                change.fields.add(schema);
+            })
+            .or_insert_with(|| ObjectChange {
+                spatial,
+                fields: ChangedFields::new(schema),
+            });
+    };
     for m in &changed {
-        s.pending.changed(m);
-        s.dirty.insert(m.id);
+        mark(&mut s, m);
     }
     for e in removed.read() {
         if let Some(m) = s.mapped.get(&e).copied() {
-            s.pending.changed(&m);
-            s.dirty.insert(m.id);
+            mark(&mut s, &m);
         }
     }
 }
-fn track_despawns(mut removed: RemovedComponents<Managed>, mut st: ResMut<MeshState>) {
+fn track_despawns(
+    mut removed: RemovedComponents<Managed>,
+    mut st: ResMut<MeshState>,
+    node: Option<Res<Node>>,
+    mut source: Option<ResMut<SubscriberSource>>,
+) {
     for entity in removed.read() {
         if let Some(m) = st.mapped.remove(&entity) {
+            if let Some(source) = source.as_deref_mut() {
+                source.remove(m.id);
+            }
             if st.entities.get(&m.id) == Some(&entity) {
                 st.input_sessions.remove(&m.id);
                 st.entities.remove(&m.id);
                 st.pending.remove(&m.id, m.group);
-                st.removed.insert(m.id, m.group);
-                st.dirty.insert(m.id);
+                if node.is_some() {
+                    st.removed.insert(m.id, m.group);
+                    st.dirty.insert(m.id, ObjectChange::lifecycle());
+                } else if !st.mapped.values().any(|member| member.group == m.group) {
+                    st.groups.remove(&m.group);
+                }
             }
         }
     }
@@ -941,14 +1128,7 @@ pub fn project_component(w: &World, id: Id, schema: u32, view: View) -> Result<O
         bytes,
     }))
 }
-fn write_checkpoint(
-    w: &World,
-    db: &Store,
-    g: Id,
-    a: Authority,
-    base: u64,
-    records: &[Record],
-) -> Result<u64> {
+fn checkpoint_claims(w: &World, records: &[Record]) -> Result<BTreeMap<Id, Vec<Manifest>>> {
     let mut claims = BTreeMap::new();
     let state = w.resource::<MeshState>();
     let schemas = w.resource::<Schemas>();
@@ -968,7 +1148,23 @@ fn write_checkpoint(
         }
         claims.insert(r.id, required);
     }
-    db.checkpoint_data(g, a, base, records.to_vec(), &claims)
+    Ok(claims)
+}
+fn write_checkpoint(
+    w: &World,
+    db: &Store,
+    g: Id,
+    a: Authority,
+    base: u64,
+    records: &[Record],
+) -> Result<u64> {
+    db.checkpoint_data(
+        g,
+        a,
+        base,
+        records.to_vec(),
+        &checkpoint_claims(w, records)?,
+    )
 }
 /// Commit a server-generated batch using the local simulation grant.
 pub fn commit_batch(
@@ -986,7 +1182,7 @@ pub fn commit_batch(
     {
         return Err(invalid("batch requires one group and session"));
     }
-    let node = w.resource::<Node>().clone();
+    let node = storage_node(w)?.clone();
     let owner = w
         .resource::<MeshState>()
         .authority(first.group)
@@ -1003,23 +1199,33 @@ fn flush(w: &mut World) {
     let Some(Node(db, _)) = w.get_resource::<Node>().cloned() else {
         return;
     };
+    let started = w
+        .contains_resource::<WorkerTimings>()
+        .then(std::time::Instant::now);
     let mut batches: BTreeMap<Id, Vec<Record>> = BTreeMap::new();
     let tick = w.resource::<MeshState>().tick;
     let changed = w.resource_mut::<MeshState>().pending.take_due(tick);
-    for id in changed {
+    for (id, changed_fields) in changed {
         let Some(&e) = w.resource::<MeshState>().entities.get(&id) else {
             continue;
         };
         if w.get::<Simulated>(e).is_none() {
             continue;
         }
-        match capture(w, id, View::Checkpoint) {
-            Ok(r) => {
-                if w.resource::<MeshState>().saved.get(&id) == Some(&r.fields) {
-                    continue;
-                }
+        let group = w.get::<Managed>(e).unwrap().group;
+        if checkpoint_io::pending(w, group) {
+            w.resource_mut::<MeshState>().pending.urgent.insert(id);
+            continue;
+        }
+        if changed_fields.slice().is_none() {
+            // An urgent full checkpoint also covers the ordinary checkpoint slot.
+            w.resource_mut::<MeshState>().pending.remove(&id, group);
+        }
+        match checkpoint_changes(w, id, e, &changed_fields) {
+            Ok(Some(r)) => {
                 batches.entry(r.group).or_default().push(r);
             }
+            Ok(None) => (),
             Err(err) => {
                 let mut st = w.resource_mut::<MeshState>();
                 st.report(err.to_string());
@@ -1043,20 +1249,21 @@ fn flush(w: &mut World) {
         let Some((a, mut base)) = w.resource::<MeshState>().groups.get(&g).copied() else {
             continue;
         };
+        if w.contains_resource::<AsyncCheckpoints>() {
+            let rest = items.split_off(items.len().min(MAX_TARGETS));
+            checkpoint_io::retry(w, g, &rest);
+            if let Err(e) = checkpoint_io::schedule(w, &db, g, a, base, &mut items) {
+                if !matches!(e, Error::Busy("checkpoint queue")) {
+                    w.resource_mut::<MeshState>().report(e.to_string());
+                }
+                checkpoint_io::retry(w, g, &items);
+            }
+            continue;
+        }
         for chunk in items.chunks_mut(MAX_TARGETS) {
             match write_checkpoint(w, &db, g, a, base, chunk) {
                 Ok(next) => {
-                    let mut st = w.resource_mut::<MeshState>();
-                    for r in chunk {
-                        st.versions.insert(r.id, next);
-                        if r.deleted {
-                            st.saved.remove(&r.id);
-                            st.versions.remove(&r.id);
-                        } else {
-                            st.saved.insert(r.id, std::mem::take(&mut r.fields));
-                        }
-                    }
-                    st.groups.insert(g, (a, next));
+                    checkpoint_io::acknowledge(w, g, a, next, chunk);
                     base = next;
                 }
                 Err(e) => {
@@ -1073,6 +1280,41 @@ fn flush(w: &mut World) {
             }
         }
     }
+    if let Some(start) = started {
+        w.resource_mut::<WorkerTimings>().checkpoint_us += start.elapsed().as_micros() as u64;
+    }
+}
+fn checkpoint_changes(
+    w: &World,
+    id: Id,
+    e: Entity,
+    changed: &ChangedFields,
+) -> Result<Option<Record>> {
+    let state = w.resource::<MeshState>();
+    let saved = state.saved.get(&id);
+    if let Some((schemas, base)) = changed.slice().zip(saved) {
+        let mut updated = None;
+        for &schema in schemas {
+            let field = project_component(w, id, schema, View::Checkpoint)?;
+            if base.get(&schema) != field.as_ref() {
+                let fields = updated.get_or_insert_with(|| base.clone());
+                if let Some(value) = field {
+                    fields.insert(schema, value);
+                } else {
+                    fields.remove(&schema);
+                }
+            }
+        }
+        return Ok(updated.map(|fields| Record {
+            id,
+            group: w.get::<Managed>(e).unwrap().group,
+            revision: state.version(id),
+            deleted: false,
+            fields,
+        }));
+    }
+    let r = capture(w, id, View::Checkpoint)?;
+    Ok((saved != Some(&r.fields)).then_some(r))
 }
 struct PreparedMember {
     entity: Entity,
@@ -1150,7 +1392,7 @@ impl Prepared {
             st.entities.insert(id, e);
             st.versions.insert(id, member.revision);
             st.mapped.insert(e, Managed::new(id, self.group));
-            st.dirty.insert(id);
+            st.dirty.insert(id, ObjectChange::lifecycle());
             st.saved.insert(id, member.checkpoint);
         }
         w.resource_mut::<MeshState>()
@@ -1226,6 +1468,9 @@ pub fn prepare_world(w: &mut World, s: &Snapshot) -> Result<Prepared> {
                     .entries
                     .get(id)
                     .ok_or_else(|| invalid(format!("missing codec for schema {id}")))?;
+                if !entry.rules.migrate && !entry.rules.persist {
+                    continue;
+                }
                 if value.version != entry.version {
                     return Err(invalid(format!("incompatible version of schema {id}")));
                 }

@@ -111,6 +111,7 @@ pub struct InterestChange {
 #[derive(Default)]
 pub struct Directory {
     pub(crate) sight_points: HashMap<Id, SightPoint>,
+    pub(crate) sight_revision: u64,
     areas: HashMap<Id, Area>,
     objects: HashMap<Id, Presence>,
     area_index: MovingIndex,
@@ -140,7 +141,16 @@ impl Directory {
                 return Err(invalid("sight point outside its spatial presence"));
             }
         }
+        let changed = self.sight_points.get(&id).copied() != d.sight
+            || self.presence(id).is_none_or(|p| {
+                p.owner != d.presence.owner
+                    || p.bounds.frame != d.presence.bounds.frame
+                    || p.principal != d.presence.principal
+            });
         self.describe_physics(d.presence, d.area)?;
+        if changed {
+            self.sight_revision = self.sight_revision.wrapping_add(1);
+        }
         if let Some(point) = d.sight {
             self.sight_points.insert(id, point);
         } else {
@@ -505,7 +515,9 @@ impl Directory {
         );
     }
     pub fn remove(&mut self, id: Id) {
-        self.sight_points.remove(&id);
+        if self.sight_points.remove(&id).is_some() {
+            self.sight_revision = self.sight_revision.wrapping_add(1);
+        }
         if let Some(p) = self.objects.remove(&id) {
             self.object_faces.replace(Some(p.predicted()), None);
             self.object_index

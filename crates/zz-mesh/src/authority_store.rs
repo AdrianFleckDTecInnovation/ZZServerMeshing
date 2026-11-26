@@ -1,6 +1,6 @@
 //! Typed control/storage adapter for trusted workers on separate hosts.
-//! Only the authority service opens the SQLite volume. Gameplay handlers execute
-//! inside its existing fenced transaction, together with their durable receipts.
+//! Only the authority service opens the SQLite volume. Compatibility handlers prepare
+//! outside the writer. Their validated edits and receipts commit atomically.
 use crate::{
     wire::{Client, Endpoint, Identity, Request, Response, Role},
     *,
@@ -18,6 +18,8 @@ pub enum Operation {
     Worker(u32),
     Owned(u32),
     Live(Worker),
+    DrainStatus(Worker),
+    Retire(Worker),
     Authenticated(Digest),
     Create(Id, Worker),
     Owner(Id),
@@ -47,6 +49,9 @@ pub enum Operation {
     Authorities(Vec<Id>),
     GroupStates(Vec<Id>, Option<Worker>),
     PlayerCredential(Digest),
+    ChangeControl(ControlChange),
+    ReadControls(Vec<Id>),
+    WorkerControls(Worker, Vec<(Id, Id, u64)>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +116,11 @@ impl Connection {
                 | Worker(_)
                 | Owned(_)
                 | Live(_)
+                | DrainStatus(_)
                 | Authenticated(_)
                 | PlayerCredential(_)
+                | ReadControls(_)
+                | WorkerControls(..)
                 | Owner(_)
                 | Group(_)
                 | Notices(..)
@@ -186,6 +194,12 @@ impl AuthorityService {
         };
         use Operation::*;
         match op {
+            ChangeControl(change) => encode(&db.control_change(change)?),
+            ReadControls(objects) => encode(&db.control_states(&objects)?),
+            WorkerControls(worker, objects) => {
+                own(worker)?;
+                encode(&db.worker_controls(worker, &objects)?)
+            }
             Advertise(w, a) => {
                 own(w)?;
                 encode(&db.advertise(w, a)?)
@@ -195,6 +209,14 @@ impl AuthorityService {
             Owned(s) if s == who.slot => encode(&db.owned(s)?),
             Owned(_) => Err(Error::Denied),
             Live(w) => encode(&db.check_worker(w)?),
+            DrainStatus(w) => {
+                own(w)?;
+                encode(&db.drain_status(w)?)
+            }
+            Retire(w) => {
+                own(w)?;
+                encode(&db.retire(w)?)
+            }
             Authenticated(c) => encode(&db.authenticated_worker(c)?),
             PlayerCredential(c) => encode(&db.authenticated_player(c)?),
             Create(g, w) => {

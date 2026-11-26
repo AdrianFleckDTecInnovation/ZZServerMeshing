@@ -32,6 +32,93 @@ fn ids(records: &std::collections::BTreeMap<Id, Record>) -> Vec<Id> {
 }
 
 #[test]
+fn private_checkpoints_skip_public_codecs_spatial_rules_and_peer_projection() {
+    use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Component, Serialize, Deserialize)]
+    struct PublicProbe(u32);
+    #[derive(Resource)]
+    struct SpatialCalls(SpatialRule, AtomicUsize);
+    static PUBLIC: AtomicUsize = AtomicUsize::new(0);
+    let db = Store::open(":memory:").unwrap();
+    let workers = [db.start_worker(1).unwrap(), db.start_worker(2).unwrap()];
+    let actor = Id::numbered(107);
+    let mut pool = Pool::new(db.clone(), 256);
+    pool.policy.every = 0;
+    for (i, w) in workers.into_iter().enumerate() {
+        let mut app = world(&db, w);
+        let id = Id::numbered(107 + i as u128);
+        let rule = app.world_mut().remove_resource::<SpatialRule>().unwrap();
+        app.insert_resource(SpatialCalls(rule, AtomicUsize::new(0)))
+            .insert_resource(SpatialRule(|w, e| {
+                let rule = w.resource::<SpatialCalls>();
+                rule.1.fetch_add(1, Ordering::Relaxed);
+                (rule.0 .0)(w, e)
+            }));
+        app.mesh_component::<PublicProbe>(
+            302,
+            1,
+            Rules {
+                visibility: Visibility::Public,
+                persist: true,
+                migrate: true,
+            },
+            ComponentCodec {
+                encode: |value, _| {
+                    PUBLIC.fetch_add(1, Ordering::Relaxed);
+                    encode(value)
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entity = player(app.world_mut(), id, id, PLANET_ID, [0; 3]);
+        app.world_mut().entity_mut(entity).insert(PublicProbe(42));
+        pool.add(w, app).unwrap();
+    }
+    for _ in 0..5 {
+        pool.step().unwrap();
+        pool.deliver_all().unwrap();
+    }
+    let before = pool.link_stats().0;
+    PUBLIC.store(0, Ordering::Relaxed);
+    let worker = workers[0];
+    let world = pool.app(worker).unwrap().world();
+    let entity = world.resource::<MeshState>().entities[&actor];
+    world
+        .resource::<SpatialCalls>()
+        .1
+        .store(0, Ordering::Relaxed);
+    for tick in 1..=40 {
+        pool.app_mut(worker)
+            .unwrap()
+            .world_mut()
+            .get_mut::<Inventory>(entity)
+            .unwrap()
+            .0
+            .insert(STONE, tick);
+        pool.step().unwrap();
+        assert_eq!(pool.deliver_all().unwrap(), 0);
+    }
+    assert_eq!(pool.link_stats().0, before);
+    assert_eq!(PUBLIC.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        pool.app(worker)
+            .unwrap()
+            .world()
+            .resource::<SpatialCalls>()
+            .1
+            .load(Ordering::Relaxed),
+        0
+    );
+    let Lookup::Present(saved) = db.lookup(actor).unwrap() else {
+        panic!("checkpoint missing")
+    };
+    assert!(saved.get::<Inventory>(INVENTORY, 1).unwrap().0[&STONE] >= 20);
+    assert_eq!(saved.get::<PublicProbe>(302, 1).unwrap().0, 42);
+}
+
+#[test]
 fn the_tick_does_no_sight_reads_and_neighbouring_readers_share_the_public_ship() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[derive(Resource)]
@@ -324,4 +411,87 @@ fn all_public_fields_reach_the_player_across_the_wire_byte_budget() {
             [PLAYER, POSITION, schema]
         );
     }
+}
+
+#[test]
+fn transient_subscriber_budget_ack_timeout_and_field_removal_are_isolated() {
+    use std::time::{Duration, SystemTime};
+    let mut app = App::new();
+    app.add_plugins((
+        MeshPlugin::transient(),
+        WorldPlugin,
+        MeshSessionPlugin::default(),
+        LocalSubscriberPlugin,
+    ));
+    assert!(!app.world().contains_resource::<Store>());
+    let actor = Id::numbered(4);
+    let neighbor = Id::numbered(5);
+    let owner = player(app.world_mut(), actor, actor, PLANET_ID, [0; 3]);
+    let other = player(
+        app.world_mut(),
+        neighbor,
+        neighbor,
+        PLANET_ID,
+        [10_000, 0, 0],
+    );
+    app.update();
+    let dir = app.world().resource::<SessionDirectory>().clone();
+    let grant = |id| SessionGrant {
+        object: id,
+        principal: PrincipalId(id),
+        session: SessionId(id),
+        control_epoch: 1,
+        expires_at: SystemTime::now() + Duration::from_secs(60),
+    };
+    let mut views = Vec::new();
+    for object in [actor, neighbor] {
+        let binding = dir.admit(grant(object), ConnectionId(Id::new())).unwrap();
+        let id = SubscriberId(Id::new());
+        dir.subscribe(binding, Some(id)).unwrap();
+        views.push((
+            binding,
+            SubscriberStream::open(
+                &dir,
+                binding,
+                id,
+                SubscriberPolicy {
+                    events_per_poll: 3,
+                    ack_timeout_ticks: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ));
+    }
+    let mut enc = SubscriberEncoder::default();
+    let (b, mut slow) = views.remove(0);
+    let (fast_binding, mut fast) = views.remove(0);
+    let first = slow.next_local(app.world(), &mut enc).unwrap().unwrap();
+    let live = fast.next_local(app.world(), &mut enc).unwrap().unwrap();
+    fast.applied(fast_binding, live.sequence).unwrap();
+    app.world_mut().entity_mut(other).remove::<Inventory>();
+    app.update();
+    assert!(slow.next_local(app.world(), &mut enc).unwrap().is_none());
+    let delta = fast.next_local(app.world(), &mut enc).unwrap().unwrap();
+    assert!(delta.events.iter().any(|e|matches!(e,SubscriberEvent::Delta{object,fields,..} if *object==neighbor&&fields.iter().any(|(k,v)|*k==INVENTORY&&v.is_none()))));
+    fast.applied(fast_binding, delta.sequence).unwrap();
+    app.update();
+    let reset = slow.next_local(app.world(), &mut enc).unwrap().unwrap();
+    assert!(matches!(reset.events.first(), Some(SubscriberEvent::Reset)));
+    assert!(slow.applied(b, first.sequence).is_err());
+    slow.applied(b, reset.sequence).unwrap();
+    app.world_mut().get_mut::<Position>(owner).unwrap().mm[0] = 800_000;
+    app.update();
+    assert!(fast
+        .next_local(app.world(), &mut enc)
+        .unwrap()
+        .unwrap()
+        .events
+        .iter()
+        .any(|e| matches!(e,SubscriberEvent::Leave(id) if *id==actor)));
+    dir.revoke(b).unwrap();
+    assert!(matches!(
+        slow.next_local(app.world(), &mut enc),
+        Err(zz_mesh::Error::Denied)
+    ));
 }

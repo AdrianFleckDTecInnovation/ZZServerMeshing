@@ -20,7 +20,7 @@ pub struct SightRule(pub fn(&World, Entity) -> Option<(Id, SightPoint)>);
 #[derive(Clone, Resource)]
 pub struct SightRanges {
     observer_kind: u32,
-    radii: BTreeMap<u32, u64>,
+    pub(crate) radii: BTreeMap<u32, u64>,
     max: u64,
 }
 impl SightRanges {
@@ -34,7 +34,7 @@ impl SightRanges {
     }
 }
 impl SightOrigin {
-    fn includes(self, radii: &BTreeMap<u32, u64>, frame: Id, point: SightPoint) -> bool {
+    pub(crate) fn includes(self, radii: &BTreeMap<u32, u64>, frame: Id, point: SightPoint) -> bool {
         let Some(&r) = radii.get(&point.kind) else {
             return false;
         };
@@ -107,7 +107,7 @@ fn current_entity(
     (world.get::<Managed>(entity)?.group == group).then_some(entity)
 }
 impl Directory {
-    fn visit_visible(
+    pub(crate) fn visit_visible(
         &self,
         viewer: Id,
         rules: &SightRanges,
@@ -258,7 +258,7 @@ pub(crate) fn sight_page(
 }
 
 impl Pool {
-    fn sight_rules(&self, viewer: Id) -> Result<&SightRanges> {
+    pub(crate) fn sight_rules(&self, viewer: Id) -> Result<&SightRanges> {
         let owner = self
             .directory
             .presence(viewer)
@@ -269,7 +269,7 @@ impl Pool {
             .get_resource::<SightRanges>()
             .ok_or_else(|| invalid("player sight is not configured"))
     }
-    fn local_sight_point(&self, p: &Presence) -> Option<SightPoint> {
+    pub(crate) fn local_sight_point(&self, p: &Presence) -> Option<SightPoint> {
         let world = self.app(p.owner).ok()?.world();
         let entity = *world.resource::<MeshState>().entities.get(&p.id)?;
         world.get::<Simulated>(entity)?;

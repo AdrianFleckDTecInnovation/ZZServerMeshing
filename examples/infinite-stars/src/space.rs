@@ -68,7 +68,12 @@ impl SpaceSettings {
                 let p = w.get::<Position>(e)?;
                 Some((p.frame, SightPoint { kind, mm: p.mm }))
             }))
-            .insert_resource(SpatialRule(physical));
+            .insert_resource(SpatialRule(physical))
+            .insert_resource(zz_mesh::SpatialDependencies(
+                [PLAYER, SHIP, POSITION, CHUNK, crate::movement::DRIVE]
+                    .into_iter()
+                    .collect(),
+            ));
     }
 }
 mod metres {

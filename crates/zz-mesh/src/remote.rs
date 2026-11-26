@@ -56,10 +56,11 @@ pub enum Answer {
     Done,
 }
 enum Work {
+    Subscriber(StreamPoll, Option<SubscriberPlan>),
     Rpc(Request),
     Sight(SightPlan),
 }
-type Job = (Role, Work, SyncSender<Result<Response>>);
+type Job = (Role, Work, SyncSender<Result<Response>>, Instant);
 struct SightAccess {
     rules: SightRanges,
     connect: Box<dyn Fn(Worker) -> Result<Client> + Send + Sync>,
@@ -75,13 +76,20 @@ pub struct WorkerEndpoint {
     broker: Option<Mutex<crate::network_mesh::Broker>>,
     service: Arc<Service>,
     requests: SyncSender<Job>,
+    management: SyncSender<Job>,
     downloads: Arc<Mutex<Downloads>>,
 }
 pub struct WorkerLoop {
     tick_us: u64,
+    pub cpu_budget: std::num::NonZeroUsize,
+    process: ProcessLoad,
+    sample: (Instant, u64),
+    request_work: Duration,
+    queue_wait: Duration,
     pub peers: Option<crate::network_mesh::PeerMesh>,
     service: Arc<Service>,
     rx: Receiver<Job>,
+    management: Receiver<Job>,
     downloads: Arc<Mutex<Downloads>>,
     staged: Option<(Handoff, Prepared)>,
     paused: BTreeMap<Id, Handoff>,
@@ -89,6 +97,14 @@ pub struct WorkerLoop {
     sessions: BTreeMap<Id, VecDeque<Job>>,
     turns: VecDeque<Id>,
     queued: usize,
+    streams: BTreeMap<SubscriberId, LiveStream>,
+    encoder: SubscriberEncoder,
+}
+struct LiveStream {
+    id: Id,
+    view: SubscriberStream,
+    plan: SubscriberPlan,
+    last: Instant,
 }
 pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     make_worker(service, initial, None)
@@ -115,6 +131,7 @@ fn make_worker(
     sight: Option<SightAccess>,
 ) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     let (tx, rx) = mpsc::sync_channel(32);
+    let (management, admin) = mpsc::sync_channel(8);
     let downloads = Arc::new(Mutex::new(Downloads {
         cache: initial,
         partial: None,
@@ -130,13 +147,23 @@ fn make_worker(
             broker,
             service: service.clone(),
             requests: tx,
+            management,
             downloads: downloads.clone(),
         }),
         WorkerLoop {
             tick_us: 0,
+            cpu_budget: std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
+            process: ProcessLoad {
+                resident_bytes: process_usage().1,
+                ..Default::default()
+            },
+            sample: (Instant::now(), process_usage().0),
+            request_work: Duration::ZERO,
+            queue_wait: Duration::ZERO,
             peers: None,
             service,
             rx,
+            management: admin,
             downloads,
             staged: None,
             paused: Default::default(),
@@ -144,6 +171,8 @@ fn make_worker(
             sessions: Default::default(),
             turns: Default::default(),
             queued: 0,
+            streams: Default::default(),
+            encoder: Default::default(),
         },
     )
 }
@@ -161,6 +190,39 @@ fn allowed(service: &Service, role: Role, t: Handoff) -> Result<()> {
     service.store.check_worker(service.worker)
 }
 impl WorkerEndpoint {
+    fn plan(&self, poll: StreamPoll, source: Worker) -> Result<Response> {
+        self.with_viewer(poll.binding.object, |index, rules| {
+            let version = (self.service.worker, index.sight_revision);
+            if Some(version) == poll.known {
+                return Ok(Response::SubscriberPlan(None));
+            }
+            let actor = poll.binding.object;
+            let mut members = Vec::new();
+            if index.presence(actor).is_some_and(|p| p.owner == source) {
+                members.push(actor);
+            }
+            let limit = SubscriberPolicy::default().max_visible;
+            let origin = index.visit_visible(
+                actor,
+                rules,
+                |p| index.sight_points.get(&p.id).copied(),
+                |id, w| {
+                    if w == source && members.len() <= limit {
+                        members.push(id);
+                    }
+                },
+            )?;
+            if members.len() > limit {
+                return Err(Error::Busy("subscriber visibility exceeds source limit"));
+            }
+            Ok(Response::SubscriberPlan(Some(SubscriberPlan {
+                version,
+                source,
+                origin,
+                members,
+            })))
+        })
+    }
     fn with_viewer<T>(
         &self,
         viewer: Id,
@@ -247,8 +309,18 @@ impl WorkerEndpoint {
     }
     fn enqueue(&self, role: Role, work: Work) -> Result<Response> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.requests
-            .try_send((role, work, tx))
+        let queue = if matches!(
+            work,
+            Work::Rpc(
+                Request::Health | Request::Shutdown | Request::Load { .. } | Request::Control(..)
+            )
+        ) {
+            &self.management
+        } else {
+            &self.requests
+        };
+        queue
+            .try_send((role, work, tx, Instant::now()))
             .map_err(|_| Error::Busy("worker request queue"))?;
         rx.recv_timeout(Duration::from_secs(4))
             .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
@@ -414,6 +486,11 @@ impl Endpoint for WorkerEndpoint {
                 };
                 return self.player_page(viewer, *after, *known);
             }
+            Request::Health | Request::Shutdown => {
+                if role != Role::Operator {
+                    return Err(Error::Denied);
+                }
+            }
             Request::Load { required, .. } => {
                 if role != Role::Operator {
                     return Err(Error::Denied);
@@ -421,6 +498,83 @@ impl Endpoint for WorkerEndpoint {
                 if required.len() > MAX_TARGETS {
                     return Err(Error::Busy("placement probe manifests"));
                 }
+            }
+            Request::SessionInputs(inputs) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                if inputs.len() > MAX_TARGETS {
+                    return Err(Error::Busy("routed input batch"));
+                }
+                self.service.store.check_worker(source)?;
+            }
+            Request::SessionProgress(_) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+            }
+            Request::SubscriberSources(binding, subscriber) => {
+                let Role::Worker(w) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(w)?;
+                let directory = SessionDirectory::persistent(self.service.store.clone());
+                if !directory.authorized_subscriber(*binding, *subscriber)? {
+                    return Err(Error::Denied);
+                }
+                return if self.broker.is_none() {
+                    self.directory_call(&request)
+                } else {
+                    let Response::SightSources(mut sources) = self.discover(binding.object)? else {
+                        return Err(invalid("source discovery"));
+                    };
+                    let owner = self
+                        .service
+                        .store
+                        .authorities(&[binding.object])?
+                        .get(&binding.object)
+                        .ok_or(Error::Fenced)?
+                        .1
+                        .worker;
+                    sources.insert(owner, self.service.store.address(owner)?);
+                    Ok(Response::SightSources(sources))
+                };
+            }
+            Request::SubscriberPlan(poll, source) => {
+                let Role::Worker(w) = role else {
+                    return Err(Error::Denied);
+                };
+                if *source != w {
+                    return Err(Error::Denied);
+                }
+                self.service.store.check_worker(w)?;
+                if !SessionDirectory::persistent(self.service.store.clone())
+                    .authorized_subscriber(poll.binding, poll.subscriber)?
+                {
+                    return Err(Error::Denied);
+                }
+                return self.plan(*poll, *source);
+            }
+            Request::SubscriberPoll(poll) => {
+                let Role::Worker(w) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(w)?;
+                if !SessionDirectory::persistent(self.service.store.clone())
+                    .authorized_subscriber(poll.binding, poll.subscriber)?
+                {
+                    return Err(Error::Denied);
+                }
+                let response = if self.broker.is_some() {
+                    self.plan(*poll, self.service.worker)?
+                } else {
+                    self.directory_call(&Request::SubscriberPlan(*poll, self.service.worker))?
+                };
+                let Response::SubscriberPlan(plan) = response else {
+                    return Err(invalid("subscriber directory unavailable"));
+                };
+                return self.enqueue(role, Work::Subscriber(*poll, plan));
             }
             Request::Control(t, c) => {
                 allowed(&self.service, role, *t)?;
@@ -469,6 +623,7 @@ fn flush_inputs(
     if samples.is_empty() {
         return;
     }
+    let start = Instant::now();
     let batch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| invalid("system clock before Unix epoch"))
@@ -487,15 +642,59 @@ fn flush_inputs(
         }
     }
     samples.clear();
+    if let Some(mut metrics) = w.get_resource_mut::<WorkerTimings>() {
+        metrics.input_us += start.elapsed().as_micros() as u64;
+    }
 }
 impl WorkerLoop {
     pub fn record_tick(&mut self, elapsed: Duration) {
-        self.tick_us = (self.tick_us * 7 + elapsed.as_micros() as u64) / 8;
+        self.record_cycle(elapsed, Duration::ZERO, Duration::ZERO, Default::default());
+    }
+    pub fn record_cycle(
+        &mut self,
+        ecs: Duration,
+        peers: Duration,
+        lateness: Duration,
+        detail: WorkerTimings,
+    ) {
+        let elapsed = ecs + peers;
+        let requests = std::mem::take(&mut self.request_work);
+        let queue = std::mem::take(&mut self.queue_wait);
+        self.process.simulation_and_peer_us = elapsed.as_micros() as u64;
+        self.process.request_work_us = requests.as_micros() as u64;
+        self.process.queue_wait_us = queue.as_micros() as u64;
+        // ECS/peer and pump execute consecutively. Background CPU runs in parallel.
+        let busy = elapsed + requests;
+        self.process.ecs_us = ecs.as_micros() as u64;
+        self.process.peer_us = peers.as_micros() as u64;
+        self.process.checkpoint_us = detail.checkpoint_us;
+        self.process.input_us = detail.input_us;
+        self.process.action_us = detail.action_us;
+        self.process.migration_us = detail.migration_us;
+        if busy.max(elapsed + lateness) > Duration::from_millis(50) {
+            self.process.deadline_misses += 1;
+        }
+        let sample_elapsed = self.sample.0.elapsed();
+        if sample_elapsed >= Duration::from_millis(500) {
+            let (cpu, rss) = process_usage();
+            self.process.cpu_permille = (u128::from(cpu.saturating_sub(self.sample.1)) * 1000
+                / sample_elapsed.as_nanos()) as u64;
+            self.process.resident_bytes = rss;
+            self.sample = (Instant::now(), cpu);
+        }
+        let cpu_us = self.process.cpu_permille.saturating_mul(50) / self.cpu_budget.get() as u64;
+        let demand = (busy.as_micros() as u64)
+            .max(cpu_us)
+            .max(self.process.queue_wait_us);
+        self.tick_us = (self.tick_us * 7 + demand) / 8;
     }
     /// A bounded round-robin turn per logical session. One atomic request may finish
     /// after the soft deadline. Both its target count and its bytes have hard limits.
     pub fn pump(&mut self, w: &mut World, max: usize, time: Duration) {
+        let pump_start = Instant::now();
         if Instant::now() >= self.next_decision_check {
+            self.streams
+                .retain(|_, s| s.last.elapsed() < Duration::from_secs(60));
             self.next_decision_check = Instant::now() + Duration::from_millis(100);
             self.paused.retain(
                 |group, ticket| match self.service.store.handoff_phase(*ticket) {
@@ -520,8 +719,21 @@ impl WorkerLoop {
             }
         }
         let start = Instant::now();
-        while self.queued < 32 {
-            let Ok(job) = self.rx.try_recv() else { break };
+        // Admit reserved control work even when the ordinary round-robin is full.
+        for _ in 0..40 {
+            let administrative = (self.queued < 40)
+                .then(|| self.management.try_recv().ok())
+                .flatten();
+            let priority = administrative.is_some();
+            let Some(job) = administrative.or_else(|| {
+                if self.queued < 32 {
+                    self.rx.try_recv().ok()
+                } else {
+                    None
+                }
+            }) else {
+                break;
+            };
             let session = match &job.1 {
                 Work::Rpc(Request::Actions(a)) => {
                     a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0))
@@ -532,18 +744,37 @@ impl WorkerLoop {
                     Role::Player(id) => id,
                     _ => Id::numbered(0),
                 },
+                Work::Subscriber(poll, _) => poll.binding.session.0,
                 _ => Id::numbered(0),
             };
             let queue = self.sessions.entry(session).or_default();
-            if queue.len() >= 8 {
+            if !priority && queue.len() >= 8 {
                 let _ = job.2.send(Err(Error::Busy("per-session request queue")));
                 continue;
             }
             if queue.is_empty() {
-                self.turns.push_back(session)
+                if priority {
+                    self.turns.push_front(session);
+                } else {
+                    self.turns.push_back(session);
+                }
             }
-            queue.push_back(job);
+            if priority {
+                queue.push_front(job);
+            } else {
+                queue.push_back(job);
+            }
             self.queued += 1;
+            self.process.max_queue_depth = self.process.max_queue_depth.max(self.queued);
+        }
+        if let Some(oldest) = self
+            .sessions
+            .values()
+            .filter_map(|q| q.front())
+            .map(|j| j.3.elapsed())
+            .max()
+        {
+            self.queue_wait = self.queue_wait.max(oldest);
         }
         let mut samples = Vec::new();
         let mut replies = Vec::new();
@@ -555,7 +786,8 @@ impl WorkerLoop {
                 break;
             };
             let queue = self.sessions.get_mut(&session).unwrap();
-            let (role, req, reply) = queue.pop_front().unwrap();
+            let (role, req, reply, enqueued) = queue.pop_front().unwrap();
+            self.queue_wait = self.queue_wait.max(enqueued.elapsed());
             if queue.is_empty() {
                 self.sessions.remove(&session);
             } else {
@@ -564,6 +796,12 @@ impl WorkerLoop {
             self.queued -= 1;
             let req = match req {
                 Work::Rpc(r) => r,
+                Work::Subscriber(poll, plan) => {
+                    flush_inputs(w, &mut samples, &mut replies);
+                    let result = self.stream(w, poll, plan);
+                    let _ = reply.send(result);
+                    continue;
+                }
                 Work::Sight(plan) => {
                     flush_inputs(w, &mut samples, &mut replies);
                     let result = match role {
@@ -587,7 +825,43 @@ impl WorkerLoop {
                 continue;
             }
             flush_inputs(w, &mut samples, &mut replies);
+            let start_request = Instant::now();
+            let action = matches!(req, Request::Actions(_));
+            let migration = matches!(req, Request::Control(..));
             let result = match req {
+                Request::Health => self.service.store.drain_status(self.service.worker).map(
+                    |(draining, groups)| Response::Health {
+                        worker: self.service.worker,
+                        ready: !draining && w.resource::<MeshState>().tick() > 0,
+                        groups,
+                        load: self.process,
+                    },
+                ),
+                Request::Shutdown => self
+                    .service
+                    .store
+                    .retire(self.service.worker)
+                    .map(|_| Response::Stopped),
+                Request::SessionProgress(binding) => {
+                    confirmed_session_input(w, binding).map(Response::Input)
+                }
+                Request::SessionInputs(inputs) => (|| {
+                    let ingress = w
+                        .get_resource::<SessionIngress>()
+                        .ok_or_else(|| invalid("external session ingress missing"))?;
+                    for input in inputs {
+                        let state = w.resource::<MeshState>();
+                        let authoritative = state
+                            .entities
+                            .get(&input.binding.object)
+                            .is_some_and(|e| w.get::<Simulated>(*e).is_some());
+                        if !authoritative {
+                            return Err(Error::Fenced);
+                        }
+                        ingress.submit(input)?;
+                    }
+                    Ok(Response::Approved)
+                })(),
                 Request::Load { group, required } => {
                     let cache = w.resource::<BlobCache>();
                     let policy = w
@@ -601,8 +875,12 @@ impl WorkerLoop {
                         memory_bytes: policy.memory_bytes,
                         tick_us: self
                             .tick_us
-                            .max(hints.map_or(0, |h| h.0.values().copied().sum())),
+                            .max(hints.and_then(|h| h.0.values().copied().max()).unwrap_or(0)),
                         cache_bytes: cache.bytes() as u64,
+                        process: ProcessLoad {
+                            pending_requests: self.queued,
+                            ..self.process
+                        },
                         groups: w.resource::<MeshState>().owned_groups().count(),
                         group_us: group.and_then(|g| hints?.0.get(&g).copied()),
                         affinity: group
@@ -675,8 +953,75 @@ impl WorkerLoop {
                 r => self.service.dispatch(role, r),
             };
             let _ = reply.send(result);
+            if action || migration {
+                if let Some(mut t) = w.get_resource_mut::<WorkerTimings>() {
+                    let us = start_request.elapsed().as_micros() as u64;
+                    if action {
+                        t.action_us += us;
+                    } else {
+                        t.migration_us += us;
+                    }
+                }
+            }
         }
         flush_inputs(w, &mut samples, &mut replies);
+        self.request_work += pump_start.elapsed();
+    }
+    fn stream(
+        &mut self,
+        w: &mut World,
+        poll: StreamPoll,
+        plan: Option<SubscriberPlan>,
+    ) -> Result<Response> {
+        let directory = w
+            .get_resource::<SessionDirectory>()
+            .ok_or_else(|| invalid("external session plugin missing"))?
+            .clone();
+        if !directory.authorized_subscriber(poll.binding, poll.subscriber)? {
+            return Err(Error::Denied);
+        }
+        w.init_resource::<SubscriberSource>();
+        let existing = self.streams.get(&poll.subscriber);
+        if existing.is_none_or(|s| Some(s.id) != poll.stream) {
+            let Some(plan) = plan else {
+                return Ok(Response::RefreshPlan);
+            };
+            if existing.is_none() && self.streams.len() >= w.resource::<SessionIngress>().capacity()
+            {
+                return Err(Error::Busy("worker subscriber capacity"));
+            }
+            let live = LiveStream {
+                id: Id::new(),
+                view: SubscriberStream::open(
+                    &directory,
+                    poll.binding,
+                    poll.subscriber,
+                    w.get_resource::<SubscriberPolicy>()
+                        .copied()
+                        .unwrap_or_default(),
+                )?,
+                plan,
+                last: Instant::now(),
+            };
+            self.streams.insert(poll.subscriber, live);
+        } else {
+            let live = self.streams.get_mut(&poll.subscriber).unwrap();
+            if let Some(plan) = plan {
+                live.plan = plan;
+            } else if Some(live.plan.version) != poll.known {
+                return Ok(Response::RefreshPlan);
+            }
+            live.view.poll_binding(&directory, poll)?;
+        }
+        let live = self.streams.get_mut(&poll.subscriber).unwrap();
+        live.last = Instant::now();
+        let frame = live.view.next_worker(w, &live.plan, &mut self.encoder)?;
+        Ok(Response::Subscriber(StreamReply {
+            stream: live.id,
+            source: self.service.worker,
+            version: live.plan.version,
+            frame,
+        }))
     }
     fn control(&mut self, w: &mut World, role: Role, t: Handoff, c: Command) -> Result<Answer> {
         allowed(&self.service, role, t)?;
@@ -734,6 +1079,9 @@ impl WorkerLoop {
             Command::Freeze(known) if here == t.source.worker => {
                 if matches!(db.handoff_phase(t)?, Phase::Frozen | Phase::Ready) {
                     return Ok(Answer::Snapshot(db.frozen(t)?));
+                }
+                if w.contains_resource::<AsyncCheckpoints>() {
+                    checkpoint_group(w, t.group)?;
                 }
                 let Some(s) = exact(w, db, t, View::Migration)? else {
                     return Ok(Answer::State(Phase::Preparing));

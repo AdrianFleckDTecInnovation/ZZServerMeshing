@@ -96,6 +96,7 @@ struct Options {
     island_size: usize,
     ticks: usize,
     partitions: usize,
+    cpu_budget: Option<usize>,
     active_percent: usize,
     effects: gameplay::Settings,
     require_20hz: bool,
@@ -110,6 +111,7 @@ impl Options {
             island_size: 16,
             ticks: 60,
             partitions: 1,
+            cpu_budget: None,
             active_percent: 100,
             effects: gameplay::Settings {
                 count: 0,
@@ -143,6 +145,7 @@ impl Options {
                 "--island-size" => o.island_size = number()?,
                 "--ticks" => o.ticks = number()?,
                 "--partitions" => o.partitions = number()?,
+                "--cpu-budget" => o.cpu_budget = Some(number()?),
                 "--active-percent" => o.active_percent = number()?,
                 "--status-effects" => o.effects.count = number()?,
                 "--effect-interval" => {
@@ -185,6 +188,13 @@ impl Options {
                 "each partition needs at least one island and an even share of the workers",
             ));
         }
+        if o.cpu_budget.is_some_and(|n| {
+            n < o.partitions || n > std::thread::available_parallelism().map_or(1, |p| p.get())
+        }) {
+            return Err(invalid(
+                "cpu budget must cover the requested partitions and fit the available CPUs",
+            ));
+        }
         Ok(o)
     }
 }
@@ -209,8 +219,9 @@ fn lane(
     partition: usize,
     first_player: usize,
     clock: Option<Clock>,
+    background: BulkExecutor,
 ) -> Result<Value> {
-    let mut pool = Pool::new(db.clone(), o.players * 2);
+    let mut pool = Pool::with_bulk_executor(db.clone(), o.players * 2, background);
     // Measure stable placement. Every island straddles two authorities.
     pool.policy.every = 0;
     let mut workers = Vec::new();
@@ -445,7 +456,7 @@ fn lane(
         json!({"schema":1,"workload":"session inputs, Bevy movement, worker replication, checkpoints, physical islands",
         "target_os":std::env::consts::OS,"players":o.players,"workers":o.workers,"active_workers":active_workers.len(),
         "island_size":o.island_size,"islands":o.players/o.island_size,"ticks":o.ticks,"warmup_ticks":4,
-        "store":if o.database==":memory:"{"memory"}else{"file"},"tick_ms":quantiles(tick_ms),
+        "store":if o.database==":memory:"{"memory"}else{"file"},"lane_samples_ms":clock.is_some().then(||tick_ms.as_slice()),"tick_ms":quantiles(tick_ms.clone()),
         "equivalent_hz":o.ticks as f64/runtime.as_secs_f64(),"ticks_over_50ms":deadline_misses,
         "inputs_acked":acks,"peer_updates_applied":frames,"cross_island_subscriptions":0,
         "active_percent":o.active_percent,"moving_players":moving,"component_projections":pool.link_stats().0-projections,
@@ -458,9 +469,13 @@ fn lane(
     )
 }
 fn run(o: &Options) -> Result<Value> {
+    if let Some(cores) = o.cpu_budget {
+        bevy::core::TaskPoolOptions::with_num_threads(cores).create_default_pools();
+    }
     let db = Store::open(&o.database)?;
+    let background = BulkExecutor::new(2);
     if o.partitions == 1 {
-        return lane(o, db, 0, 0, None);
+        return lane(o, db, 0, 0, None, background);
     }
     // All reference frames use the same authority, session and checkpoint store.
     // Each Bevy App stays on its owning thread. Wait for every frame on each tick.
@@ -477,8 +492,16 @@ fn run(o: &Options) -> Result<Value> {
         local.workers /= o.partitions;
         local.players = after - first;
         let store = db.clone();
+        let background = background.clone();
         jobs.push(std::thread::spawn(move || {
-            lane(&local, store, p, first, Some(Clock { go, done }))
+            lane(
+                &local,
+                store,
+                p,
+                first,
+                Some(Clock { go, done }),
+                background,
+            )
         }));
     }
     let mut times = Vec::new();
@@ -511,6 +534,20 @@ fn run(o: &Options) -> Result<Value> {
         lanes.push(job.join().map_err(|_| invalid("partition panicked"))??);
     }
     result?;
+    let barrier: Vec<_> = times
+        .iter()
+        .enumerate()
+        .map(|(i, elapsed)| {
+            let slowest = lanes
+                .iter()
+                .filter_map(|l| l["lane_samples_ms"][i].as_f64())
+                .fold(0., f64::max);
+            (elapsed - slowest).max(0.)
+        })
+        .collect();
+    for lane in &mut lanes {
+        lane.as_object_mut().unwrap().remove("lane_samples_ms");
+    }
     let sum = |k: &str| lanes.iter().map(|v| v[k].as_u64().unwrap()).sum::<u64>();
     let stage_sum = |key: &str| {
         lanes
@@ -534,7 +571,7 @@ fn run(o: &Options) -> Result<Value> {
         "cross_island_subscriptions":sum("cross_island_subscriptions"),
         "ticks_over_50ms":times.iter().filter(|&&t|t>50.).count(),
         "equivalent_hz":o.ticks as f64*1000./times.iter().sum::<f64>(),
-        "tick_ms":quantiles(times),"rust_allocations_per_tick":stage_sum("rust_allocations_per_tick"),
+        "tick_ms":quantiles(times),"barrier_and_checks_ms":quantiles(barrier),"rust_allocations_per_tick":stage_sum("rust_allocations_per_tick"),
         "rust_allocated_bytes_per_tick":stage_sum("rust_allocated_bytes_per_tick"),"partition_profiles":lanes}),
     )
 }

@@ -14,7 +14,7 @@ use zz_mesh::{
 mod supervisor;
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS | health DIR ADDRESS | shutdown DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {
@@ -110,6 +110,34 @@ fn run() -> Result<()> {
             argument(args.next(), "target slot")?,
         ),
         "abort" => abort(&dir, argument(args.next(), "target slot")?),
+        "health" | "shutdown" => {
+            let addr = argument(args.next(), "worker address")?;
+            let request = if mode == "health" {
+                Request::Health
+            } else {
+                Request::Shutdown
+            };
+            match connect(&dir, addr, "operator")?.call(&request)? {
+                Response::Stopped => {
+                    println!("Worker stopped");
+                    Ok(())
+                }
+                Response::Health {
+                    worker,
+                    ready,
+                    groups,
+                    load,
+                } => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"worker":worker,"ready":ready,"groups":groups,"load":load})
+                    );
+                    Ok(())
+                }
+                Response::Error(e) => Err(invalid(e)),
+                _ => Err(invalid("unexpected operator response")),
+            }
+        }
         "status" => status(
             &dir,
             argument(args.next().or_else(|| Some(LOCAL.into())), "worker address")?,

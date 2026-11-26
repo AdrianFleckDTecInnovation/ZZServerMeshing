@@ -17,7 +17,7 @@ use std::{
 };
 
 const MAGIC: [u8; 4] = *b"ZZM1";
-pub const WIRE_VERSION: u16 = 2;
+pub const WIRE_VERSION: u16 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     Player(Id),
@@ -35,6 +35,8 @@ pub enum Request {
         group: Id,
     },
     Diagnostics,
+    Health,
+    Shutdown,
     Input(Input),
     Control(Handoff, crate::remote::Command),
     Actions(Vec<Intent>),
@@ -69,6 +71,12 @@ pub enum Request {
     },
     /// An authenticated worker relays discovery for one of its client connections.
     SightDiscover(Id),
+    /// Trusted adapter forwarding a batch to its current simulation worker.
+    SessionInputs(Vec<SessionInput>),
+    SessionProgress(ControlBinding),
+    SubscriberSources(ControlBinding, SubscriberId),
+    SubscriberPoll(StreamPoll),
+    SubscriberPlan(StreamPoll, Worker),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -111,6 +119,16 @@ pub enum Response {
     SightUnchanged {
         next: Option<Id>,
     },
+    Subscriber(StreamReply),
+    SubscriberPlan(Option<SubscriberPlan>),
+    RefreshPlan,
+    Health {
+        worker: Worker,
+        ready: bool,
+        groups: usize,
+        load: ProcessLoad,
+    },
+    Stopped,
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -127,6 +145,13 @@ impl Endpoint for Service {
     fn dispatch(&self, role: Role, r: Request) -> Result<Response> {
         match r {
             Request::Storage(_)
+            | Request::Health
+            | Request::Shutdown
+            | Request::SessionInputs(_)
+            | Request::SessionProgress(_)
+            | Request::SubscriberSources(..)
+            | Request::SubscriberPoll(_)
+            | Request::SubscriberPlan(..)
             | Request::Join { .. }
             | Request::Load { .. }
             | Request::SightSources
@@ -573,6 +598,7 @@ impl Listener {
                 service.clone(),
                 active.clone(),
             );
+            let stopping = stop.clone();
             active.fetch_add(1, Ordering::AcqRel);
             std::thread::spawn(move || {
                 let run = || -> Result<()> {
@@ -593,7 +619,15 @@ impl Listener {
                         let answer = svc
                             .dispatch(role, req)
                             .unwrap_or_else(|e| Response::Error(e.to_string()));
-                        framed(&mut stream, &answer, &stats)?;
+                        let retiring =
+                            matches!(answer, Response::Stopped) && role == Role::Operator;
+                        let sent = framed(&mut stream, &answer, &stats);
+                        if retiring {
+                            stopping.store(true, Ordering::Release);
+                            sent?;
+                            break;
+                        }
+                        sent?;
                     }
                     Ok(())
                 };

@@ -38,6 +38,32 @@ pub struct WorkerLoad {
     pub group_us: Option<u64>,
     pub affinity: BTreeMap<Worker, u64>,
     pub cached_required: u64,
+    pub process: ProcessLoad,
+}
+/// CPU permille is measured across all threads (1000 is one busy core).
+#[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ProcessLoad {
+    pub resident_bytes: u64,
+    pub cpu_permille: u64,
+    pub simulation_and_peer_us: u64,
+    pub request_work_us: u64,
+    pub queue_wait_us: u64,
+    pub pending_requests: usize,
+    pub deadline_misses: u64,
+    pub ecs_us: u64,
+    pub peer_us: u64,
+    pub checkpoint_us: u64,
+    pub input_us: u64,
+    pub action_us: u64,
+    pub migration_us: u64,
+    pub max_queue_depth: usize,
+}
+#[derive(Default, bevy_ecs::prelude::Resource)]
+pub struct WorkerTimings {
+    pub checkpoint_us: u64,
+    pub input_us: u64,
+    pub action_us: u64,
+    pub migration_us: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {

@@ -544,11 +544,16 @@ impl PeerMesh {
         self.tick += 1;
         let dirty = std::mem::take(&mut w.resource_mut::<MeshState>().dirty);
         let mut dirty = dirty.into_iter();
-        while let Some(id) = dirty.next() {
+        while let Some((id, change)) = dirty.next() {
+            if !change.spatial {
+                self.publisher
+                    .changed_fields(&self.own, id, self.tick, change.fields.slice());
+                continue;
+            }
             let desc = describe::<true>(w, self.here, id);
             if self.own.descriptions.get(&id) != desc.as_ref() {
                 if self.pending.len() >= LINKS && !self.pending.contains_key(&id) {
-                    w.resource_mut::<MeshState>().dirty.insert(id);
+                    w.resource_mut::<MeshState>().dirty.insert(id, change);
                     w.resource_mut::<MeshState>().dirty.extend(dirty);
                     return Err(Error::Busy("spatial report backlog"));
                 }
@@ -560,7 +565,8 @@ impl PeerMesh {
                 self.change += 1;
                 self.pending.insert(id, self.change);
             }
-            self.publisher.changed(&self.own, id, self.tick);
+            self.publisher
+                .changed_fields(&self.own, id, self.tick, change.fields.slice());
         }
         while let Ok((_, response, Some(report))) = self.control.receive.try_recv() {
             let Some(sent) = self.inflight.take() else {

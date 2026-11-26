@@ -118,13 +118,28 @@ impl Publisher {
         Ok(())
     }
     pub fn changed(&mut self, d: &impl Routing, id: Id, tick: u64) {
-        for (&to, sub) in d.edges(id).into_iter().flatten() {
+        self.changed_fields(d, id, tick, None);
+    }
+    pub(crate) fn changed_fields(
+        &mut self,
+        d: &impl Routing,
+        id: Id,
+        tick: u64,
+        fields: Option<&[u32]>,
+    ) {
+        for &to in d.edges(id).into_iter().flat_map(|edges| edges.keys()) {
+            let mut relevant = false;
             if let Some(l) = self.links.get_mut(&(id, to)) {
-                for &schema in sub.components.keys() {
-                    l.fields.entry(schema).or_default().dirty = true;
+                for (schema, sample) in &mut l.fields {
+                    if fields.is_none_or(|changed| changed.contains(schema)) {
+                        sample.dirty = true;
+                        relevant = true;
+                    }
                 }
             }
-            self.schedule((id, to), tick);
+            if relevant {
+                self.schedule((id, to), tick);
+            }
         }
     }
     pub fn ack(&mut self, to: Recipient, id: Id, epoch: u64, serial: u64) {

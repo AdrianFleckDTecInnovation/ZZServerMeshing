@@ -133,7 +133,7 @@ impl Store {
                 }
                 c.execute(
                     "INSERT INTO handoff_checkpoints VALUES(?,?,?)",
-                    params![t.id, ck.id, encode(ck)?],
+                    params![t.id, ck.id, crate::store::checkpoint_body(ck)?],
                 )?;
             }
             s.records = ordered;

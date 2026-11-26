@@ -360,18 +360,17 @@ impl Download {
     }
 }
 type BulkJob = Box<dyn FnOnce() + Send>;
+#[derive(Clone)]
 pub struct BulkExecutor {
-    tx: SyncSender<BulkJob>,
+    tx: Arc<std::sync::OnceLock<SyncSender<BulkJob>>>,
+    queue: usize,
 }
 impl BulkExecutor {
     pub fn new(queue: usize) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<BulkJob>(queue);
-        thread::spawn(move || {
-            while let Ok(job) = rx.recv() {
-                job()
-            }
-        });
-        Self { tx }
+        Self {
+            tx: Default::default(),
+            queue,
+        }
     }
     pub fn submit<T: Send + 'static>(
         &self,
@@ -379,6 +378,15 @@ impl BulkExecutor {
     ) -> Result<Receiver<Result<T>>> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.tx
+            .get_or_init(|| {
+                let (send, jobs) = mpsc::sync_channel::<BulkJob>(self.queue);
+                thread::spawn(move || {
+                    while let Ok(job) = jobs.recv() {
+                        job();
+                    }
+                });
+                send
+            })
             .try_send(Box::new(move || {
                 let _ = tx.send(work());
             }))

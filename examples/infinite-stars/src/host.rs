@@ -21,6 +21,59 @@ pub(crate) fn write_new_credential(path: &Path, data: &[u8]) -> mesh::Result<()>
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct HostLimits {
+    tick_budget_us: u64,
+    memory_bytes: u64,
+    cpu_cores: std::num::NonZeroUsize,
+    internal_connections: Option<std::num::NonZeroUsize>,
+    reference_players: bool,
+    subscriber: SubscriberPolicy,
+    checkpoint_groups: usize,
+    checkpoint_bytes: std::num::NonZeroUsize,
+    pub(crate) session_capacity: std::num::NonZeroUsize,
+}
+impl Default for HostLimits {
+    fn default() -> Self {
+        let p = BalancePolicy::default();
+        Self {
+            tick_budget_us: p.tick_budget_us,
+            memory_bytes: p.memory_bytes,
+            cpu_cores: std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
+            internal_connections: None,
+            reference_players: true,
+            subscriber: Default::default(),
+            checkpoint_groups: 0,
+            checkpoint_bytes: (8 * 1024 * 1024).try_into().unwrap(),
+            session_capacity: 4096.try_into().unwrap(),
+        }
+    }
+}
+impl HostLimits {
+    pub(crate) fn read(dir: &Path) -> mesh::Result<Self> {
+        let limits: Self = match fs::read(dir.join("capacity.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| invalid(format!("capacity.json: {e}")))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.into()),
+        };
+        if limits.tick_budget_us == 0 || limits.memory_bytes == 0 {
+            return Err(invalid("capacity budgets must be positive"));
+        }
+        let available = std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN);
+        if limits.cpu_cores > available {
+            return Err(invalid(format!(
+                "cpu_cores exceeds {available} available processors"
+            )));
+        }
+        // Bevy 0.15 initializes its process-wide pools once, before the first World.
+        bevy::core::TaskPoolOptions::with_num_threads(limits.cpu_cores.get())
+            .create_default_pools();
+        Ok(limits)
+    }
+}
 pub(crate) fn issuer_params() -> mesh::Result<CertificateParams> {
     let mut p = CertificateParams::new(vec![]).map_err(|e| invalid(e.to_string()))?;
     p.distinguished_name
@@ -129,8 +182,17 @@ pub(crate) fn resume_node(
     worker: Worker,
     settings: SpaceSettings,
 ) -> mesh::Result<App> {
+    resume_node_with_capacity(db, worker, settings, 4096.try_into().unwrap())
+}
+pub(crate) fn resume_node_with_capacity(
+    db: &Store,
+    worker: Worker,
+    settings: SpaceSettings,
+    capacity: std::num::NonZeroUsize,
+) -> mesh::Result<App> {
     let slot = worker.slot;
     let mut app = world_with_settings(db, worker, settings);
+    app.add_plugins(MeshSessionPlugin { capacity });
     for group in db.owned(slot)? {
         mesh::restore_group(app.world_mut(), group)?;
     }
@@ -168,13 +230,14 @@ pub fn listen(
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
     let settings = SpaceSettings::load(&dir)?;
+    let limits = HostLimits::read(&dir)?;
     init_tls(&dir)?;
     let db = Store::open(dir.join("world.sqlite"))?;
     let w = db.start_worker(slot)?;
-    let app = resume_node(&db, w, settings)?;
+    let app = resume_node_with_capacity(&db, w, settings, limits.session_capacity)?;
     provision_worker(&dir, &db, w)?;
     let cred = identity(&dir, &worker_name(w))?;
-    run_node(dir, db, w, app, cred, addr, ready)
+    run_node(dir, db, w, app, cred, addr, ready, limits)
 }
 pub(crate) fn run_node(
     dir: PathBuf,
@@ -184,29 +247,23 @@ pub(crate) fn run_node(
     cred: Identity,
     addr: std::net::SocketAddr,
     ready: Option<PathBuf>,
+    limits: HostLimits,
 ) -> mesh::Result<()> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Limits {
-        tick_budget_us: u64,
-        memory_bytes: u64,
+    if let Some(groups) = std::num::NonZeroUsize::new(limits.checkpoint_groups) {
+        app.insert_resource(AsyncCheckpoints::new(
+            BulkExecutor::new(groups.get()),
+            groups,
+            limits.checkpoint_bytes,
+        ));
     }
-    match fs::read(dir.join("capacity.json")) {
-        Ok(bytes) => {
-            let limits: Limits = serde_json::from_slice(&bytes)
-                .map_err(|e| invalid(format!("capacity.json: {e}")))?;
-            if limits.tick_budget_us == 0 || limits.memory_bytes == 0 {
-                return Err(invalid("capacity budgets must be positive"));
-            }
-            app.insert_resource(BalancePolicy {
-                tick_budget_us: limits.tick_budget_us,
-                memory_bytes: limits.memory_bytes,
-                ..Default::default()
-            });
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-        Err(e) => return Err(e.into()),
-    }
+    app.insert_resource(limits.subscriber);
+    app.insert_resource(BalancePolicy {
+        tick_budget_us: limits.tick_budget_us,
+        memory_bytes: limits.memory_bytes,
+        ..Default::default()
+    });
+    app.init_resource::<WorkerTimings>()
+        .init_resource::<GroupTimings>();
     let player = digest(&fs::read(dir.join("player.der"))?);
     let distributed = dir.join("enrol.der").exists();
     let operator = if distributed {
@@ -221,11 +278,19 @@ pub(crate) fn run_node(
         &identity(&dir, "server")?,
         move |fingerprint| {
             if fingerprint == player {
-                Ok(Role::Player(ACTOR))
+                if limits.reference_players {
+                    Ok(Role::Player(ACTOR))
+                } else {
+                    Err(mesh::Error::Denied)
+                }
             } else if Some(fingerprint) == operator {
                 Ok(Role::Operator)
             } else if let Some(actor) = registry.authenticated_player(fingerprint)? {
-                Ok(Role::Player(actor))
+                if limits.reference_players {
+                    Ok(Role::Player(actor))
+                } else {
+                    Err(mesh::Error::Denied)
+                }
             } else {
                 registry.authenticated_worker(fingerprint).map(Role::Worker)
             }
@@ -268,13 +333,18 @@ pub(crate) fn run_node(
         connect.clone(),
     );
     event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(db.clone(), w, connect));
-    let connections = if distributed { 256 } else { 16 };
+    event_loop.cpu_budget = limits.cpu_cores;
+    let connections = limits
+        .internal_connections
+        .map_or(if distributed { 256 } else { 16 }, |n| n.get());
     let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), connections));
     let mut next = std::time::Instant::now();
     while !thread.is_finished() {
         if std::time::Instant::now() >= next {
             let tick_start = std::time::Instant::now();
             app.update();
+            let ecs = tick_start.elapsed();
+            let peer_start = std::time::Instant::now();
             if let Some(peers) = event_loop.peers.as_mut() {
                 if let Err(e) = peers.step(app.world_mut()) {
                     app.world_mut()
@@ -282,7 +352,14 @@ pub(crate) fn run_node(
                         .diagnose(e.to_string());
                 }
             }
-            event_loop.record_tick(tick_start.elapsed());
+            let peers = peer_start.elapsed();
+            let detail = std::mem::take(&mut *app.world_mut().resource_mut::<WorkerTimings>());
+            event_loop.record_cycle(
+                ecs,
+                peers,
+                tick_start.saturating_duration_since(next),
+                detail,
+            );
             next = tick_start + std::time::Duration::from_millis(50);
         }
         event_loop.pump(app.world_mut(), 16, std::time::Duration::from_millis(3));

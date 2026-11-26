@@ -10,6 +10,7 @@ zz-mesh = { path = "../../crates/zz-mesh" }
 bevy = { version = "0.15", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
 rcgen = "0.13"
 rusqlite = { version = "0.43", features = ["bundled"] }
 

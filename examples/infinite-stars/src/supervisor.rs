@@ -93,7 +93,7 @@ fn one(dir: &Path, db: &Store, drain: Option<Worker>) -> Result<bool> {
                     worker: w,
                     tick_us: r.tick_us,
                     budget_us: r.budget_us,
-                    used: r.cache_bytes,
+                    used: r.process.resident_bytes.max(r.cache_bytes),
                     memory: r.memory_bytes,
                     draining,
                 },

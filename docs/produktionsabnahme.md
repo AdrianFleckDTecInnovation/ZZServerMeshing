@@ -1,5 +1,24 @@
 # Infinite Stars betreiben und abnehmen
 
+## Delta-Analyse für die Bibliotheksfinalisierung
+
+Ausgangsstand ist `732a8af`. Die [ECS- und Prozessmessungen](tickprofil.md), die [Sichtmessung](spielersicht.md) und ihre Rohdaten unter `docs/benchmarks` bleiben versionsgebundene Referenzen. Der Windows-Release-Build dieses Commits reproduzierte mit 10.000 stehenden Spielern, 32 Worlds, vier Partitionen, 128 privaten Effekten und 40 Ticks 500.000 Projektionen, null Peer-Updates und 18,26 ms p95. Das Bewegungsszenario ohne Effekte bestätigte 400.000 Peer-Updates bei 18,07 ms p95. Die folgenden Einstufungen beschreiben den Stand **vor** den Änderungen.
+
+| Auftrag | Einstufung am Ausgangsstand | Implementierung, Nachweis oder Lücke |
+| --- | --- | --- |
+| 4.1–4.2 Worker- und Gruppenlast | Teilweise implementiert | `WorkerLoad` enthält ECS- und Peer-Zeit, `GroupTimings` erlaubt Spielwerte. Request-Pumpe, Prozessspeicher, CPU und Rückstau fehlen in der Platzierung. |
+| 4.3 Private Änderungen | Teilweise implementiert | Feldfilter schützen Inhalte. `track<T>` markiert das gesamte Objekt für Spatial und Publisher. Der Stillstandstest reproduziert die unnötige Arbeit. |
+| 5.1–5.6 Session-Zulassung und Lifecycle | Teilweise implementiert | mTLS-Identität, logische Session, Sequenzen, stabile IDs und Authority sind getestet. Externe Grants, exklusive Steuerungsepochen, Ablauf und verbindungsgebundener Widerruf fehlen. Eine eigene Accountverwaltung entfällt. |
+| 6.1–6.2 Transport | Teilweise implementiert | Getrennte interne Kontroll- und Peerkanäle, begrenzte Frames und Request-Pumpe vorhanden. Transportunabhängige öffentliche Übergabe und deren Ressourcenbudgets fehlen. Ein weiterer öffentlicher Socket-Server entfällt. |
+| 7.1–7.4 Persönliche Zustellung | Teilweise implementiert | Exakte 3D-Radien, private Projektion, gepagte mTLS-Abfragen sowie Peer-Baselines getestet. Kontinuierliche individuelle Zustellung, Anwendungs-ACK und berechtigungsgebundener Resume fehlen im externen Clientpfad. |
+| 8.1–8.4 Simulation, Storage und externe Aktionen | Teilweise implementiert | SQLite schützt Fencing, Checkpoints, Receipts und atomare Beispielaktionen. Auch der lokale Standard öffnet SQLite. Ein separater flüchtiger Betrieb und ein Integrationspfad für extern bestätigte Revisionen fehlen. |
+| 9.1–9.4 Authority und Recovery | Implementiert und getestet für Worker-Neustart und abgebrochenen Handoff, teilweise für Betriebsabnahme | Prozess- und Recoverytests prüfen Generation, Freeze und Ersatzprozess. Backup ist dokumentiert. Automatische Übernahme bei Verlust des Authority-Volumes, Partitionstests über mehrere Rechner und abgenommene RTO fehlen. |
+| 10.1–10.8 Parallelität | Teilweise implementiert | Parallele Prozesse, Profiler-Partitionen, Kernskalierung, Affinität und getrennte/dichte Inseltests existieren. Ein Worker-Pool im Prozess tickt seriell. Explizite Weak-Scaling-Reihen, gemeinsames Ressourcenbudget und EPYC-Abnahme sind offen. |
+| 11 Betriebsgrenzen | Teilweise implementiert | mTLS-Rollen, Protokollversion, Framegrenzen, Retry, Drain und Fehlerfalltests existieren. Ressourcenisolation für externe Subscriber und Abnahme unter kombinierter Überlast fehlen. |
+| 12 Öffentliche API | Teilweise implementiert | Externes Bevy-Spiel belegt Plugin, Komponenten und Persistenz. Externe Session, Subscriber und asynchrone Resultate fehlen im Integrationsbeispiel. |
+| 13 Profile | Teilweise implementiert | Release-Profiler, Live-Monitor, Browserlast, Originalvergleich, Wire-, Sicht- und Clusterbenchmarks existieren. Gemeinsame Auswahl der vier Abnahmeprofile fehlt. |
+| 14–15 Freigabe | Nicht implementiert für den neuen Auftrag | Stufen A und B brauchen ihre ergänzten Verträge und lokale Nachweise. Stufe C erfordert ZZSession, spätere Spiellogik, physische Hosts und Ausfallabnahme. |
+
 Für die Auslegung der Worker und die Empfangsrate der Clients gibt es Messungen mit 10.000 Spielern, dauerhaften Checkpoints und 5.000 räumlich getrennten Spielerpaaren. [Aktuelles Tick- und Verbindungsprofil](tickprofil.md)
 
 Ein Worker simuliert eine Bevy-World. Der **Octree** findet benötigte Nachbarn innerhalb eines Bezugssystems. Das **Directory** bündelt die angeforderten Komponenten je Empfänger. Der **Authority-Dienst** entscheidet auf seinem eigenen Datenträger, welcher Worker eine Gruppe verbindlich ändern darf. Bewegte Entities werden direkt an abonnierte Peers übertragen. Ein Worker darf mehrere weit entfernte Regionen bedienen. [Spielintegration](../crates/zz-mesh/README.md) · [Directory und Subscriptions](../crates/zz-mesh/src/spatial.rs) · [Kontrollspeicher](../crates/zz-mesh/src/authority_store.rs)

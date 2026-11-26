@@ -143,7 +143,7 @@ fn legacy_store_keeps_world_and_game_metadata_and_future_format_fails_closed() {
         .unwrap();
     drop(db);
     let raw = rusqlite::Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TABLE zz_mesh_format; PRAGMA user_version=43; CREATE TABLE game_log(line TEXT); INSERT INTO game_log VALUES('saved');").unwrap();
+    raw.execute_batch("UPDATE documents SET body=substr(body,1,length(body)-37); DROP TABLE zz_mesh_format; PRAGMA user_version=43; CREATE TABLE game_log(line TEXT); INSERT INTO game_log VALUES('saved');").unwrap();
     drop(raw);
 
     let upgraded = Store::open(&path).unwrap();
@@ -254,4 +254,69 @@ fn draining_a_slot_aborts_inbound_frozen_work_and_persists_across_incarnations()
     ));
     db.set_draining(next, false).unwrap();
     db.begin_handoff(retry).unwrap();
+}
+
+#[test]
+fn async_checkpoint_is_bounded_and_a_late_commit_preserves_newer_live_fields() {
+    use zz_mesh::{AsyncCheckpoints, BulkExecutor};
+    let file = std::env::temp_dir().join(format!("zz-async-{}.sqlite", Id::new()));
+    let db = Store::open(&file).unwrap();
+    let worker = db.start_worker(1).unwrap();
+    let mut app = game(&db, worker);
+    let executor = BulkExecutor::new(2);
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = executor
+        .submit(move || {
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    app.insert_resource(AsyncCheckpoints::new(
+        executor,
+        1.try_into().unwrap(),
+        65536.try_into().unwrap(),
+    ));
+    let id = Id::numbered(1);
+    let e = app
+        .world_mut()
+        .spawn((Managed::new(id, id), Energy(5)))
+        .id();
+    app.update();
+    assert_eq!(app.world().resource::<AsyncCheckpoints>().pending().0, 1);
+    assert_eq!(db.snapshot(id).unwrap().revision, 0);
+    app.world_mut().get_mut::<Energy>(e).unwrap().0 = 9;
+    for _ in 0..21 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AsyncCheckpoints>().pending().0, 1);
+    release.send(()).unwrap();
+    held.recv().unwrap().unwrap();
+    checkpoint_group(app.world_mut(), id).unwrap();
+    assert_eq!(app.world().get::<Energy>(e).unwrap().0, 9);
+    assert_eq!(
+        db.snapshot(id).unwrap().records[0]
+            .get::<Energy>(1, 1)
+            .unwrap()
+            .0,
+        9
+    );
+    let newer = db.start_worker(1).unwrap();
+    let mut replacement = game(&db, newer);
+    restore_group(replacement.world_mut(), id).unwrap();
+    let e = replacement.world().resource::<MeshState>().entities[&id];
+    assert_eq!(replacement.world().get::<Energy>(e).unwrap().0, 9);
+    drop(app);
+    drop(replacement);
+    drop(db);
+    let raw = rusqlite::Connection::open(&file).unwrap();
+    let mut body: Vec<u8> = raw
+        .query_row("SELECT body FROM documents", [], |r| r.get(0))
+        .unwrap();
+    body[0] ^= 1;
+    raw.execute("UPDATE documents SET body=?", [body]).unwrap();
+    drop(raw);
+    let damaged = Store::open(&file).unwrap();
+    assert!(matches!(damaged.snapshot(id),Err(Error::Invalid(s)) if s.contains("checksum")));
+    drop(damaged);
+    std::fs::remove_file(file).unwrap();
 }

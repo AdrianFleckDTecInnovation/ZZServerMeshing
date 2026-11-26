@@ -299,6 +299,147 @@ fn live_workers_prepare_switch_fence_and_resume_over_tls() {
 }
 
 #[test]
+fn external_adapter_routes_input_and_resumes_scoped_streams_across_worker_processes() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    init_tls(dir).unwrap();
+    let (_a, aa) = server(dir, 1, "first");
+    let (_b, ba) = server(dir, 2, "second");
+    let db = Store::open(dir.join("world.sqlite")).unwrap();
+    let a = db.worker(1).unwrap();
+    let b = db.worker(2).unwrap();
+    let neighbor = Id::new();
+    let authority = db.create_group(neighbor, b).unwrap();
+    let mut record = Record::new(neighbor, neighbor);
+    record.put(PLAYER, 1, &Player).unwrap();
+    record
+        .put(
+            POSITION,
+            1,
+            &Position {
+                frame: PLANET_ID,
+                mm: [50_000, 0, 0],
+            },
+        )
+        .unwrap();
+    record.put(INVENTORY, 1, &Inventory::default()).unwrap();
+    db.checkpoint(neighbor, authority, 0, vec![record]).unwrap();
+    let mut origin = tls(dir, aa, &worker_name(b));
+    let mut remote = tls(dir, ba, &worker_name(a));
+    let mut player = tls(dir, aa, "player");
+    let directory = SessionDirectory::persistent(db.clone());
+    let p = PrincipalId(Id::new());
+    let s = SessionId(Id::new());
+    let subscriber = SubscriberId(Id::new());
+    let grant = |epoch| SessionGrant {
+        principal: p,
+        session: s,
+        object: ACTOR,
+        control_epoch: epoch,
+        expires_at: SystemTime::now() + Duration::from_secs(120),
+    };
+    let first = directory.admit(grant(1), ConnectionId(Id::new())).unwrap();
+    directory.subscribe(first, Some(subscriber)).unwrap();
+    let input = SessionInput {
+        binding: first,
+        sequence: 7,
+        at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+        axes: [3, 0, 0],
+    };
+    assert!(matches!(
+        player.call(&Request::SessionInputs(vec![input])).unwrap(),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        origin.call(&Request::SessionInputs(vec![input])).unwrap(),
+        Response::Approved
+    ));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let ready = matches!(
+            origin.call(&Request::SessionProgress(first)).unwrap(),
+            Response::Input(InputAck { sequence: 7, .. })
+        );
+        let both = matches!(origin.call(&Request::SubscriberSources(first,subscriber)).unwrap(),Response::SightSources(map) if map.contains_key(&a)&&map.contains_key(&b));
+        if ready && both {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "routed input and sight discovery"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let mut near = WorkerSubscription::default();
+    let mut far = WorkerSubscription::default();
+    let one = near.poll(&mut origin, first, subscriber).unwrap();
+    let frame = one.frame.unwrap();
+    assert!(frame.events.iter().any(|e|matches!(e,SubscriberEvent::Enter{object,fields,..} if *object==ACTOR&&fields.iter().any(|(k,_)|*k==INVENTORY))));
+    near.applied(one.stream, frame.sequence).unwrap();
+    let two = far.poll(&mut remote, first, subscriber).unwrap();
+    let frame = two.frame.unwrap();
+    assert!(frame.events.iter().any(|e|matches!(e,SubscriberEvent::Enter{object,fields,..} if *object==neighbor&&!fields.iter().any(|(k,_)|*k==INVENTORY))));
+    far.applied(two.stream, frame.sequence).unwrap();
+    assert!(far
+        .poll(&mut remote, first, subscriber)
+        .unwrap()
+        .frame
+        .is_none());
+    let next = directory.admit(grant(2), ConnectionId(Id::new())).unwrap();
+    directory.subscribe(next, Some(subscriber)).unwrap();
+    assert!(directory.suspend(first).is_err());
+    assert!(far.poll(&mut remote, first, subscriber).is_err());
+    assert!(far
+        .poll(&mut remote, next, subscriber)
+        .unwrap()
+        .frame
+        .is_none());
+    let ticket = Handoff {
+        id: Id::new(),
+        group: GROUP,
+        source: db.owner(GROUP).unwrap(),
+        target: b,
+    };
+    let mut source = tls(dir, aa, &worker_name(a));
+    let mut destination = tls(dir, ba, &worker_name(b));
+    zz_mesh::remote::migrate(&mut source, &mut destination, ticket, 8 << 20).unwrap();
+    assert!(matches!(
+        origin.call(&Request::SessionInputs(vec![input])).unwrap(),
+        Response::Error(_)
+    ));
+    let current = SessionInput {
+        binding: next,
+        sequence: 1,
+        at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+        axes: [0, 1, 0],
+    };
+    assert!(matches!(
+        remote.call(&Request::SessionInputs(vec![current])).unwrap(),
+        Response::Approved
+    ));
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if matches!(
+            remote.call(&Request::SessionProgress(next)).unwrap(),
+            Response::Input(InputAck { sequence: 1, .. })
+        ) {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    directory.close(next).unwrap();
+    assert!(far.poll(&mut remote, next, subscriber).is_err());
+}
+
+#[test]
 fn distributed_directory_delivers_only_to_an_interested_world() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
@@ -792,6 +933,27 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     ));
     run("resume", &authority, &["1"]);
     db.create_group(Id::new(), on_first).unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(&run("health", &authority, &[&aa])).unwrap();
+    assert_eq!(health["ready"], true);
+    assert!(matches!(
+        connect_player(&aa).call(&Request::Shutdown),
+        Ok(Response::Error(_))
+    ));
+    assert!(matches!(
+        Client::connect(
+            aa.parse().unwrap(),
+            deployment::GAME_DNS,
+            &fs::read(authority.join("ca.der")).unwrap(),
+            &identity(&authority, "operator").unwrap()
+        )
+        .unwrap()
+        .call(&Request::Shutdown),
+        Ok(Response::Error(_))
+    ));
+    run("drain", &authority, &["1"]);
+    assert!(run("shutdown", &authority, &[&aa]).contains("stopped"));
+    assert!(db.check_worker(on_first).is_err());
     for dir in [&first, &second, &player] {
         for file in ["world.sqlite", "issuer.pem", "operator.key", "store.key"] {
             assert!(!dir.join(file).exists());

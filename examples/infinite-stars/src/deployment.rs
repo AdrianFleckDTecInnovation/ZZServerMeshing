@@ -1,6 +1,9 @@
 //! One authority volume and separately provisioned worker and player directories.
 use crate::{
-    host::{identity, init_tls, issuer_params, resume_node, run_node, write_new_credential},
+    host::{
+        identity, init_tls, issuer_params, resume_node_with_capacity, run_node,
+        write_new_credential,
+    },
     *,
 };
 use rcgen::{Certificate, CertificateParams, ExtendedKeyUsagePurpose, KeyPair, PublicKeyData};
@@ -324,9 +327,10 @@ pub fn worker(
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
     let settings = SpaceSettings::load(&dir)?;
+    let limits = crate::host::HostLimits::read(&dir)?;
     let (db, worker, cred) = connect_worker(&dir, store_addr)?;
-    let app = resume_node(&db, worker, settings)?;
-    run_node(dir, db, worker, app, cred, addr, ready)
+    let app = resume_node_with_capacity(&db, worker, settings, limits.session_capacity)?;
+    run_node(dir, db, worker, app, cred, addr, ready, limits)
 }
 /// Redeem the per-slot credential for a process-specific key and a fenced store.
 pub fn connect_worker(
