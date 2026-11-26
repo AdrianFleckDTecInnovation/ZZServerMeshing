@@ -17,6 +17,7 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | Measure simulation thread counts against a fixed 10,000-player workload | `npm run bench:cores` |
 | Profile 10,000 session-bound Bevy players and test actual socket delivery | `npm run bench:profile -- --partitions 16 --ticks 40` and `npm run bench:sockets` |
 | Measure OS workers with separate credential directories and an mTLS authority service | `npm run bench:distributed` |
+| Measure complete personal views of 10,000 isolated and grouped players | `npm run bench:sight -- 10000 target/sight.json` |
 
 Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal before using the same ports for another run. Each launch prints its own log directory under `target/`. See [the quick start](docs/quickstart.md) for endpoints, controls and individual commands.
 

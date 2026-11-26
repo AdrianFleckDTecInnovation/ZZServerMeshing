@@ -63,6 +63,7 @@ struct Node<K> {
     loose: Box3,
     entries: BTreeMap<K, Box3>,
     children: [Option<Box<Node<K>>>; 8],
+    occupied: u8,
 }
 impl<K: Copy + Ord> Node<K> {
     fn new(cube: Cube, frame: Id) -> Self {
@@ -71,6 +72,7 @@ impl<K: Copy + Ord> Node<K> {
             loose: cube.loose_bounds(frame),
             entries: BTreeMap::new(),
             children: Default::default(),
+            occupied: 0,
         }
     }
     fn insert(&mut self, id: K, b: Box3, p: [i128; 3]) {
@@ -78,6 +80,7 @@ impl<K: Copy + Ord> Node<K> {
             let i = self.cube.octant(p);
             let child = self.cube.child(i);
             if child.fits(b) {
+                self.occupied |= 1 << i;
                 self.children[i]
                     .get_or_insert_with(|| Box::new(Self::new(child, b.frame)))
                     .insert(id, b, p);
@@ -89,11 +92,13 @@ impl<K: Copy + Ord> Node<K> {
     fn remove(&mut self, id: K, p: [i128; 3]) {
         // An old root can become a child when the tree grows around a distant cluster.
         if self.entries.remove(&id).is_none() {
-            let child = &mut self.children[self.cube.octant(p)];
+            let i = self.cube.octant(p);
+            let child = &mut self.children[i];
             if let Some(node) = child {
                 node.remove(id, p);
                 if node.empty() {
                     *child = None;
+                    self.occupied &= !(1 << i);
                 }
             }
         }
@@ -113,20 +118,26 @@ impl<K: Copy + Ord> Node<K> {
                 .is_some_and(|c| c.relocate(id, old_center, new_center, b))
     }
     fn empty(&self) -> bool {
-        self.entries.is_empty() && self.children.iter().all(Option::is_none)
+        self.entries.is_empty() && self.occupied == 0
     }
-    fn query(&self, b: Box3, out: &mut Vec<K>) {
-        if !self.loose.intersects(b) {
+    fn visit(&self, b: &Box3, emit: &mut impl FnMut(K)) {
+        // The containing Index already selected the frame. Walk only populated octants.
+        if !self.loose.overlaps_axes(b) {
             return;
         }
-        out.extend(
-            self.entries
-                .iter()
-                .filter(|(_, e)| e.intersects(b))
-                .map(|(&id, _)| id),
-        );
-        for child in self.children.iter().flatten() {
-            child.query(b, out);
+        for (&id, entry) in &self.entries {
+            if entry.overlaps_axes(b) {
+                emit(id);
+            }
+        }
+        let mut mask = self.occupied;
+        while mask != 0 {
+            let i = mask.trailing_zeros() as usize;
+            self.children[i]
+                .as_ref()
+                .expect("occupied octant")
+                .visit(b, emit);
+            mask &= mask - 1;
         }
     }
 }
@@ -174,6 +185,7 @@ impl<K: Copy + Ord> Index<K> {
             let i = parent.octant(old.lo);
             let child = std::mem::replace(root, Node::new(parent, b.frame));
             root.children[i] = Some(Box::new(child));
+            root.occupied = 1 << i;
         }
         root.insert(id, b, p);
     }
@@ -181,14 +193,14 @@ impl<K: Copy + Ord> Index<K> {
         if let Some(root) = self.0.get_mut(&b.frame) {
             root.remove(id, center(b));
             while root.entries.is_empty() {
-                let mut children = root.children.iter_mut().flatten();
-                match (children.next(), children.next()) {
-                    (None, _) => {
+                match root.occupied.count_ones() {
+                    0 => {
                         self.0.remove(&b.frame);
                         break;
                     }
-                    (Some(_), None) => {
-                        *root = *root.children.iter_mut().find_map(Option::take).unwrap();
+                    1 => {
+                        let i = root.occupied.trailing_zeros() as usize;
+                        *root = *root.children[i].take().expect("only occupied octant");
                     }
                     _ => break,
                 }
@@ -201,8 +213,11 @@ impl<K: Copy + Ord> Index<K> {
         out
     }
     pub fn query_into(&self, b: Box3, out: &mut Vec<K>) {
+        self.visit(b, |id| out.push(id));
+    }
+    pub fn visit(&self, b: Box3, mut emit: impl FnMut(K)) {
         if let Some(root) = self.0.get(&b.frame) {
-            root.query(b, out);
+            root.visit(&b, &mut emit);
         }
     }
 }

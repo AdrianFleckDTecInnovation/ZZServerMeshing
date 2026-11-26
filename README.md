@@ -10,6 +10,8 @@ Run `npm run bench:profile -- --players 10000 --workers 32 --partitions 16 --tic
 
 Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)
 
+In Infinite Stars, `space.json` configures the 3D sight range per target type. The defaults are 100 m for other players and 500 m for ships. Run `npm run bench:sight` to measure complete views for 10,000 isolated or grouped players. [Spielersicht und Messwerte](docs/spielersicht.md)
+
 Run `cargo run --locked -p infinite-stars` for a persistent two-worker handoff. The game library uses an integer 3D octree, directed component subscriptions and a fenced authority service for workers on separate machines. Run `npm run bench:quick` for WebSocket input latency and player density, or `npm run bench:distributed` for real TLS traffic with separate storage directories. [Deployment and acceptance](docs/produktionsabnahme.md) · [Infinite Stars guide](docs/infinite-stars.md) · [Performance graphs and results](docs/cluster-performance.md)
 
 `npm run bench:servers` compares one and three native sim-server processes with the same 300 players and 300 NPCs. It measures how much tick time each process spends preparing client snapshots and how many bytes the clients actually receive. [Single-server comparison](docs/cluster-performance.md#ein-oder-drei-sim-server-für-dieselbe-spielergruppe)

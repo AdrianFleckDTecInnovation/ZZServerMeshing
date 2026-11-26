@@ -234,10 +234,22 @@ impl Publisher {
                     };
                     if sample.value.as_ref() != Some(value.as_ref()) {
                         sampled = true;
-                        if !full {
-                            fields.insert(schema, value.as_ref().clone());
+                        let projected = value.into_owned();
+                        if full {
+                            sample.value = Some(projected);
+                        } else {
+                            // Send the newly encoded buffer. Retain the acknowledged
+                            // comparison copy in its existing allocation while moving.
+                            let cached = sample.value.get_or_insert(None);
+                            match (cached.as_mut(), projected.as_ref()) {
+                                (Some(old), Some(new)) => {
+                                    old.version = new.version;
+                                    old.bytes.clone_from(&new.bytes);
+                                }
+                                _ => *cached = projected.clone(),
+                            }
+                            fields.insert(schema, projected);
                         }
-                        sample.value = Some(value.into_owned());
                     }
                     sample.dirty = false;
                     sample.due = tick + u64::from(dem.period.max(1));

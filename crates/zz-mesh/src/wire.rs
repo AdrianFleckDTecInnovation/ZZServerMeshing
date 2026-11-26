@@ -17,7 +17,7 @@ use std::{
 };
 
 const MAGIC: [u8; 4] = *b"ZZM1";
-pub const WIRE_VERSION: u16 = 1;
+pub const WIRE_VERSION: u16 = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     Player(Id),
@@ -57,6 +57,18 @@ pub enum Request {
         group: Option<Id>,
         required: Vec<Manifest>,
     },
+    SightSources,
+    SightPage {
+        after: Option<Id>,
+        known: Option<Digest>,
+    },
+    /// Trusted source worker requests the candidate IDs for its authenticated player.
+    SightPlan {
+        viewer: Id,
+        after: Option<Id>,
+    },
+    /// An authenticated worker relays discovery for one of its client connections.
+    SightDiscover(Id),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -93,6 +105,12 @@ pub enum Response {
         certificate: Vec<u8>,
     },
     Load(WorkerLoad),
+    SightSources(BTreeMap<Worker, SocketAddr>),
+    SightPage(SightPage),
+    SightPlan(SightPlan),
+    SightUnchanged {
+        next: Option<Id>,
+    },
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -108,7 +126,13 @@ pub struct Service {
 impl Endpoint for Service {
     fn dispatch(&self, role: Role, r: Request) -> Result<Response> {
         match r {
-            Request::Storage(_) | Request::Join { .. } | Request::Load { .. } => Err(Error::Denied),
+            Request::Storage(_)
+            | Request::Join { .. }
+            | Request::Load { .. }
+            | Request::SightSources
+            | Request::SightPage { .. }
+            | Request::SightDiscover(_)
+            | Request::SightPlan { .. } => Err(Error::Denied),
             Request::Sync { .. }
             | Request::Diagnostics
             | Request::Spatial(_)
@@ -441,6 +465,7 @@ fn timeout(socket: &TcpStream) -> Result<()> {
 }
 pub struct Client {
     stream: StreamOwned<ClientConnection, Counted>,
+    pub(crate) certificate: Digest,
     pub traffic: Arc<Traffic>,
 }
 impl Client {
@@ -468,6 +493,7 @@ impl Client {
         timeout(&tcp)?;
         Ok(Self {
             stream: StreamOwned::new(client, Counted(tcp, traffic.clone())),
+            certificate: digest(&id.cert),
             traffic,
         })
     }

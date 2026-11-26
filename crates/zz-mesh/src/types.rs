@@ -72,6 +72,12 @@ impl Default for Id {
         Self::new()
     }
 }
+impl std::str::FromStr for Id {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self(*uuid::Uuid::parse_str(s)?.as_bytes()))
+    }
+}
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         uuid::Uuid::from_bytes(self.0).fmt(f)

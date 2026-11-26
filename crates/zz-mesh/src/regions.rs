@@ -236,9 +236,7 @@ impl MovingIndex {
         if first == last {
             visit(first);
         } else {
-            for cell in self.regions.query(b) {
-                visit(cell);
-            }
+            self.regions.visit(b, visit);
         }
         hits
     }

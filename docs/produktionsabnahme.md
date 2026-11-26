@@ -27,10 +27,12 @@ Einmal `cargo build --release --locked -p infinite-stars --bin infinite-stars` a
 | Authority-Rechner, einmalig | `infinite-stars provision control 1 worker-a` |
 | Authority-Rechner, einmalig | `infinite-stars provision control 2 worker-b` |
 | Authority-Rechner, einmalig | `infinite-stars provision-client control player` |
+| Authority-Rechner, eigenes Konto für eine bestehende Figur | `infinite-stars provision-client control player-a ACTOR_UUID` |
 | Authority-Rechner | `infinite-stars authority control 10.20.0.10:8640` |
 | Worker A | `infinite-stars worker worker-a 10.20.0.10:8640 10.20.0.11:8641` |
 | Worker B | `infinite-stars worker worker-b 10.20.0.10:8640 10.20.0.12:8642` |
 | Spieler | `infinite-stars client player 10.20.0.11:8641` |
+| Spieler, sichtbare Nachbarn über einen Einstiegsworker abrufen | `infinite-stars sight player-a 10.20.0.11:8641` |
 | Authority-Rechner, Beispielgruppe an Slot 2 übergeben | `infinite-stars migrate control 10.20.0.11:8641 10.20.0.12:8642 2` |
 | Authority-Rechner, Diagnose | `infinite-stars status control 10.20.0.12:8642` |
 | Authority-Rechner, automatische Lastverteilung im Vordergrund | `infinite-stars balance control` |

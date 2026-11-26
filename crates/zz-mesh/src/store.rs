@@ -452,6 +452,40 @@ impl Store {
             Ok(())
         })
     }
+    /// Game administrators provision player certificates on the authority volume.
+    pub fn register_player(&self, cert: Digest, actor: Id) -> Result<()> {
+        if self.remote_connection().is_some() {
+            return Err(Error::Denied);
+        }
+        self.write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO player_credentials(fingerprint,actor) VALUES(?,?)",
+                params![cert.0.as_slice(), actor],
+            )?;
+            let bound: Id = tx.query_row(
+                "SELECT actor FROM player_credentials WHERE fingerprint=?",
+                [cert.0.as_slice()],
+                |r| r.get(0),
+            )?;
+            if bound != actor {
+                return Err(Error::Denied);
+            }
+            Ok(())
+        })
+    }
+    pub fn authenticated_player(&self, cert: Digest) -> Result<Option<Id>> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::PlayerCredential(cert));
+        }
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT actor FROM player_credentials WHERE fingerprint=?",
+                [cert.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
     pub fn authenticated_worker(&self, cert: Digest) -> Result<Worker> {
         if let Some(c) = self.remote_connection() {
             return c.call(Op::Authenticated(cert));
@@ -942,6 +976,24 @@ pub(super) fn apply_checkpoint(
 fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
     if r.fields.len() > 128 || r.fields.values().any(|f| f.bytes.len() > MAX_FIELD) {
         return Err(Error::Busy("record fields"));
+    }
+    // Existing objects already carry their durable revision. Let the write check
+    // the group, revision and tombstone in one indexed statement.
+    if r.revision != 0 {
+        let expected = std::mem::replace(&mut r.revision, rev);
+        if r.deleted {
+            r.fields.clear();
+        }
+        let updated = c.prepare_cached(
+            "UPDATE documents SET rev=?,deleted=?,body=? WHERE id=? AND unit=? AND rev=? AND deleted=0"
+        )?.execute(params![rev, r.deleted, encode(&r)?, r.id, r.group, expected])?;
+        if updated != 1 {
+            return Err(Error::Fenced);
+        }
+        if r.deleted {
+            c.execute("DELETE FROM member_data WHERE object=?", [r.id])?;
+        }
+        return Ok(());
     }
     let prior: Option<(Id, u64, bool)> = c
         .prepare_cached("SELECT unit,rev,deleted FROM documents WHERE id=?")?

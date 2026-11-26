@@ -14,7 +14,7 @@ use zz_mesh::{
 mod supervisor;
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {
@@ -62,7 +62,31 @@ fn run() -> Result<()> {
         }
         "provision-client" => {
             let dest: PathBuf = argument(args.next(), "new credential directory")?;
-            deployment::provision(&dir, &dest, None)
+            if let Some(id) = args.next() {
+                deployment::provision_player(&dir, &dest, argument(Some(id), "actor UUID")?)
+            } else {
+                deployment::provision(&dir, &dest, None)
+            }
+        }
+        "sight" => {
+            let addr: SocketAddr = argument(
+                args.next().or_else(|| Some(LOCAL.into())),
+                "bootstrap worker address",
+            )?;
+            let mut bootstrap = connect(&dir, addr, "player")?;
+            let mut sight = PlayerSightClient::default();
+            sight.refresh(&mut bootstrap, |_, source| connect(&dir, source, "player"))?;
+            for (&id, r) in sight.records() {
+                let pos: Position = r.get(POSITION, 1)?;
+                let kind = if r.fields.contains_key(&PLAYER) {
+                    "player"
+                } else {
+                    "ship"
+                };
+                println!("{id} {kind} {} {:?} mm", pos.frame, pos.mm);
+            }
+            println!("{} visible", sight.records().len());
+            Ok(())
         }
         "worker" => deployment::worker(
             dir,
@@ -127,14 +151,19 @@ fn print_group_cost(group: Id, cost: MigrationCost) {
     );
 }
 fn connect(dir: &Path, addr: SocketAddr, credential: &str) -> Result<Client> {
-    let name = if dir.join("server-name").is_file() || credential == "operator" {
-        deployment::GAME_DNS
-    } else {
-        "localhost"
+    let name = match fs::read_to_string(dir.join("server-name")) {
+        Ok(name) => name,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => if credential == "operator" {
+            deployment::GAME_DNS
+        } else {
+            "localhost"
+        }
+        .to_owned(),
+        Err(e) => return Err(e.into()),
     };
     Client::connect(
         addr,
-        name,
+        name.trim(),
         &fs::read(dir.join("ca.der"))?,
         &identity(dir, credential)?,
     )

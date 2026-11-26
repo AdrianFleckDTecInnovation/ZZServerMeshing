@@ -4,6 +4,8 @@ Mit `zz-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definier
 
 ## Vom Checkout zum ersten Spielstand
 
+In Infinite Stars sehen Spieler standardmäßig andere Spieler bis 100 m und Schiffe bis 500 m. Die eigene Sicht bleibt auch innerhalb einer gemeinsamen Insel unabhängig. [Reichweiten und Spielerclient anbinden](../../docs/spielersicht.md)
+
 Für getrennte Rechner zeigt die Betriebsanleitung die Einrichtung von Authority, Worker-Slots, Zertifikaten und Spielerclient. Sie ordnet die Anforderungen den zugehörigen Integrationstests zu. [Betrieb und Abnahme](../../docs/produktionsabnahme.md)
 
 Für die Dimensionierung deines Spiels kannst du aktive Spieler, ruhende Spieler, Worker-Parallelität und dauerhafte Checkpoints getrennt messen. [Tickprofil und Startbefehle](../../docs/tickprofil.md) · [Einsatzaudit mit eigenen ECS-Spielregeln und Freigabekriterien](../../docs/einsatzaudit.md)

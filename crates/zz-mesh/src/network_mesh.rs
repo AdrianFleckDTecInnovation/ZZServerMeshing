@@ -1,9 +1,11 @@
 //! Coarse directory reports and directed peer delivery for independent processes.
+mod description;
 use crate::{
     wire::{Client, Request, Response, Role},
     *,
 };
 use bevy_ecs::world::World;
+pub use description::Description;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,13 +16,11 @@ use std::{
 };
 
 const LINKS: usize = 8192;
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Description {
-    pub presence: Presence,
-    pub area: Option<Area>,
-    pub group: Id,
-}
-pub(crate) fn describe(w: &World, worker: Worker, id: Id) -> Option<Description> {
+pub(crate) fn describe<const REPORT_SIGHT: bool>(
+    w: &World,
+    worker: Worker,
+    id: Id,
+) -> Option<Description> {
     let &e = w.resource::<MeshState>().entities.get(&id)?;
     w.get::<Simulated>(e)?;
     let p = (w.get_resource::<SpatialRule>()?.0)(w, e)?;
@@ -47,6 +47,14 @@ pub(crate) fn describe(w: &World, worker: Worker, id: Id) -> Option<Description>
         presence,
         area,
         group: w.get::<Managed>(e)?.group,
+        sight: if REPORT_SIGHT {
+            w.get_resource::<SightRule>()
+                .and_then(|rule| (rule.0)(w, e))
+                .filter(|(frame, _)| *frame == presence.bounds.frame)
+                .map(|(_, point)| point)
+        } else {
+            None
+        },
     })
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,12 +195,7 @@ impl Broker {
                         {
                             continue;
                         }
-                        index.upsert(d.presence)?;
-                        if let Some(a) = d.area {
-                            index.register_area(a)?;
-                        } else {
-                            index.remove_area(id);
-                        }
+                        index.describe(d)?;
                         members.insert(id);
                     } else {
                         index.remove_owned(from, id);
@@ -358,6 +361,7 @@ mod paging_tests {
                             presence,
                             group,
                             area: None,
+                            sight: None,
                         }),
                     )
                 })
@@ -541,7 +545,7 @@ impl PeerMesh {
         let dirty = std::mem::take(&mut w.resource_mut::<MeshState>().dirty);
         let mut dirty = dirty.into_iter();
         while let Some(id) = dirty.next() {
-            let desc = describe(w, self.here, id);
+            let desc = describe::<true>(w, self.here, id);
             if self.own.descriptions.get(&id) != desc.as_ref() {
                 if self.pending.len() >= LINKS && !self.pending.contains_key(&id) {
                     w.resource_mut::<MeshState>().dirty.insert(id);

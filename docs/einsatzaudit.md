@@ -4,6 +4,8 @@
 
 ## Ist das heutige Projekt schneller als das Original?
 
+Nach diesem Audit wurde der individuelle mTLS-Lesepfad ergänzt. Benannte Spieler können ihre öffentliche Nachbarsicht seitenweise abrufen. Der Prozesstest verfolgt fünf räumlich getrennte Spieler und den Sichtkontakt mit Nachbarn auf zwei Workern. Die Lastabnahme für 10.000 gleichzeitig verbundene native Clients bleibt offen. [Aktueller Stand der Spielersicht](spielersicht.md)
+
 Die gemeinsame Vergleichsgrundlage ist die WebSocket-Demo. Das Original `3ef0d78` enthielt die persistente Bevy-Bibliothek noch nicht. Für Windows ergänzt der vorhandene Referenzbau das Lockfile und die zwei portierten Diensteinstiege aus `a2c478b`. Je Messpunkt starteten drei Release-Server mit drei verbundenen Snapshot-Empfängern. Die Tabelle zeigt den Median über die Läufe, jeweils vom langsamsten Server. [Referenzbau](../scripts/build-benchmark-reference.mjs) · [Einzelläufe und Binär-Hashes](benchmarks/einsatzaudit.json.gz)
 
 | Windows, ursprüngliche Browser-Demo | p95 Original | p95 heute | Beobachtung |

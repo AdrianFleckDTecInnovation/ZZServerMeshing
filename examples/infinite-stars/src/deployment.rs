@@ -129,6 +129,10 @@ pub fn provision(dir: &Path, dest: &Path, slot: Option<u32>) -> mesh::Result<()>
         }
         let (ca, signer) = issuer(dir)?;
         fs::copy(dir.join("operator.der"), temp.path().join("operator.der"))?;
+        if dir.join("space.json").try_exists()? {
+            SpaceSettings::load(dir)?;
+            fs::copy(dir.join("space.json"), temp.path().join("space.json"))?;
+        }
         credential(
             temp.path(),
             "server",
@@ -181,6 +185,34 @@ fn publish_directory(source: &Path, dest: &Path) -> std::io::Result<()> {
             result => return result,
         }
     }
+}
+/// Issue an independent player identity for a character created by the game.
+pub fn provision_player(dir: &Path, dest: &Path, actor: Id) -> mesh::Result<()> {
+    authority_keys(dir)?;
+    if dest.try_exists()? {
+        return Err(invalid("credential destination must be a new directory"));
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temp = tempfile::tempdir_in(parent)?;
+    let (ca, signer) = issuer(dir)?;
+    let cert = credential(
+        temp.path(),
+        "player",
+        vec![],
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &ca,
+        &signer,
+    )?;
+    fs::copy(dir.join("ca.der"), temp.path().join("ca.der"))?;
+    fs::write(temp.path().join("server-name"), GAME_DNS)?;
+    let db = Store::open(dir.join("world.sqlite"))?;
+    db.register_player(digest(&cert), actor)?;
+    publish_directory(temp.path(), dest)?;
+    Ok(())
 }
 
 struct PublicPoint(Vec<u8>);
@@ -291,8 +323,9 @@ pub fn worker(
     addr: SocketAddr,
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
+    let settings = SpaceSettings::load(&dir)?;
     let (db, worker, cred) = connect_worker(&dir, store_addr)?;
-    let app = resume_node(&db, worker)?;
+    let app = resume_node(&db, worker, settings)?;
     run_node(dir, db, worker, app, cred, addr, ready)
 }
 /// Redeem the per-slot credential for a process-specific key and a fenced store.

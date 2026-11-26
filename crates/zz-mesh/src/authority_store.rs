@@ -46,6 +46,7 @@ pub enum Operation {
     Abort(Handoff),
     Authorities(Vec<Id>),
     GroupStates(Vec<Id>, Option<Worker>),
+    PlayerCredential(Digest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +112,7 @@ impl Connection {
                 | Owned(_)
                 | Live(_)
                 | Authenticated(_)
+                | PlayerCredential(_)
                 | Owner(_)
                 | Group(_)
                 | Notices(..)
@@ -194,6 +196,7 @@ impl AuthorityService {
             Owned(_) => Err(Error::Denied),
             Live(w) => encode(&db.check_worker(w)?),
             Authenticated(c) => encode(&db.authenticated_worker(c)?),
+            PlayerCredential(c) => encode(&db.authenticated_player(c)?),
             Create(g, w) => {
                 own(w)?;
                 encode(&db.create_group(g, w)?)

@@ -40,15 +40,11 @@ fn issue(
     ca: &rcgen::Certificate,
     issuer: &KeyPair,
 ) -> mesh::Result<()> {
-    crate::deployment::credential(
-        dir,
-        name,
-        vec!["localhost".into(), "127.0.0.1".into()],
-        usage,
-        ca,
-        issuer,
-    )
-    .map(|_| ())
+    let mut names = vec!["localhost".into(), "127.0.0.1".into()];
+    if name == "server" {
+        names.push(crate::deployment::GAME_DNS.into());
+    }
+    crate::deployment::credential(dir, name, names, usage, ca, issuer).map(|_| ())
 }
 pub fn init_tls(dir: &Path) -> mesh::Result<()> {
     fs::create_dir_all(dir)?;
@@ -126,11 +122,15 @@ pub fn service(db: &Store, w: Worker) -> Arc<Service> {
 }
 pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
     let worker = db.start_worker(slot)?;
-    Ok((worker, resume_node(db, worker)?))
+    Ok((worker, resume_node(db, worker, SpaceSettings::default())?))
 }
-pub(crate) fn resume_node(db: &Store, worker: Worker) -> mesh::Result<App> {
+pub(crate) fn resume_node(
+    db: &Store,
+    worker: Worker,
+    settings: SpaceSettings,
+) -> mesh::Result<App> {
     let slot = worker.slot;
-    let mut app = world(db, worker);
+    let mut app = world_with_settings(db, worker, settings);
     for group in db.owned(slot)? {
         mesh::restore_group(app.world_mut(), group)?;
     }
@@ -167,9 +167,11 @@ pub fn listen(
     addr: std::net::SocketAddr,
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
+    let settings = SpaceSettings::load(&dir)?;
     init_tls(&dir)?;
     let db = Store::open(dir.join("world.sqlite"))?;
-    let (w, app) = start_node(&db, slot)?;
+    let w = db.start_worker(slot)?;
+    let app = resume_node(&db, w, settings)?;
     provision_worker(&dir, &db, w)?;
     let cred = identity(&dir, &worker_name(w))?;
     run_node(dir, db, w, app, cred, addr, ready)
@@ -222,6 +224,8 @@ pub(crate) fn run_node(
                 Ok(Role::Player(ACTOR))
             } else if Some(fingerprint) == operator {
                 Ok(Role::Operator)
+            } else if let Some(actor) = registry.authenticated_player(fingerprint)? {
+                Ok(Role::Player(actor))
             } else {
                 registry.authenticated_worker(fingerprint).map(Role::Worker)
             }
@@ -247,22 +251,23 @@ pub(crate) fn run_node(
         "worker {} incarnation {} listening on {}",
         w.slot, w.incarnation, address
     );
-    let (svc, mut event_loop) =
-        mesh::remote::worker(service(&db, w), app.world().resource::<BlobCache>().clone());
     let ca = fs::read(dir.join("ca.der"))?;
     let registry = db.clone();
-    event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(
-        db.clone(),
-        w,
-        move |target| {
-            let name = if distributed {
-                crate::deployment::worker_dns(target.slot)
-            } else {
-                "localhost".into()
-            };
-            mesh::wire::Client::connect(registry.address(target)?, &name, &ca, &cred)
-        },
-    ));
+    let connect = move |target: Worker| {
+        let name = if distributed {
+            crate::deployment::worker_dns(target.slot)
+        } else {
+            "localhost".into()
+        };
+        mesh::wire::Client::connect(registry.address(target)?, &name, &ca, &cred)
+    };
+    let (svc, mut event_loop) = mesh::remote::worker_with_sight(
+        service(&db, w),
+        app.world().resource::<BlobCache>().clone(),
+        app.world().resource::<SightRanges>().clone(),
+        connect.clone(),
+    );
+    event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(db.clone(), w, connect));
     let connections = if distributed { 256 } else { 16 };
     let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), connections));
     let mut next = std::time::Instant::now();

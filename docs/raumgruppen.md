@@ -23,6 +23,8 @@ Im Sternflug sanken die Kandidaten für die abschließende Replikatprüfung von 
 
 ## Welche Grenzen das Spiel einstellt
 
+Für die Sicht eines einzelnen Spielers gelten standardmäßig 100 m zu Spielern und 500 m zu Schiffen. Reichweiten, Kontaktboxen und Haltepuffer stehen in `space.json`. [Spielersicht und Konfiguration](spielersicht.md)
+
 `SpatialRule` liefert für jede Figur ein `SpatialProfile`. `bounds` bestimmt ihre räumliche Ausdehnung im lokalen Bezugssystem. `velocity` und `ahead` erweitern die Suche in Bewegungsrichtung. `retention` erweitert die Austrittsgrenze eines bestehenden Abonnements in Millimetern. Physische Inseln ergeben sich aus zusammenhängenden, überlappenden aktiven Bereichen. Zwei entfernte Enden einer solchen Kette können unterschiedliche Sicht haben. [Spielregel im Beispiel](../examples/infinite-stars/src/lib.rs) · [Directory](../crates/zz-mesh/src/spatial.rs)
 
 Im Flugtest hat jeder Spieler eine Box mit 5 m Halbausdehnung und 1 m Haltepuffer. Auf der getesteten X-Achse erscheint die Replika bei 10 m Abstand. Beim Rückzug bleibt sie bei 10,5 m und genau 11 m erhalten. Bei 11,001 m verschwindet sie. Beim nächsten Anflug entsteht der Kontakt wieder bei 10 m. Jede Phase prüft die installierte Bevy-Replika und den zuständigen Writer.

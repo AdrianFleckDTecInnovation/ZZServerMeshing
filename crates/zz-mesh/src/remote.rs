@@ -55,13 +55,23 @@ pub enum Answer {
     Patch(Option<Patch>),
     Done,
 }
-type Job = (Role, Request, SyncSender<Result<Response>>);
+enum Work {
+    Rpc(Request),
+    Sight(SightPlan),
+}
+type Job = (Role, Work, SyncSender<Result<Response>>);
+struct SightAccess {
+    rules: SightRanges,
+    connect: Box<dyn Fn(Worker) -> Result<Client> + Send + Sync>,
+    directory: Mutex<Option<(Worker, Client)>>,
+}
 struct Downloads {
     cache: BlobCache,
     partial: Option<(Handoff, Download)>,
 }
 /// Network threads perform bounded blob processing. Only the main thread touches Bevy.
 pub struct WorkerEndpoint {
+    sight: Option<SightAccess>,
     broker: Option<Mutex<crate::network_mesh::Broker>>,
     service: Arc<Service>,
     requests: SyncSender<Job>,
@@ -81,6 +91,29 @@ pub struct WorkerLoop {
     queued: usize,
 }
 pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>, WorkerLoop) {
+    make_worker(service, initial, None)
+}
+pub fn worker_with_sight(
+    service: Arc<Service>,
+    initial: BlobCache,
+    rules: SightRanges,
+    connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
+) -> (Arc<WorkerEndpoint>, WorkerLoop) {
+    make_worker(
+        service,
+        initial,
+        Some(SightAccess {
+            rules,
+            connect: Box::new(connect),
+            directory: Mutex::default(),
+        }),
+    )
+}
+fn make_worker(
+    service: Arc<Service>,
+    initial: BlobCache,
+    sight: Option<SightAccess>,
+) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     let (tx, rx) = mpsc::sync_channel(32);
     let downloads = Arc::new(Mutex::new(Downloads {
         cache: initial,
@@ -93,6 +126,7 @@ pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>
         .map(Mutex::new);
     (
         Arc::new(WorkerEndpoint {
+            sight,
             broker,
             service: service.clone(),
             requests: tx,
@@ -127,6 +161,98 @@ fn allowed(service: &Service, role: Role, t: Handoff) -> Result<()> {
     service.store.check_worker(service.worker)
 }
 impl WorkerEndpoint {
+    fn with_viewer<T>(
+        &self,
+        viewer: Id,
+        read: impl FnOnce(&Directory, &SightRanges) -> Result<T>,
+    ) -> Result<T> {
+        let access = self
+            .sight
+            .as_ref()
+            .ok_or_else(|| invalid("player sight is not configured"))?;
+        let db = &self.service.store;
+        db.check_worker(self.service.worker)?;
+        let owner = db
+            .authorities(&[viewer])?
+            .get(&viewer)
+            .copied()
+            .ok_or(Error::Denied)?
+            .1
+            .worker;
+        let broker = self
+            .broker
+            .as_ref()
+            .ok_or_else(|| invalid("use the directory worker for sight discovery"))?
+            .lock()
+            .map_err(|_| invalid("directory lock"))?;
+        if broker.index.presence(viewer).map(|p| p.owner) != Some(owner) {
+            return Err(Error::Fenced);
+        }
+        read(&broker.index, &access.rules)
+    }
+    fn discover(&self, viewer: Id) -> Result<Response> {
+        let workers =
+            self.with_viewer(viewer, |index, rules| index.sight_workers(viewer, rules))?;
+        let mut sources = BTreeMap::new();
+        for w in workers {
+            sources.insert(w, self.service.store.address(w)?);
+        }
+        Ok(Response::SightSources(sources))
+    }
+    fn directory_call(&self, request: &Request) -> Result<Response> {
+        let access = self
+            .sight
+            .as_ref()
+            .ok_or_else(|| invalid("player sight is not configured"))?;
+        let broker = self.service.store.worker(1)?;
+        let mut socket = access
+            .directory
+            .lock()
+            .map_err(|_| invalid("sight connection lock"))?;
+        if socket.as_ref().is_none_or(|(w, _)| *w != broker) {
+            *socket = Some((broker, (access.connect)(broker)?));
+        }
+        let reply = socket.as_mut().unwrap().1.call(request);
+        if reply.is_err() {
+            *socket = None;
+        }
+        reply
+    }
+    fn player_page(
+        &self,
+        viewer: Id,
+        after: Option<Id>,
+        known: Option<Digest>,
+    ) -> Result<Response> {
+        let here = self.service.worker;
+        let plan = if self.broker.is_some() {
+            self.with_viewer(viewer, |index, rules| {
+                index.sight_plan(viewer, rules, here, after)
+            })?
+        } else {
+            match self.directory_call(&Request::SightPlan { viewer, after })? {
+                Response::SightPlan(plan) => plan,
+                Response::Error(e) => return Err(invalid(e)),
+                _ => return Err(invalid("expected sight plan")),
+            }
+        };
+        let response = self.enqueue(Role::Player(viewer), Work::Sight(plan))?;
+        // Hash on the socket thread, after the simulation has released the public page.
+        if let (Some(known), Response::SightPage(page)) = (known, &response) {
+            if known == page.content_digest() {
+                return Ok(Response::SightUnchanged { next: page.next });
+            }
+        }
+        Ok(response)
+    }
+    fn enqueue(&self, role: Role, work: Work) -> Result<Response> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.requests
+            .try_send((role, work, tx))
+            .map_err(|_| Error::Busy("worker request queue"))?;
+        rx.recv_timeout(Duration::from_secs(4))
+            .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
+    }
     /// Inspect the directory on its host when it is idle. No requests or sampling
     /// are scheduled by the mesh. Keep the callback short as it borrows the index.
     pub fn try_inspect_directory<T>(&self, read: impl FnOnce(&crate::Directory) -> T) -> Option<T> {
@@ -254,6 +380,40 @@ impl Endpoint for WorkerEndpoint {
                 .map(Response::Routes);
         }
         match &request {
+            Request::SightSources => {
+                let Role::Player(viewer) = role else {
+                    return Err(Error::Denied);
+                };
+                return if self.broker.is_some() {
+                    self.discover(viewer)
+                } else {
+                    self.directory_call(&Request::SightDiscover(viewer))
+                };
+            }
+            Request::SightDiscover(viewer) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+                return self.discover(*viewer);
+            }
+            Request::SightPlan { viewer, after } => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+                return self
+                    .with_viewer(*viewer, |index, rules| {
+                        index.sight_plan(*viewer, rules, source, *after)
+                    })
+                    .map(Response::SightPlan);
+            }
+            Request::SightPage { after, known } => {
+                let Role::Player(viewer) = role else {
+                    return Err(Error::Denied);
+                };
+                return self.player_page(viewer, *after, *known);
+            }
             Request::Load { required, .. } => {
                 if role != Role::Operator {
                     return Err(Error::Denied);
@@ -275,12 +435,7 @@ impl Endpoint for WorkerEndpoint {
             | Request::Push(_) => {}
             _ => return self.service.dispatch(role, request),
         }
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.requests
-            .try_send((role, request, tx))
-            .map_err(|_| Error::Busy("worker request queue"))?;
-        rx.recv_timeout(Duration::from_secs(4))
-            .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
+        self.enqueue(role, Work::Rpc(request))
     }
 }
 fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Option<Snapshot>> {
@@ -368,9 +523,15 @@ impl WorkerLoop {
         while self.queued < 32 {
             let Ok(job) = self.rx.try_recv() else { break };
             let session = match &job.1 {
-                Request::Actions(a) => a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0)),
-                Request::Input(i) => i.session,
-                Request::Sync { session, .. } => *session,
+                Work::Rpc(Request::Actions(a)) => {
+                    a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0))
+                }
+                Work::Rpc(Request::Input(i)) => i.session,
+                Work::Rpc(Request::Sync { session, .. }) => *session,
+                Work::Sight(_) => match job.0 {
+                    Role::Player(id) => id,
+                    _ => Id::numbered(0),
+                },
                 _ => Id::numbered(0),
             };
             let queue = self.sessions.entry(session).or_default();
@@ -401,6 +562,21 @@ impl WorkerLoop {
                 self.turns.push_back(session)
             }
             self.queued -= 1;
+            let req = match req {
+                Work::Rpc(r) => r,
+                Work::Sight(plan) => {
+                    flush_inputs(w, &mut samples, &mut replies);
+                    let result = match role {
+                        Role::Player(viewer) => {
+                            crate::sight::sight_page(w, viewer, self.service.worker, plan)
+                                .map(Response::SightPage)
+                        }
+                        _ => Err(Error::Denied),
+                    };
+                    let _ = reply.send(result);
+                    continue;
+                }
+            };
             if let Request::Input(input) = req {
                 if let Role::Player(actor) = role {
                     samples.push((actor, input));

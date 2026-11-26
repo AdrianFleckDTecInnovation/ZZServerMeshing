@@ -351,6 +351,223 @@ fn distributed_directory_delivers_only_to_an_interested_world() {
 }
 
 #[test]
+fn five_authenticated_players_observe_only_their_own_neighbours_over_tls() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    init_tls(dir).unwrap();
+    fs::write(
+        dir.join("space.json"),
+        br#"{"player_sight_m":120,"ship_sight_m":750}"#,
+    )
+    .unwrap();
+    let db = Store::open(dir.join("world.sqlite")).unwrap();
+    let w = db.start_worker(1).unwrap();
+    let remote = db.start_worker(2).unwrap();
+    let mut a = world(&db, w);
+    let mut b = world(&db, remote);
+    let group = Id::numbered(4000);
+    let watchers: Vec<_> = (1..=5).map(Id::numbered).collect();
+    let base = 1_000_000_000_000i64;
+    let pos = |x| Position {
+        frame: PLANET_ID,
+        mm: [x, 0, 0],
+    };
+    let mut credentials = vec![];
+    for (i, &id) in watchers.iter().enumerate() {
+        a.world_mut().spawn((
+            Managed::new(id, group),
+            Player,
+            pos(base * (i as i64 + 1)),
+            movement::Drive::default(),
+            Inventory::default(),
+        ));
+        let dest = dir.join(format!("client-{i}"));
+        deployment::provision_player(dir, &dest, id).unwrap();
+        credentials.push(dest);
+    }
+    let local = Id::numbered(80);
+    let ship = Id::numbered(81);
+    let local_credentials = dir.join("local-player");
+    deployment::provision_player(dir, &local_credentials, local).unwrap();
+    a.world_mut().spawn((
+        Managed::new(local, group),
+        Player,
+        pos(base + 120001),
+        Inventory::default(),
+    ));
+    b.world_mut()
+        .spawn((Managed::new(ship, ship), Ship, pos(base + 750001)));
+    a.update();
+    b.update();
+    checkpoint_group(a.world_mut(), group).unwrap();
+    checkpoint_group(b.world_mut(), ship).unwrap();
+    drop(a);
+    drop(b);
+    let (_one, first) = server(dir, 1, "first.ready");
+    let (_two, second) = server(dir, 2, "second.ready");
+    let session = Id::numbered(707);
+    db.session(session, watchers[0]).unwrap();
+    let mut readers: Vec<_> = credentials
+        .iter()
+        .enumerate()
+        .map(|(i, creds)| tls(creds, if i == 0 { first } else { second }, "player"))
+        .collect();
+    let mut views: Vec<_> = (0..5).map(|_| PlayerSightClient::default()).collect();
+    let render = |i: usize, view: &mut PlayerSightClient, reader: &mut Client, expected: &[Id]| {
+        let until = Instant::now() + Duration::from_secs(8);
+        loop {
+            let result = view.refresh(reader, |_, addr| {
+                Client::connect(
+                    addr,
+                    "localhost",
+                    &fs::read(dir.join("ca.der"))?,
+                    &identity(&credentials[i], "player")?,
+                )
+            });
+            if result.is_ok() && view.records().keys().copied().eq(expected.iter().copied()) {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "player {i}, expected {expected:?}, result {result:?}, visible {:?}",
+                view.records().keys()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    for i in 0..5 {
+        render(i, &mut views[i], &mut readers[i], &[]);
+    }
+    // A known remote server address also filters by the authenticated character.
+    let mut other = tls(&credentials[1], second, "player");
+    assert!(
+        matches!(other.call(&Request::SightPage{after:None, known:None}).unwrap(),Response::SightPage(p) if p.records.is_empty())
+    );
+    assert!(matches!(
+        readers[1]
+            .call(&Request::SightPlan {
+                viewer: watchers[0],
+                after: None
+            })
+            .unwrap(),
+        Response::Error(_)
+    ));
+    let move_player = |reader: &mut Client, seq, axes| {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(matches!(
+            reader
+                .call(&Request::Input(Input {
+                    session,
+                    sequence: seq,
+                    at_ms: ms,
+                    axes
+                }))
+                .unwrap(),
+            Response::Input(_)
+        ));
+    };
+    move_player(&mut readers[0], 1, [32767, 0, 0]);
+    render(0, &mut views[0], &mut readers[0], &[local, ship]);
+    assert!(!views[0].records()[&local].fields.contains_key(&INVENTORY));
+    assert!(views[0].records()[&local].fields.contains_key(&PLAYER));
+    assert!(views[0].records()[&ship].fields.contains_key(&SHIP));
+    let reused = views[0]
+        .refresh(&mut readers[0], |_, _| {
+            Err(invalid("expected live connection"))
+        })
+        .unwrap();
+    assert_eq!((reused.changed_pages, reused.unchanged_pages), (0, 2));
+    let mut source = tls(&credentials[0], second, "player");
+    let Response::SightPage(page) = source
+        .call(&Request::SightPage {
+            after: None,
+            known: None,
+        })
+        .unwrap()
+    else {
+        panic!("expected public ship page")
+    };
+    assert_eq!(
+        page.records.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [ship]
+    );
+    let rx = source
+        .traffic
+        .payload_in
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(
+        source
+            .call(&Request::SightPage {
+                after: None,
+                known: Some(page.content_digest())
+            })
+            .unwrap(),
+        Response::SightUnchanged { next: None }
+    ));
+    assert!(
+        source
+            .traffic
+            .payload_in
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - rx
+            < rx
+    );
+    let cli = Command::new(env!("CARGO_BIN_EXE_infinite-stars"))
+        .args([
+            "sight",
+            credentials[0].to_str().unwrap(),
+            &second.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&cli.stdout).contains("2 visible"));
+    let mut neighbour = tls(&local_credentials, first, "player");
+    let Response::SightPage(initial) = neighbour
+        .call(&Request::SightPage {
+            after: None,
+            known: None,
+        })
+        .unwrap()
+    else {
+        panic!("expected the moving neighbour's public record");
+    };
+    assert_eq!(initial.records[0].id, watchers[0]);
+    let known = Some(initial.content_digest());
+    move_player(&mut readers[0], 2, [0, 32767, 0]);
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Response::SightPage(p) = neighbour
+            .call(&Request::SightPage { after: None, known })
+            .unwrap()
+        {
+            if p.records.first().is_some_and(|r| {
+                r.id == watchers[0] && r.get::<Position>(POSITION, 1).unwrap().mm[1] > 0
+            }) {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < until,
+            "a changed position must replace the cached page"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for i in 1..5 {
+        render(i, &mut views[i], &mut readers[i], &[]);
+    }
+    move_player(&mut readers[0], 3, [-32767, 0, 0]);
+    render(0, &mut views[0], &mut readers[0], &[]);
+    assert_eq!(db.owner(group).unwrap().worker, db.worker(1).unwrap());
+}
+#[test]
 fn persistent_cli_outbox_routes_through_the_bootstrap_after_migration() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

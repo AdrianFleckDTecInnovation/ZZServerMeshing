@@ -163,19 +163,12 @@ impl Pool {
                         .into_iter();
                 while let Some(id) = changed.next() {
                     if let Some(description) =
-                        crate::network_mesh::describe(node.app.world(), worker, id)
+                        crate::network_mesh::describe::<false>(node.app.world(), worker, id)
                     {
-                        let update =
-                            directory
-                                .upsert(description.presence)
-                                .and_then(|_| match description.area {
-                                    Some(area) => directory.register_area(area),
-                                    None => {
-                                        directory.remove_area(id);
-                                        Ok(())
-                                    }
-                                });
-                        if let Err(e) = update {
+                        // In-process readers can take sight points directly from Bevy on demand.
+                        if let Err(e) =
+                            directory.describe_physics(description.presence, description.area)
+                        {
                             let mut state = node.app.world_mut().resource_mut::<MeshState>();
                             state.dirty.insert(id);
                             state.dirty.extend(changed);

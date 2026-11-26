@@ -58,6 +58,8 @@ pub struct Rules {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum View {
+    /// Public gameplay fields for another player's visible character or ship.
+    Public(Detail),
     Migration,
     Checkpoint,
     Client {
@@ -72,6 +74,7 @@ pub enum View {
 impl Rules {
     pub fn detail(self, v: View) -> Option<Detail> {
         match v {
+            View::Public(detail) if self.visibility == Visibility::Public => Some(detail),
             View::Migration if self.migrate => Some(Detail::Exact),
             View::Checkpoint if self.persist => Some(Detail::Exact),
             View::Client { detail, .. } if self.visibility == Visibility::Public => Some(detail),
@@ -348,12 +351,12 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
             records.push(r);
         }
     }
-    for batch in records.chunks(MAX_TARGETS) {
+    for batch in records.chunks_mut(MAX_TARGETS) {
         base = write_checkpoint(w, &n.0, group, owner, base, batch)?;
         let mut state = w.resource_mut::<MeshState>();
         for r in batch {
             state.versions.insert(r.id, base);
-            state.saved.insert(r.id, r.fields.clone());
+            state.saved.insert(r.id, std::mem::take(&mut r.fields));
             state.pending.remove(&r.id, group);
         }
         state.groups.insert(group, (owner, base));
@@ -1036,11 +1039,11 @@ fn flush(w: &mut World) {
         r.deleted = true;
         batches.entry(g).or_default().push(r);
     }
-    for (g, items) in batches {
+    for (g, mut items) in batches {
         let Some((a, mut base)) = w.resource::<MeshState>().groups.get(&g).copied() else {
             continue;
         };
-        for chunk in items.chunks(MAX_TARGETS) {
+        for chunk in items.chunks_mut(MAX_TARGETS) {
             match write_checkpoint(w, &db, g, a, base, chunk) {
                 Ok(next) => {
                     let mut st = w.resource_mut::<MeshState>();
@@ -1050,7 +1053,7 @@ fn flush(w: &mut World) {
                             st.saved.remove(&r.id);
                             st.versions.remove(&r.id);
                         } else {
-                            st.saved.insert(r.id, r.fields.clone());
+                            st.saved.insert(r.id, std::mem::take(&mut r.fields));
                         }
                     }
                     st.groups.insert(g, (a, next));

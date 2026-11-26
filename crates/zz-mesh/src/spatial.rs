@@ -26,7 +26,10 @@ impl Box3 {
         Ok(Self { frame, lo, hi })
     }
     pub fn intersects(self, b: Self) -> bool {
-        self.frame == b.frame && (0..3).all(|i| self.lo[i] <= b.hi[i] && b.lo[i] <= self.hi[i])
+        self.frame == b.frame && self.overlaps_axes(&b)
+    }
+    pub(crate) fn overlaps_axes(&self, b: &Self) -> bool {
+        (0..3).all(|i| self.lo[i] <= b.hi[i] && b.lo[i] <= self.hi[i])
     }
     pub fn sweep(self, velocity: [i64; 3], ticks: u16, padding: u32) -> Self {
         if ticks == 0 || velocity == [0; 3] {
@@ -107,6 +110,7 @@ pub struct InterestChange {
 }
 #[derive(Default)]
 pub struct Directory {
+    pub(crate) sight_points: HashMap<Id, SightPoint>,
     areas: HashMap<Id, Area>,
     objects: HashMap<Id, Presence>,
     area_index: MovingIndex,
@@ -128,6 +132,39 @@ pub struct Directory {
     limit: Option<usize>,
 }
 impl Directory {
+    pub(crate) fn describe(&mut self, d: crate::network_mesh::Description) -> Result<()> {
+        let id = d.presence.id;
+        if let Some(point) = d.sight {
+            let bounds = d.presence.bounds;
+            if !(0..3).all(|i| (bounds.lo[i]..=bounds.hi[i]).contains(&point.mm[i])) {
+                return Err(invalid("sight point outside its spatial presence"));
+            }
+        }
+        self.describe_physics(d.presence, d.area)?;
+        if let Some(point) = d.sight {
+            self.sight_points.insert(id, point);
+        } else {
+            self.sight_points.remove(&id);
+        }
+        Ok(())
+    }
+    pub(crate) fn describe_physics(
+        &mut self,
+        presence: Presence,
+        area: Option<Area>,
+    ) -> Result<()> {
+        self.upsert(presence)?;
+        if let Some(area) = area {
+            self.register_area(area)
+        } else {
+            self.remove_area(presence.id);
+            Ok(())
+        }
+    }
+    pub(crate) fn sight_candidates(&self, bounds: Box3, viewer: Id) -> Vec<Id> {
+        self.object_index
+            .candidates(bounds, Recipient::Client(viewer))
+    }
     /// A simulation tick or directory report describes one coherent set of positions.
     /// Re-evaluate each affected object once after all its observers have moved.
     pub(crate) fn batch(&mut self, edit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
@@ -390,11 +427,11 @@ impl Directory {
     }
     pub fn upsert(&mut self, p: Presence) -> Result<()> {
         Box3::new(p.bounds.frame, p.bounds.lo, p.bounds.hi)?;
-        if self.objects.get(&p.id) == Some(&p) {
+        let previous = self.objects.get(&p.id).copied();
+        if previous == Some(p) {
             return Ok(());
         }
         let predicted = p.predicted();
-        let previous = self.objects.get(&p.id).copied();
         let old_bounds = previous.map(Presence::predicted);
         let identity_changed =
             previous.is_none_or(|old| old.owner != p.owner || old.principal != p.principal);
@@ -468,6 +505,7 @@ impl Directory {
         );
     }
     pub fn remove(&mut self, id: Id) {
+        self.sight_points.remove(&id);
         if let Some(p) = self.objects.remove(&id) {
             self.object_faces.replace(Some(p.predicted()), None);
             self.object_index
