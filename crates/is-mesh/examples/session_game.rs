@@ -3,7 +3,7 @@ use bevy_app::App;
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use zz_mesh::*;
+use is_mesh::*;
 
 #[derive(Component, Serialize, Deserialize)]
 struct Position(i64);

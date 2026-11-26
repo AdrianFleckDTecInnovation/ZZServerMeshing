@@ -1,7 +1,7 @@
 use bevy_app::{App, Update};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
-use zz_mesh::prelude::*;
+use is_mesh::prelude::*;
 
 #[derive(Component, Serialize, Deserialize)]
 struct Energy(u32);
@@ -12,10 +12,10 @@ fn charge(mut reactors: Query<&mut Energy, With<Simulated>>) {
     }
 }
 
-fn main() -> zz_mesh::Result<()> {
+fn main() -> is_mesh::Result<()> {
     let path = std::env::args_os()
         .nth(1)
-        .ok_or_else(|| zz_mesh::invalid("pass the world.sqlite path"))?;
+        .ok_or_else(|| is_mesh::invalid("pass the world.sqlite path"))?;
     let store = Store::open(path)?;
     let worker = store.start_worker(1)?;
     let mut app = App::new();
@@ -38,18 +38,18 @@ fn main() -> zz_mesh::Result<()> {
         restore_group(app.world_mut(), owned)?;
     }
     match store.lookup(reactor)? {
-        zz_mesh::Lookup::Unknown => {
+        is_mesh::Lookup::Unknown => {
             app.world_mut()
                 .spawn((Managed::new(reactor, group), Energy(0)));
         }
-        zz_mesh::Lookup::Present(_) => {}
-        zz_mesh::Lookup::Deleted => return Err(zz_mesh::invalid("reactor was retired")),
+        is_mesh::Lookup::Present(_) => {}
+        is_mesh::Lookup::Deleted => return Err(is_mesh::invalid("reactor was retired")),
     }
     app.update();
     checkpoint_group(app.world_mut(), group)?;
     // Read back the durable record, as the next process will see it.
-    let zz_mesh::Lookup::Present(record) = store.lookup(reactor)? else {
-        return Err(zz_mesh::invalid("reactor checkpoint missing"));
+    let is_mesh::Lookup::Present(record) = store.lookup(reactor)? else {
+        return Err(is_mesh::invalid("reactor checkpoint missing"));
     };
     let energy: Energy = record.get(1, 1)?;
     println!("reactor={reactor} energy={}", energy.0);

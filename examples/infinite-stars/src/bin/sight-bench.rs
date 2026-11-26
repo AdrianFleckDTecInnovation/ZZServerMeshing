@@ -2,7 +2,7 @@
 use infinite_stars::{world, Inventory, Player, Position, Ship, INVENTORY, PLANET_ID};
 use serde_json::{json, Value};
 use std::time::Instant;
-use zz_mesh::{
+use is_mesh::{
     wire::{Request, Response},
     *,
 };

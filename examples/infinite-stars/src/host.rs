@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zz_mesh::wire::{Identity, Role, Service};
+use is_mesh::wire::{Identity, Role, Service};
 
 pub(crate) fn write_new_credential(path: &Path, data: &[u8]) -> mesh::Result<()> {
     use std::io::Write;
@@ -272,7 +272,7 @@ pub(crate) fn run_node(
         None
     };
     let registry = db.clone();
-    let listener = zz_mesh::wire::Listener::bind_resolved(
+    let listener = is_mesh::wire::Listener::bind_resolved(
         addr,
         &fs::read(dir.join("ca.der"))?,
         &identity(&dir, "server")?,

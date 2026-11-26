@@ -6,7 +6,7 @@ publish = false
 default-run = "infinite-stars"
 
 [dependencies]
-zz-mesh = { path = "../../crates/zz-mesh" }
+is-mesh = { path = "../../crates/is-mesh" }
 bevy = { version = "0.15", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

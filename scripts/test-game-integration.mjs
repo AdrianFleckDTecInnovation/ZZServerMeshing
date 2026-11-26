@@ -9,14 +9,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
 const revision = git('rev-parse', 'HEAD').trim();
-const modified = git('status', '--porcelain', '--', 'crates/zz-mesh').trim().length > 0;
+const modified = git('status', '--porcelain', '--', 'crates/is-mesh').trim().length > 0;
 const library = modified
-  ? `{ path = ${JSON.stringify(resolve(repo, 'crates/zz-mesh').replaceAll('\\', '/'))} }`
+  ? `{ path = ${JSON.stringify(resolve(repo, 'crates/is-mesh').replaceAll('\\', '/'))} }`
   : `{ git = "${pathToFileURL(repo).href}", rev = "${revision}" }`;
-const example = name => readFileSync(join(repo, 'crates/zz-mesh/examples', name + '.rs'), 'utf8');
-const game = mkdtempSync(join(tmpdir(), 'zz-mesh-game-'));
+const example = name => readFileSync(join(repo, 'crates/is-mesh/examples', name + '.rs'), 'utf8');
+const game = mkdtempSync(join(tmpdir(), 'is-mesh-game-'));
 try {
   mkdirSync(join(game, 'src/bin'), { recursive: true });
+  writeFileSync(join(game,'Cargo.lock'),readFileSync(join(repo,'Cargo.lock')));
   writeFileSync(join(game, 'src', 'main.rs'), example('persistent_game'));
   writeFileSync(join(game, 'src/bin/session_game.rs'), example('session_game'));
   writeFileSync(join(game, 'Cargo.toml'), `[package]
@@ -25,7 +26,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zz-mesh = ${library}
+is-mesh = ${library}
 bevy_app = "0.15"
 bevy_ecs = "0.15"
 serde = { version = "1", features = ["derive"] }

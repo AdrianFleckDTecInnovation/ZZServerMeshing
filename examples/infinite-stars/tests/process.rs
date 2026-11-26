@@ -7,7 +7,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
-use zz_mesh::{wire::*, *};
+use is_mesh::{wire::*, *};
 
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
@@ -46,7 +46,7 @@ fn child_at_commit() {
         dir: PathBuf,
     }
     impl Endpoint for Crash {
-        fn dispatch(&self, role: Role, r: Request) -> zz_mesh::Result<Response> {
+        fn dispatch(&self, role: Role, r: Request) -> is_mesh::Result<Response> {
             let reply = self.service.dispatch(role, r)?;
             if matches!(&reply,Response::Actions(v) if matches!(v.first(),Some(Reply::Decided(Receipt{outcome:Outcome::Committed(_),..}))))
             {
@@ -252,10 +252,10 @@ fn live_workers_prepare_switch_fence_and_resume_over_tls() {
     };
     let mut source = tls(dir, aa, &worker_name(old.worker));
     let mut dest = tls(dir, ba, &worker_name(old.worker));
-    let cost = zz_mesh::remote::migrate(&mut source, &mut dest, t, 9000).unwrap();
+    let cost = is_mesh::remote::migrate(&mut source, &mut dest, t, 9000).unwrap();
     assert_eq!(cost.authority, db.owner(GROUP).unwrap());
     assert_eq!(cost.payload, 4096 + 16);
-    let replay = zz_mesh::remote::migrate(&mut source, &mut dest, t, 0).unwrap();
+    let replay = is_mesh::remote::migrate(&mut source, &mut dest, t, 0).unwrap();
     assert_eq!(replay.payload, 0);
     let key = ActionKey {
         session: Id::new(),
@@ -294,7 +294,7 @@ fn live_workers_prepare_switch_fence_and_resume_over_tls() {
     let mut dest = tls(dir, aa, &worker_name(target));
     // Allow the published durable action to reach the authoritative Bevy tick.
     std::thread::sleep(Duration::from_millis(110));
-    let warm = zz_mesh::remote::migrate(&mut origin, &mut dest, back, 0).unwrap();
+    let warm = is_mesh::remote::migrate(&mut origin, &mut dest, back, 0).unwrap();
     assert_eq!(warm.payload, 0);
 }
 
@@ -406,7 +406,7 @@ fn external_adapter_routes_input_and_resumes_scoped_streams_across_worker_proces
     };
     let mut source = tls(dir, aa, &worker_name(a));
     let mut destination = tls(dir, ba, &worker_name(b));
-    zz_mesh::remote::migrate(&mut source, &mut destination, ticket, 8 << 20).unwrap();
+    is_mesh::remote::migrate(&mut source, &mut destination, ticket, 8 << 20).unwrap();
     assert!(matches!(
         origin.call(&Request::SessionInputs(vec![input])).unwrap(),
         Response::Error(_)
@@ -793,11 +793,11 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
         deployment::connect_worker(&observer, store_addr.parse().unwrap()).unwrap();
     assert!(matches!(
         unrelated.lookup(ACTOR),
-        Err(zz_mesh::Error::Denied)
+        Err(is_mesh::Error::Denied)
     ));
     assert!(matches!(
         unrelated.snapshot(GROUP),
-        Err(zz_mesh::Error::Denied)
+        Err(is_mesh::Error::Denied)
     ));
     assert!(run("client", &player, &[&aa]).contains("sequence 1"));
     let session = Id::new();
@@ -853,7 +853,7 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     assert!(matches!(
         client
             .call(&Request::Storage(
-                zz_mesh::authority_store::Operation::Snapshot(GROUP)
+                is_mesh::authority_store::Operation::Snapshot(GROUP)
             ))
             .unwrap(),
         Response::Error(_)
@@ -868,7 +868,7 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     .unwrap();
     assert!(bad
         .call(&Request::Storage(
-            zz_mesh::authority_store::Operation::Snapshot(GROUP)
+            is_mesh::authority_store::Operation::Snapshot(GROUP)
         ))
         .is_err());
     drop(control);
@@ -929,7 +929,7 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     assert_eq!(db.owner(GROUP).unwrap().worker.slot, 2);
     assert!(matches!(
         db.create_group(Id::new(), on_first),
-        Err(zz_mesh::Error::Busy(_))
+        Err(is_mesh::Error::Busy(_))
     ));
     run("resume", &authority, &["1"]);
     db.create_group(Id::new(), on_first).unwrap();

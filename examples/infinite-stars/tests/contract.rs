@@ -1,6 +1,6 @@
 use bevy::prelude::{Component, With};
 use infinite_stars::{data::*, prediction::*, *};
-use zz_mesh::*;
+use is_mesh::*;
 
 #[test]
 fn concurrent_durable_checkpoints_isolate_rejections_and_are_visible_after_ack() {

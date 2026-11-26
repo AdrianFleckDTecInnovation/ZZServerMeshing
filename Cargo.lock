@@ -1268,13 +1268,29 @@ name = "infinite-stars"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "is-mesh",
  "rcgen",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "zz-mesh",
+]
+
+[[package]]
+name = "is-mesh"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "bincode",
+ "libc",
+ "ring",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -2833,14 +2849,5 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 name = "zz-mesh"
 version = "0.1.0"
 dependencies = [
- "bevy_app",
- "bevy_ecs",
- "bincode",
- "libc",
- "ring",
- "rusqlite",
- "rustls",
- "serde",
- "thiserror 2.0.21",
- "uuid",
+ "is-mesh",
 ]

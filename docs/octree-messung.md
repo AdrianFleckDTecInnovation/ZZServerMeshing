@@ -47,7 +47,7 @@ Der 32er-Punkt auf Debian fiel in der Gesamtrampe langsamer aus als die Referenz
 | Individuelle Browser | Jeder Empfänger hat einen eigenen bestätigten Snapshot-Stand. Bei vollständiger gegenseitiger Sicht und Bewegung wächst die versendete Positionsmenge näherungsweise mit `P × (P − 1 + sichtbare bewegte NPCs)` pro Update. |
 | Chunk oder zusammengesetztes Objekt | Maßgeblich sind geänderte Komponenten, adressierte Teilbereiche und fehlende verifizierte Bytes. Unveränderte Blobs werden im Cache wiederverwendet. Ein Chunk kann viele Voxel enthalten. |
 
-Die direkte Messung führt alle Worker-Worlds in einem Prozess nacheinander aus. Sie erfasst den Gesamtaufwand. Die Netzwerkmessung verwendet getrennte Prozesse und umfasst die Wartezeit bis zum letzten Empfänger. [Worker-Schritt](../crates/zz-mesh/src/pool.rs) · [Komponentenänderungen](../crates/zz-mesh/src/bevy_runtime.rs)
+Die direkte Messung führt alle Worker-Worlds in einem Prozess nacheinander aus. Sie erfasst den Gesamtaufwand. Die Netzwerkmessung verwendet getrennte Prozesse und umfasst die Wartezeit bis zum letzten Empfänger. [Worker-Schritt](../crates/is-mesh/src/pool.rs) · [Komponentenänderungen](../crates/is-mesh/src/bevy_runtime.rs)
 
 **Warum Meshing?** Für kleine Gruppen spart ein einzelner Worker Zustellungen und Kopien. Das Mesh ermöglicht, getrennte Regionen auf zusätzliche Rechenkapazität zu verteilen. Bei unveränderter lokaler Nachbarschaft bleiben die Empfänger der ersten Insel konstant. Ein weiterer Worker in derselben Menge gegenseitig sichtbarer Figuren erhöht die Zahl der benötigten Zustellungen. Für eine konkrete Spielergrenze müssen Spiellogik, Sichtweite, Änderungsrate, individuelle Clients und die Netzanbindung gemeinsam ins Budget passen.
 
@@ -66,7 +66,7 @@ Jeder Wert ist der Median eines einzelnen abrupten Übergangsticks aus den errei
 
 64 Figuren bewegen sich mit acht Workern schrittweise durch die Phasen **4 → 3 → 2 → 1 → 2 → 3 → 4**. Die stabilen Phasen haben **8 → 16 → 32 → 56 → 32 → 16 → 8** gerichtete Workerpaare. Beim Zusammenlaufen entstehen die zusätzlich benötigten Sichten. Alle Writer behalten Generation 1. In den stabilen Phasen entstehen null neue Vollbaselines. Ein eigener Wechseltest schickt 4, 8, 16, 32 und 64 Figuren zwischen zwei Gruppen hin und zurück. Er prüft die tatsächlichen Sichtwechsel gegen die Positionen aller Figuren.
 
-Beim Octree liegt jedes Objekt genau einmal in einem räumlichen Knoten. Der Index führt pro Bezugssystem zusätzlich die Koordinaten der Begrenzungsflächen. Wenn eine Bewegung auf keiner Achse eine gegenüberliegende Fläche kreuzt, kann sie die bestehende Überlappung mit keinem Objekt ändern. Andernfalls fragt das Directory den Octree ab und prüft die betroffenen Boxen einschließlich Vorhersage und Hysterese genau. Die schnelle Prüfung umfasst eine konstante Anzahl geordneter Bereichssuchen. Bei Bewegung über viele Sichtgrenzen kann die Arbeit mit der Zahl der tatsächlichen Überlappungen wachsen. Die Kosten für Bevy-Systeme, Datenprojektion und Zustellung bleiben messbar, auch wenn keine räumlichen Treffer erneut geprüft werden müssen. [Index](../crates/zz-mesh/src/octree.rs) · [Subscription-Pfad](../crates/zz-mesh/src/spatial.rs)
+Beim Octree liegt jedes Objekt genau einmal in einem räumlichen Knoten. Der Index führt pro Bezugssystem zusätzlich die Koordinaten der Begrenzungsflächen. Wenn eine Bewegung auf keiner Achse eine gegenüberliegende Fläche kreuzt, kann sie die bestehende Überlappung mit keinem Objekt ändern. Andernfalls fragt das Directory den Octree ab und prüft die betroffenen Boxen einschließlich Vorhersage und Hysterese genau. Die schnelle Prüfung umfasst eine konstante Anzahl geordneter Bereichssuchen. Bei Bewegung über viele Sichtgrenzen kann die Arbeit mit der Zahl der tatsächlichen Überlappungen wachsen. Die Kosten für Bevy-Systeme, Datenprojektion und Zustellung bleiben messbar, auch wenn keine räumlichen Treffer erneut geprüft werden müssen. [Index](../crates/is-mesh/src/octree.rs) · [Subscription-Pfad](../crates/is-mesh/src/spatial.rs)
 
 Ein gezielter Einzellauf bei **1.024 Figuren** erreichte beim abrupten Zusammenlauf 490,3 / 550,5 ms und bei der Trennung 252,7 / 330,6 ms unter Windows / Debian. Beim Zusammenlauf prüfte das Directory 1.048.576 Bereichstreffer und erzeugte 6.144 neue Sichten. Beim Split blieben genau 1.024 laufende Positionszustellungen. [Einzelläufe](benchmarks/octree-1024-einzelpunkt.json.gz)
 
@@ -115,8 +115,8 @@ Die drei direkten Vergleichspaare verwenden `5d9c55c`. Der folgende Stand `46149
 ## Reproduzieren
 
 ```sh
-git worktree add --detach ../zz-mesh-vor-octree 6cc85be
-cargo run --release --locked --manifest-path ../zz-mesh-vor-octree/Cargo.toml -p infinite-stars --bin cluster-bench -- target/vorher.json --quick
+git worktree add --detach ../is-mesh-vor-octree 6cc85be
+cargo run --release --locked --manifest-path ../is-mesh-vor-octree/Cargo.toml -p infinite-stars --bin cluster-bench -- target/vorher.json --quick
 cargo run --release --locked -p infinite-stars --bin cluster-bench -- target/nachher.json --quick
 cargo run --release --locked -p infinite-stars --bin cluster-bench -- target/256.json --crowd 256
 npm run bench:distributed

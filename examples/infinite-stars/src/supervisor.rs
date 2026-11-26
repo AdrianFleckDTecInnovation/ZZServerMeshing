@@ -41,8 +41,8 @@ fn one(dir: &Path, db: &Store, drain: Option<Worker>) -> Result<bool> {
                 if owner.worker == t.target {
                     let mut target = connect(dir, db.address(t.target)?, "operator")?;
                     let answer =
-                        target.call(&Request::Control(t, zz_mesh::remote::Command::Activate))?;
-                    if !matches!(answer, Response::Control(zz_mesh::remote::Answer::Done)) {
+                        target.call(&Request::Control(t, is_mesh::remote::Command::Activate))?;
+                    if !matches!(answer, Response::Control(is_mesh::remote::Answer::Done)) {
                         return Err(invalid(format!("waiting for committed target: {answer:?}")));
                     }
                 }

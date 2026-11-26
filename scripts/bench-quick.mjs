@@ -55,16 +55,16 @@ try {
   } else if (values.profile === 'development') {
     const out=resolve(values.output || target);
     mkdirSync(out,{recursive:true});
-    cargo('test','--locked','-p','zz-mesh','--test','external_integration');
-    cargo('run','--locked','-p','zz-mesh','--example','session_game');
+    cargo('test','--locked','-p','is-mesh','--test','external_integration');
+    cargo('run','--locked','-p','is-mesh','--example','session_game');
     cargo('run','--release','--locked','-p','infinite-stars','--bin','sight-bench','--',
       values.players || '1024',join(out,'subscriber-development.json'),'--push');
     cargo('run','--release','--locked','-p','infinite-stars','--bin','mesh-profile','--','--players',
       values.players || '1024','--workers',values.workers || '8','--partitions','2','--ticks',values.ticks || '40',
       '--status-effects','128','--output',join(out,'tick-development.json'));
   } else if (values.profile === 'quick') {
-    cargo('test','--locked','-p','zz-mesh','--test','external_integration');
-    cargo('run','--locked','-p','zz-mesh','--example','session_game');
+    cargo('test','--locked','-p','is-mesh','--test','external_integration');
+    cargo('run','--locked','-p','is-mesh','--example','session_game');
     const build = execFileSync('cargo', ['build', '--locked', '--release', '-p', 'infinite-stars',
       '-p', 'coordinator', '-p', 'sim-server', '--bin', 'cluster-bench', '--bin', 'coordinator', '--bin', 'sim-server',
       '--message-format=json-render-diagnostics'], opts);

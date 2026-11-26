@@ -18,7 +18,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use zz_mesh::{
+use is_mesh::{
     wire::{Client, Endpoint, Listener, Request, Response, Role},
     *,
 };

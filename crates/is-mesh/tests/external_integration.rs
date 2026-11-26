@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Barrier},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use zz_mesh::*;
+use is_mesh::*;
 
 fn grant(actor: Id, principal: PrincipalId, session: SessionId, epoch: u64) -> SessionGrant {
     SessionGrant {

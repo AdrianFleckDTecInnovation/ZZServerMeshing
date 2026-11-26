@@ -1,8 +1,8 @@
 use bevy_app::App;
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
-use zz_mesh::prelude::*;
-use zz_mesh::{prepare_world, Error, Worker};
+use is_mesh::prelude::*;
+use is_mesh::{prepare_world, Error, Worker};
 
 #[derive(Component, Serialize, Deserialize)]
 struct Energy(u32);
@@ -25,7 +25,7 @@ fn periodic_checkpoints_spread_groups_and_save_all_within_twenty_ticks() {
     for (_, e) in &objects {
         app.world_mut().get_mut::<Energy>(*e).unwrap().0 = 2;
     }
-    let version = |a: &App, id| a.world().resource::<zz_mesh::MeshState>().version(id);
+    let version = |a: &App, id| a.world().resource::<is_mesh::MeshState>().version(id);
     let base = version(&app, objects[0].0);
     for _ in 0..3 {
         app.update();
@@ -52,9 +52,9 @@ fn game(store: &Store, worker: Worker) -> App {
         ComponentCodec {
             encode: |energy, _| {
                 if energy.0 > 100 {
-                    return Err(zz_mesh::invalid("energy exceeds capacity"));
+                    return Err(is_mesh::invalid("energy exceeds capacity"));
                 }
-                zz_mesh::encode(energy)
+                is_mesh::encode(energy)
             },
             ..Default::default()
         },
@@ -110,7 +110,7 @@ fn a_failing_game_codec_discards_the_entire_staging_group_before_cutover() {
     app.update();
     let before = app.world().resource::<MeshState>().entities.clone();
     let mut snapshot = db.snapshot(group).unwrap();
-    snapshot.records[1].fields.get_mut(&1).unwrap().bytes = zz_mesh::encode(&Energy(101)).unwrap();
+    snapshot.records[1].fields.get_mut(&1).unwrap().bytes = is_mesh::encode(&Energy(101)).unwrap();
     assert!(
         matches!(prepare_world(app.world_mut(), &snapshot), Err(Error::Invalid(reason)) if reason == "energy exceeds capacity")
     );
@@ -139,7 +139,7 @@ fn legacy_store_keeps_world_and_game_metadata_and_future_format_fails_closed() {
     let worker = db.start_worker(6).unwrap();
     let owner = db.create_group(group, worker).unwrap();
     let revision = db
-        .checkpoint(group, owner, 0, vec![zz_mesh::Record::new(id, group)])
+        .checkpoint(group, owner, 0, vec![is_mesh::Record::new(id, group)])
         .unwrap();
     drop(db);
     let raw = rusqlite::Connection::open(&path).unwrap();
@@ -151,7 +151,7 @@ fn legacy_store_keeps_world_and_game_metadata_and_future_format_fails_closed() {
     assert_eq!(upgraded.snapshot(group).unwrap().revision, revision);
     assert!(matches!(
         upgraded.lookup(id).unwrap(),
-        zz_mesh::Lookup::Present(_)
+        is_mesh::Lookup::Present(_)
     ));
     drop(upgraded);
     let raw = rusqlite::Connection::open(&path).unwrap();
@@ -223,7 +223,7 @@ fn concurrent_workers_open_one_new_world() {
 }
 #[test]
 fn draining_a_slot_aborts_inbound_frozen_work_and_persists_across_incarnations() {
-    use zz_mesh::*;
+    use is_mesh::*;
     let db = Store::open(":memory:").unwrap();
     let a = db.start_worker(1).unwrap();
     let b = db.start_worker(2).unwrap();
@@ -258,7 +258,7 @@ fn draining_a_slot_aborts_inbound_frozen_work_and_persists_across_incarnations()
 
 #[test]
 fn async_checkpoint_is_bounded_and_a_late_commit_preserves_newer_live_fields() {
-    use zz_mesh::{AsyncCheckpoints, BulkExecutor};
+    use is_mesh::{AsyncCheckpoints, BulkExecutor};
     let file = std::env::temp_dir().join(format!("zz-async-{}.sqlite", Id::new()));
     let db = Store::open(&file).unwrap();
     let worker = db.start_worker(1).unwrap();

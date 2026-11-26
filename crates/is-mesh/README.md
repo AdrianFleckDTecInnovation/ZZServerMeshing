@@ -1,6 +1,6 @@
-# zz-mesh in ein Bevy-Spiel integrieren
+# is-mesh in ein Bevy-Spiel integrieren
 
-Mit `zz-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definiert Komponenten, Simulationssysteme und Spielregeln. Die Bibliothek speichert stabile Objekt-IDs, prüft Schreibrechte und übergibt zusammengehörige Entities als Gruppe an einen anderen Worker.
+Mit `is-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definiert Komponenten, Simulationssysteme und Spielregeln. Die Bibliothek speichert stabile Objekt-IDs, prüft Schreibrechte und übergibt zusammengehörige Entities als Gruppe an einen anderen Worker.
 
 ## Vom Checkout zum ersten Spielstand
 
@@ -14,14 +14,14 @@ Für die Dimensionierung deines Spiels kannst du aktive Spieler, ruhende Spieler
 
    ```toml
    [dependencies]
-   zz-mesh = { path = "../ZZServerMeshing/crates/zz-mesh" }
+   is-mesh = { path = "../ZZServerMeshing/crates/is-mesh" }
    bevy_app = "0.15"
    bevy_ecs = "0.15"
    serde = { version = "1", features = ["derive"] }
    ```
 
 2. Übernimm das ausführbare Beispiel als `src/main.rs`. Es registriert eine Komponente, lädt oder erzeugt einen Reaktor, führt einen autoritativen Spielschritt aus und liest seinen gespeicherten Energiewert zurück. [Beispielcode](examples/persistent_game.rs)
-3. Führe im Spielverzeichnis **zweimal** `cargo run -- world.sqlite` aus. Eine neue Datei ergibt zuerst `energy=1`, danach `energy=2`. Die Reaktor-ID bleibt gleich. Im Mesh-Checkout lautet derselbe Aufruf `cargo run --locked -p zz-mesh --example persistent_game -- target/world.sqlite`. Rust stable und ein C-Linker reichen. Unter Windows benötigst du die MSVC-Toolchain, C++ Build Tools und das Windows SDK.
+3. Führe im Spielverzeichnis **zweimal** `cargo run -- world.sqlite` aus. Eine neue Datei ergibt zuerst `energy=1`, danach `energy=2`. Die Reaktor-ID bleibt gleich. Im Mesh-Checkout lautet derselbe Aufruf `cargo run --locked -p is-mesh --example persistent_game -- target/world.sqlite`. Rust stable und ein C-Linker reichen. Unter Windows benötigst du die MSVC-Toolchain, C++ Build Tools und das Windows SDK.
 
 Für den Bezug aus deinem Fork verwende im Mesh-Checkout den vorbereiteten Branch.
 
@@ -33,7 +33,7 @@ git push -u origin feat/bevy-game-integration
 git rev-parse HEAD
 ```
 
-Ersetze im Spiel den lokalen Pfad durch `zz-mesh = { git = "https://github.com/AdrianFleckDTecInnovation/ZZServerMeshing.git", rev = "<ausgegebener Commit>" }`. Übernimm die aktualisierte `Cargo.lock` ins Spiel-Repo. Im Mesh-Checkout öffnet `cargo doc --locked -p zz-mesh --no-deps --open` die lokale API-Referenz mit dem vollständigen Beispiel.
+Ersetze im Spiel den lokalen Pfad durch `is-mesh = { git = "https://github.com/AdrianFleckDTecInnovation/ZZServerMeshing.git", rev = "<ausgegebener Commit>" }`. Übernimm die aktualisierte `Cargo.lock` ins Spiel-Repo. Im Mesh-Checkout öffnet `cargo doc --locked -p is-mesh --no-deps --open` die lokale API-Referenz mit dem vollständigen Beispiel.
 
 ## Welche Entscheidungen trifft das Spiel?
 
@@ -51,4 +51,4 @@ Ersetze im Spiel den lokalen Pfad durch `zz-mesh = { git = "https://github.com/A
 - **Speicher.** Im lokalen Pool öffnet das Spiel seine SQLite-Welt. Für getrennte Hosts öffnet allein der Authority-Dienst das Welt-Volume. Die Worker verwenden den typisierten Store über gegenseitiges TLS. Für ein kaltes Backup Authority und Verwaltungsbefehle beenden, das vollständige geschützte Kontrollverzeichnis sichern und den Wiederanlauf auf einer Kopie prüfen. [Bereitstellung und Recovery](../../docs/produktionsabnahme.md)
 - **Kompatibilität.** Der Store erkennt bestehende Weltdateien aus diesem Projekt und markiert ihr Format beim ersten Öffnen. Ein unbekanntes Format bricht den Start ab. Ein geändertes Komponentenformat benötigt eine geplante Datenmigration. Unbekannte Schema-IDs und inkompatible Versionen verhindern die Aktivierung einer Gruppe.
 - **Fehler.** Bei `Fenced` hat der Worker seine Schreibberechtigung oder Revision verloren. Ermittle den aktuellen Owner. Bei `Busy` warte vor einer begrenzten Wiederholung. Ein fehlender Codec oder Provider muss vor dem nächsten Ladeversuch registriert sein. Das Beispiel für getrennte Prozesse nutzt gegenseitiges TLS und eine lokale Entwicklungs-CA. Für den Betrieb stellt der Betreiber Zertifikate und die Zuordnung von Identitäten zu Spielrollen bereit.
-- **Nachweis.** `npm run test:game` baut ein separates Spiel aus dem aktuellen Git-Commit und prüft zwei Prozessstarts. `cargo test --locked -p zz-mesh -p infinite-stars` prüft Bibliothek und Worker-Prozesse. `npm run bench:quick` misst bewegte, getrennte und verschmelzende Gruppen sowie die Eingabelatenz der Browser-Demo. `npm run bench:cluster-wire` prüft die Sicht der Worker über TCP/mTLS. [Betriebsanleitung](../../docs/infinite-stars.md) · [Spielergrenze und Graphen](../../docs/cluster-performance.md)
+- **Nachweis.** `npm run test:game` baut ein separates Spiel aus dem aktuellen Git-Commit und prüft zwei Prozessstarts. `cargo test --locked -p is-mesh -p infinite-stars` prüft Bibliothek und Worker-Prozesse. `npm run bench:quick` misst bewegte, getrennte und verschmelzende Gruppen sowie die Eingabelatenz der Browser-Demo. `npm run bench:cluster-wire` prüft die Sicht der Worker über TCP/mTLS. [Betriebsanleitung](../../docs/infinite-stars.md) · [Spielergrenze und Graphen](../../docs/cluster-performance.md)

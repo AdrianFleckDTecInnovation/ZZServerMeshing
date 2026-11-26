@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use infinite_stars::{movement::Drive, *};
-use zz_mesh::*;
+use is_mesh::*;
 
 #[test]
 fn shipped_space_configuration_matches_the_runtime_defaults() {
@@ -492,6 +492,6 @@ fn transient_subscriber_budget_ack_timeout_and_field_removal_are_isolated() {
     dir.revoke(b).unwrap();
     assert!(matches!(
         slow.next_local(app.world(), &mut enc),
-        Err(zz_mesh::Error::Denied)
+        Err(is_mesh::Error::Denied)
     ));
 }

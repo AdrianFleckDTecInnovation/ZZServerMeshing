@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use zz_mesh::{
+use is_mesh::{
     authority_store::AuthorityService,
     wire::{Client, Endpoint, Identity, Listener, Request, Response, Role},
 };

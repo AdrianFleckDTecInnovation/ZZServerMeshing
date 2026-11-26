@@ -1,4 +1,6 @@
-# Working on ZZServerMeshing
+# Working on InfiniteStars Server Meshing
+
+The binding module-release requirements are in [.codex/mesh-v1-auftrag.md](.codex/mesh-v1-auftrag.md). Track M01–M23 in the [acceptance ledger](docs/mesh-v1-abnahme.md). Record the public entry point, executed check, Git revision, measured outcome and limitation before marking a criterion BESTANDEN. is-session owns public connections and account verification. Game and domain crates own their rules and durable business records.
 
 Run commands from the repository root. The local mesh runs natively on Windows and Linux. Use Rust stable, the platform C linker and Node.js 22.16 or newer with npm. On Windows use the MSVC Rust toolchain, Visual Studio C++ Build Tools and the Windows SDK.
 
@@ -23,7 +25,7 @@ Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal bef
 
 ## Infinite Stars
 
-`crates/zz-mesh` exposes the Bevy 0.15 library. Start with the [game integration guide](crates/zz-mesh/README.md) for a standalone consumer. `examples/infinite-stars` is the multiplayer reference game. Run `cargo run --locked -p infinite-stars` for its persistent demo and `cargo test --locked -p zz-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [operations guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
+`crates/is-mesh` exposes the Bevy 0.15 library. Start with the [game integration guide](crates/is-mesh/README.md) for a standalone consumer. `examples/infinite-stars` is the multiplayer reference game. Run `cargo run --locked -p infinite-stars` for its persistent demo and `cargo test --locked -p is-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [operations guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
 
 ## Where to look
 

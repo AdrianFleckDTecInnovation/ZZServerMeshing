@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use zz_mesh::{
+use is_mesh::{
     wire::{Client, Request, Response},
     *,
 };
@@ -252,7 +252,7 @@ fn transfer(
     let key = controller_credential(dir, t);
     let mut from = connect(dir, source, &key)?;
     let mut to = connect(dir, target, &key)?;
-    let cost = zz_mesh::remote::migrate(&mut from, &mut to, t, budget)?;
+    let cost = is_mesh::remote::migrate(&mut from, &mut to, t, budget)?;
     print_group_cost(t.group, cost);
     let tx = control.transaction()?;
     tx.execute(
@@ -283,7 +283,7 @@ fn abort(dir: &Path, slot: u32) -> Result<()> {
     for worker in [t.source.worker, t.target] {
         if let Ok(addr) = db.address(worker) {
             if let Ok(mut peer) = connect(dir, addr, &controller_credential(dir, t)) {
-                let _ = peer.call(&Request::Control(t, zz_mesh::remote::Command::Abort));
+                let _ = peer.call(&Request::Control(t, is_mesh::remote::Command::Abort));
             }
         }
     }

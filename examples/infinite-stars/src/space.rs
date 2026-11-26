@@ -2,7 +2,7 @@ use crate::{movement::Drive, Chunk, Player, Position, Ship, CHUNK, PLAYER, POSIT
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
-use zz_mesh::{
+use is_mesh::{
     invalid, Box3, Demand, Detail, Managed, Result, SightPoint, SightRanges, SightRule,
     SpatialProfile, SpatialRule,
 };
@@ -69,7 +69,7 @@ impl SpaceSettings {
                 Some((p.frame, SightPoint { kind, mm: p.mm }))
             }))
             .insert_resource(SpatialRule(physical))
-            .insert_resource(zz_mesh::SpatialDependencies(
+            .insert_resource(is_mesh::SpatialDependencies(
                 [PLAYER, SHIP, POSITION, CHUNK, crate::movement::DRIVE]
                     .into_iter()
                     .collect(),

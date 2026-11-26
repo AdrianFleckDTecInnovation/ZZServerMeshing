@@ -10,7 +10,7 @@ use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
 };
-use zz_mesh::*;
+use is_mesh::*;
 
 struct Meter;
 thread_local! {

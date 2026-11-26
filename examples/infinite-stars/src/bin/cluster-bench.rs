@@ -3,7 +3,7 @@ use bevy::prelude::Entity;
 use infinite_stars::{world, Inventory, Player, Position, PLANET_ID, POSITION, STONE};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, time::Instant};
-use zz_mesh::*;
+use is_mesh::*;
 
 const PER_SITE: usize = 16;
 const TRAVEL: usize = 32;

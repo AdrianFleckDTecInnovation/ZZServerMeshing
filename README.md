@@ -1,4 +1,4 @@
-# ZZServerMeshing
+# InfiniteStars Server Meshing
 
 Run `npm run observe` to watch four local mTLS server processes share the same game world. The admin map shows which servers own players in each octree island, how two islands merge and split, and how client reception changes through a handoff. [Live-Monitor starten](docs/live-monitor.md)
 
@@ -8,7 +8,7 @@ Run `npm run bench:cores` to measure how many simulation threads your server nee
 
 Run `npm run bench:profile -- --players 10000 --workers 32 --partitions 16 --ticks 40` to measure movement, checkpoints, spatial lookup and peer delivery on a common clock. Run `npm run bench:sockets -- --servers 8 --socket-drivers 8 --islands 5000 --seconds 10 --require-budget` for the 10,000-connection browser protocol test at 20 snapshots/s and five inputs/s per player. [Tickkosten, Grafiken und Abnahme](docs/tickprofil.md)
 
-Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/zz-mesh/README.md) · [Beispielcode](crates/zz-mesh/examples/persistent_game.rs)
+Integrating the mesh into your own Bevy 0.15 game starts with a single crate and a runnable example that opens the same saved world across two processes. [Kompakte Spielintegration](crates/is-mesh/README.md) · [Beispielcode](crates/is-mesh/examples/persistent_game.rs)
 
 In Infinite Stars, `space.json` configures the 3D sight range per target type. The defaults are 100 m for other players and 500 m for ships. Run `npm run bench:sight` to measure complete views for 10,000 isolated or grouped players. [Spielersicht und Messwerte](docs/spielersicht.md)
 
