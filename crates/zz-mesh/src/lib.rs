@@ -35,6 +35,7 @@ mod handoff;
 mod octree;
 mod placement;
 mod pool;
+mod regions;
 mod spatial;
 pub use pool::*;
 mod publish;

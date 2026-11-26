@@ -58,13 +58,13 @@ impl Cube {
     }
 }
 
-struct Node {
+struct Node<K> {
     cube: Cube,
     loose: Box3,
-    entries: BTreeMap<Id, Box3>,
-    children: [Option<Box<Node>>; 8],
+    entries: BTreeMap<K, Box3>,
+    children: [Option<Box<Node<K>>>; 8],
 }
-impl Node {
+impl<K: Copy + Ord> Node<K> {
     fn new(cube: Cube, frame: Id) -> Self {
         Self {
             cube,
@@ -73,7 +73,7 @@ impl Node {
             children: Default::default(),
         }
     }
-    fn insert(&mut self, id: Id, b: Box3, p: [i128; 3]) {
+    fn insert(&mut self, id: K, b: Box3, p: [i128; 3]) {
         if self.cube.width > LEAF_MM {
             let i = self.cube.octant(p);
             let child = self.cube.child(i);
@@ -86,7 +86,7 @@ impl Node {
         }
         self.entries.insert(id, b);
     }
-    fn remove(&mut self, id: Id, p: [i128; 3]) {
+    fn remove(&mut self, id: K, p: [i128; 3]) {
         // An old root can become a child when the tree grows around a distant cluster.
         if self.entries.remove(&id).is_none() {
             let child = &mut self.children[self.cube.octant(p)];
@@ -98,7 +98,7 @@ impl Node {
             }
         }
     }
-    fn relocate(&mut self, id: Id, old_center: [i128; 3], new_center: [i128; 3], b: Box3) -> bool {
+    fn relocate(&mut self, id: K, old_center: [i128; 3], new_center: [i128; 3], b: Box3) -> bool {
         if !self.cube.fits(b) || !self.cube.contains_center(new_center) {
             return false;
         }
@@ -115,7 +115,7 @@ impl Node {
     fn empty(&self) -> bool {
         self.entries.is_empty() && self.children.iter().all(Option::is_none)
     }
-    fn query(&self, b: Box3, out: &mut Vec<Id>) {
+    fn query(&self, b: Box3, out: &mut Vec<K>) {
         if !self.loose.intersects(b) {
             return;
         }
@@ -132,35 +132,12 @@ impl Node {
 }
 
 #[derive(Default)]
-pub(crate) struct Index(BTreeMap<Id, Node>);
-/// Moving-object broad phase. Large boxes keep their octree entry while their
-/// faces stay in the same grid cells. The directory supplies exact bounds for
-/// the narrow phase. The cover is derived from the box, so no proxy table is needed.
-#[derive(Default)]
-pub(crate) struct MovingIndex(Index);
-impl MovingIndex {
-    fn cover(mut b: Box3) -> Box3 {
-        const CELL: i64 = 2048;
-        for k in 0..3 {
-            if b.hi[k].saturating_sub(b.lo[k]) >= CELL * 2 {
-                b.lo[k] &= !(CELL - 1);
-                b.hi[k] |= CELL - 1;
-            }
-        }
-        b
+pub(crate) struct Index<K = Id>(BTreeMap<Id, Node<K>>);
+impl<K: Copy + Ord> Index<K> {
+    pub fn has_frame(&self, frame: Id) -> bool {
+        self.0.contains_key(&frame)
     }
-    pub fn replace(&mut self, id: Id, old: Option<Box3>, new: Box3) {
-        self.0.replace(id, old.map(Self::cover), Self::cover(new));
-    }
-    pub fn remove(&mut self, id: Id, b: Box3) {
-        self.0.remove(id, Self::cover(b));
-    }
-    pub fn candidates(&self, b: Box3) -> Vec<Id> {
-        self.0.query(b)
-    }
-}
-impl Index {
-    pub fn replace(&mut self, id: Id, old: Option<Box3>, new: Box3) {
+    pub fn replace(&mut self, id: K, old: Option<Box3>, new: Box3) {
         if let Some(old) = old {
             if old == new
                 || (old.frame == new.frame
@@ -175,7 +152,7 @@ impl Index {
         }
         self.insert(id, new);
     }
-    pub fn insert(&mut self, id: Id, b: Box3) {
+    pub fn insert(&mut self, id: K, b: Box3) {
         let p = center(b);
         let root = self
             .0
@@ -200,7 +177,7 @@ impl Index {
         }
         root.insert(id, b, p);
     }
-    pub fn remove(&mut self, id: Id, b: Box3) {
+    pub fn remove(&mut self, id: K, b: Box3) {
         if let Some(root) = self.0.get_mut(&b.frame) {
             root.remove(id, center(b));
             while root.entries.is_empty() {
@@ -218,12 +195,15 @@ impl Index {
             }
         }
     }
-    pub fn query(&self, b: Box3) -> Vec<Id> {
+    pub fn query(&self, b: Box3) -> Vec<K> {
         let mut out = Vec::new();
-        if let Some(root) = self.0.get(&b.frame) {
-            root.query(b, &mut out);
-        }
+        self.query_into(b, &mut out);
         out
+    }
+    pub fn query_into(&self, b: Box3, out: &mut Vec<K>) {
+        if let Some(root) = self.0.get(&b.frame) {
+            root.query(b, out);
+        }
     }
 }
 

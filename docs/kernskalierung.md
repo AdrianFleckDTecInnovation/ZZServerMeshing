@@ -48,6 +48,8 @@ Ohne `--workers` richtet sich der Test nach der verfügbaren logischen Paralleli
 
 ## Wo Arbeit entfällt
 
+Der anschließende Vergleich misst die Nachbarsuche beim Sternflug, bei einer Gruppenfusion und bei 10.000 regional verteilten Spielern mit demselben Spielcode vor und nach dem Umbau des Index. [Regionsindex und Flugtest](raumgruppen.md)
+
 - **Räumliche Suche.** Große, bewegte Boxen behalten ihren Octree-Eintrag, solange ihre Hülle in denselben 2.048-mm-Zellen liegt. Der exakte 3D-Test entscheidet, ob eine Figur in Sicht kommt oder den Haltebereich verlässt. Bei gebündelten Bewegungen kann das Directory die erforderliche Warteschlange über die Zahl der Empfänger abschätzen und die endgültige Nachbarschaft einmal nach allen Änderungen berechnen.
 - **Replikation.** Der Sender bearbeitet die Empfänger einer Figur nacheinander. Worker mit gleicher Detailstufe teilen die Kodierung eines Feldes für diesen Tick. Der Empfänger installiert einzelne Felder in seiner bestehenden Bevy-Replika und übernimmt die eingegangenen Bytes in den bestätigten Zustand. Volle Snapshots, Löschungen, Kontofreigaben und Wiederholungen besitzen eigene Regressionstests.
 - **Meldungen unter Dauerlast.** Der Worker meldet pro Directory-Seite höchstens 128 Änderungen. Ein Umlauf über ausstehende IDs gibt auch hohen IDs einen Platz, wenn die ersten 128 Figuren ständig weiterlaufen. Ein Test bewegt 391 Objekte über vier Seiten, wiederholt jedes Paket und prüft, dass alle Objekte beim autorisierenden Broker eingetragen sind.

@@ -1,4 +1,5 @@
-use crate::octree::{Boundaries, Index, MovingIndex};
+use crate::octree::{Boundaries, Index};
+use crate::regions::MovingIndex;
 use crate::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -120,7 +121,7 @@ pub struct Directory {
     clock: u64,
     changes: BTreeMap<(Recipient, Id), InterestChange>,
     area_recipients: BTreeMap<Recipient, usize>,
-    pending: Option<BTreeMap<Id, bool>>,
+    pending: Option<HashMap<Id, bool>>,
     initial_recipients: usize,
     reserved: usize,
     pub candidates: u64,
@@ -132,7 +133,7 @@ impl Directory {
     pub(crate) fn batch(&mut self, edit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
         debug_assert!(self.pending.is_none());
         self.initial_recipients = self.area_recipients.len();
-        self.pending = Some(BTreeMap::new());
+        self.pending = Some(HashMap::new());
         let result = edit(self);
         self.flush_pending();
         self.pending = None;
@@ -140,7 +141,13 @@ impl Directory {
     }
     fn flush_pending(&mut self) {
         self.reserved = 0;
-        let ids = std::mem::take(self.pending.as_mut().expect("active directory batch"));
+        let mut ids: Vec<_> = self
+            .pending
+            .as_mut()
+            .expect("active directory batch")
+            .drain()
+            .collect();
+        ids.sort_unstable_by_key(|(id, _)| *id);
         for (id, force) in ids {
             self.refresh_now(id, force);
         }
@@ -215,18 +222,48 @@ impl Directory {
         let demand_changed =
             old.is_some_and(|old| old.to != a.to || old.components != a.components);
         if !demand_changed
-            && old_bounds.is_some_and(|(required, kept)| {
+            && (old_bounds.is_some_and(|(required, kept)| {
                 self.object_faces.stable(required, needed)
                     && self.object_faces.stable(kept, retained)
-            })
+            }) || (previous.is_none_or(HashSet::is_empty)
+                && self.object_index.excludes_others(needed, a.to)))
         {
             self.index_area(a, needed, retained, old_bounds);
             return Ok(());
         }
-        // Moving an area inside a dense crowd usually leaves all memberships intact.
-        // Only changed memberships or demands require re-aggregating an object's peers.
-        // Old members and newly intersecting non-members are disjoint. The
-        // octree stores each ID once, so this list never needs deduplication.
+        let candidates = self.object_index.candidates(needed, a.to);
+        // A jump into a disjoint volume can change most edges. In a batch the
+        // final exact test already runs per object, once all observers have moved.
+        // Only use this conservative union if its whole reservation fits.
+        if self.pending.is_some()
+            && !demand_changed
+            && old_bounds.is_some_and(|(_, old)| !old.intersects(retained))
+        {
+            let count = previous.map_or(0, HashSet::len) + candidates.len();
+            let cost = 2 * count;
+            let available = self
+                .limit
+                .unwrap_or(1_000_000)
+                .saturating_sub(self.changes.len() + self.reserved);
+            if cost <= available {
+                self.reserve(cost, count, false)?;
+                let pending = self.pending.as_mut().expect("active directory batch");
+                for object in self
+                    .area_objects
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .chain(candidates)
+                {
+                    pending.entry(object).or_default();
+                }
+                self.index_area(a, needed, retained, old_bounds);
+                return Ok(());
+            }
+        }
+        // Smaller movements usually preserve membership. Old members and newly
+        // intersecting non-members are disjoint, and each candidate occurs once.
         let mut touched = Vec::new();
         for &object in previous.into_iter().flatten() {
             let p = &self.objects[&object];
@@ -237,12 +274,12 @@ impl Directory {
                 touched.push(object);
             }
         }
-        for object in self.object_index.candidates(needed) {
+        for object in candidates {
             if previous.is_some_and(|members| members.contains(&object)) {
                 continue;
             }
             let p = self.objects[&object];
-            if a.to != Recipient::Worker(p.owner) && needed.intersects(p.predicted()) {
+            if needed.intersects(p.predicted()) {
                 touched.push(object);
             }
         }
@@ -296,7 +333,12 @@ impl Directory {
         self.area_faces
             .replace(old_bounds.map(|(needed, _)| needed), Some(needed));
         self.area_faces.replace(old_retained, Some(retained));
-        self.area_index.replace(id, old_retained, retained);
+        self.area_index.replace(
+            id,
+            old_retained.zip(old.as_ref().map(|a| a.to)),
+            retained,
+            to,
+        );
     }
     fn update_activity(&mut self, old: Option<Box3>, new: Option<Box3>) {
         if old == new {
@@ -327,7 +369,7 @@ impl Directory {
             self.remove_recipient_area(a.to);
             self.area_faces.replace(Some(a.needed()), None);
             self.area_faces.replace(Some(a.retained()), None);
-            self.area_index.remove(id, a.retained());
+            self.area_index.remove(id, a.retained(), a.to);
         }
         let mut objects: Vec<_> = self
             .area_objects
@@ -356,7 +398,12 @@ impl Directory {
         let old_bounds = previous.map(Presence::predicted);
         let identity_changed =
             previous.is_none_or(|old| old.owner != p.owner || old.principal != p.principal);
-        if !identity_changed && old_bounds.is_some_and(|old| self.area_faces.stable(old, predicted))
+        if !identity_changed
+            && (old_bounds.is_some_and(|old| self.area_faces.stable(old, predicted))
+                || (self.object_areas.get(&p.id).is_none_or(HashSet::is_empty)
+                    && self
+                        .area_index
+                        .excludes_others(predicted, Recipient::Worker(p.owner))))
         {
             self.index_object(old_bounds, p, predicted);
             return Ok(());
@@ -374,7 +421,9 @@ impl Directory {
             }
             Vec::new()
         } else {
-            let mut hits = self.area_index.candidates(predicted);
+            let mut hits = self
+                .area_index
+                .candidates(predicted, Recipient::Worker(p.owner));
             hits.retain(|id| self.areas[id].retained().intersects(predicted));
             let cost = hits.len() + self.object_areas.get(&p.id).map_or(0, HashSet::len);
             if self.reserve(cost, 1, false)? {
@@ -409,14 +458,20 @@ impl Directory {
     fn index_object(&mut self, old: Option<Box3>, p: Presence, new: Box3) {
         if old != Some(new) {
             self.object_faces.replace(old, Some(new));
-            self.object_index.replace(p.id, old, new);
         }
-        self.objects.insert(p.id, p);
+        let previous = self.objects.insert(p.id, p);
+        self.object_index.replace(
+            p.id,
+            old.zip(previous.map(|p| Recipient::Worker(p.owner))),
+            new,
+            Recipient::Worker(p.owner),
+        );
     }
     pub fn remove(&mut self, id: Id) {
         if let Some(p) = self.objects.remove(&id) {
             self.object_faces.replace(Some(p.predicted()), None);
-            self.object_index.remove(id, p.predicted());
+            self.object_index
+                .remove(id, p.predicted(), Recipient::Worker(p.owner));
         }
         self.refresh(id);
     }
@@ -431,7 +486,10 @@ impl Directory {
         let candidates = self
             .objects
             .get(&id)
-            .map(|p| self.area_index.candidates(p.predicted()))
+            .map(|p| {
+                self.area_index
+                    .candidates(p.predicted(), Recipient::Worker(p.owner))
+            })
             .unwrap_or_default();
         self.refresh_candidates(id, candidates, force);
     }
@@ -450,9 +508,6 @@ impl Directory {
             // The index uses retained bounds. New observers must enter the required bounds.
             candidates.retain(|id| {
                 let area = &self.areas[id];
-                if area.to == Recipient::Worker(p.owner) {
-                    return false;
-                }
                 if previous.is_some_and(|members| members.contains(id)) {
                     let keep = area.retained().intersects(predicted);
                     retained += usize::from(keep);
@@ -466,10 +521,12 @@ impl Directory {
         if !force && retained == candidates.len() && retained == previous.map_or(0, HashSet::len) {
             return;
         }
-        let old = self.object_areas.remove(&id).unwrap_or_default();
-        let active_areas: HashSet<_> = candidates.into_iter().collect();
+        let mut departing = self.object_areas.remove(&id).unwrap_or_default();
         let mut wanted: BTreeMap<Recipient, BTreeMap<u32, Demand>> = BTreeMap::new();
-        for a in &active_areas {
+        for a in &candidates {
+            if !departing.remove(a) {
+                self.area_objects.entry(*a).or_default().insert(id);
+            }
             let area = &self.areas[a];
             let fields = wanted.entry(area.to).or_default();
             for (&s, &d) in &area.components {
@@ -484,16 +541,14 @@ impl Directory {
                     .or_insert(d);
             }
         }
-        for a in old.difference(&active_areas) {
-            if let Some(members) = self.area_objects.get_mut(a) {
+        for a in departing {
+            if let Some(members) = self.area_objects.get_mut(&a) {
                 members.remove(&id);
             }
         }
-        for &a in active_areas.difference(&old) {
-            self.area_objects.entry(a).or_default().insert(id);
-        }
-        if !active_areas.is_empty() {
-            self.object_areas.insert(id, active_areas);
+        if !candidates.is_empty() {
+            self.object_areas
+                .insert(id, candidates.into_iter().collect());
         }
         let mut previous = self.subs.remove(&id).unwrap_or_default();
         let mut active = BTreeMap::new();
@@ -805,6 +860,32 @@ mod batch_tests {
         assert_eq!(d.subscribers(p.id).count(), 3);
     }
     #[test]
+    fn disjoint_group_jump_keeps_only_existing_members_inside_the_buffer() {
+        let mut d = Directory::default();
+        let kept = pair(1, 0).0;
+        let left = pair(2, 0).0;
+        let newcomer = pair(3, 100_005).0;
+        d.register_area(pair(0, 0).1).unwrap();
+        for p in [kept, left, newcomer] {
+            d.upsert(p).unwrap();
+        }
+        let epoch = d.subscribers(kept.id).next().unwrap().1.epoch;
+        d.changes();
+        d.batch(|d| {
+            d.register_area(pair(0, 100_000).1)?;
+            d.upsert(pair(1, 100_005).0)
+        })
+        .unwrap();
+        assert_eq!(d.subscribers(kept.id).next().unwrap().1.epoch, epoch);
+        assert_eq!(d.subscribers(newcomer.id).count(), 0);
+        assert_eq!(d.subscribers(left.id).count(), 0);
+        let changes = d.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].object, left.id);
+        assert!(changes[0].subscription.is_none());
+    }
+
+    #[test]
     fn loose_covers_respect_exact_contact_retention_and_frame_switches() {
         let mut d = Directory::default();
         let (mut p, _) = pair(1, 0);
@@ -831,10 +912,12 @@ mod batch_tests {
                 ..old
             };
             let mut index = MovingIndex::default();
-            index.replace(p.id, None, old);
-            index.replace(p.id, Some(old), new);
-            assert!(index.candidates(old).is_empty());
-            assert_eq!(index.candidates(new), [p.id]);
+            let tag = Recipient::Worker(p.owner);
+            let other = Recipient::Client(p.id);
+            index.replace(p.id, None, old, tag);
+            index.replace(p.id, Some((old, tag)), new, tag);
+            assert!(index.candidates(old, other).is_empty());
+            assert_eq!(index.candidates(new, other), [p.id]);
         }
     }
 }

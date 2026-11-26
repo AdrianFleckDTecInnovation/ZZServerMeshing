@@ -34,6 +34,8 @@ struct Scene {
     members: Vec<Member>,
     workers: Vec<Worker>,
     per_site: usize,
+    owners_per_site: usize,
+    flight_trace: Option<Vec<[usize; 2]>>,
 }
 #[derive(Default)]
 struct Sample {
@@ -41,6 +43,7 @@ struct Sample {
     simulate_publish_ns: u64,
     delivery_ns: u64,
     topology_ns: Vec<u64>,
+    spatial_ns: Vec<u64>,
     with_topology_ns: Vec<u64>,
     queue: usize,
     fields: usize,
@@ -54,6 +57,15 @@ struct Sample {
 }
 impl Scene {
     fn new(sites: usize, per_site: usize, workers: usize) -> Result<Self> {
+        Self::with_owners(sites, per_site, workers, 2)
+    }
+
+    fn with_owners(
+        sites: usize,
+        per_site: usize,
+        workers: usize,
+        owners_per_site: usize,
+    ) -> Result<Self> {
         let db = Store::open(":memory:")?;
         let mut pool = Pool::new(db.clone(), QUEUE);
         // Hold writer placement fixed to isolate the cost of changing spatial interest.
@@ -67,7 +79,7 @@ impl Scene {
         let mut members = vec![];
         for origin in 0..sites {
             for index in 0..per_site {
-                let owner = nodes[(origin * 2 + index % 2) % workers];
+                let owner = nodes[(origin * owners_per_site + index % owners_per_site) % workers];
                 let id = Id::numbered(1000 + members.len() as u128);
                 let mm = site(origin);
                 let entity = pool
@@ -98,6 +110,8 @@ impl Scene {
             workers: nodes,
             members,
             per_site,
+            owners_per_site,
+            flight_trace: None,
         };
         for _ in 0..6 {
             scene.tick(&mut Sample::default(), |m| site(m.origin))?;
@@ -124,7 +138,16 @@ impl Scene {
                 .mm = m.mm;
         }
         let candidates = self.pool.directory.candidates;
-        self.pool.step()?;
+        let mut last = Instant::now();
+        let mut spatial_ns = 0;
+        self.pool.step_observed(|stage| {
+            let now = Instant::now();
+            if matches!(stage, TickStage::Spatial) {
+                spatial_ns += (now - last).as_nanos() as u64;
+            }
+            last = now;
+        })?;
+        stats.spatial_ns.push(spatial_ns);
         let step = start.elapsed();
         stats.candidates += self.pool.directory.candidates - candidates;
         stats.queue = stats.queue.max(self.pool.messages.len());
@@ -145,7 +168,8 @@ impl Scene {
             stats.frames += 1;
             stats.baselines += usize::from(msg.update.base.is_none());
             stats.observer += usize::from(to == self.workers[0]);
-            stats.foreign_origin += usize::from((to.slot as usize - 1) / 2 != object.origin);
+            stats.foreign_origin +=
+                usize::from((to.slot as usize - 1) / self.owners_per_site != object.origin);
         }
         let delivery = Instant::now();
         let queued = self.pool.messages.len();
@@ -162,6 +186,9 @@ impl Scene {
         stats.with_topology_ns.push(step_ns + topology_ns);
         stats.peak_pairs = stats.peak_pairs.max(self.pool.routing().1);
         stats.peak_islands = stats.peak_islands.max(islands.len());
+        if let Some(trace) = &mut self.flight_trace {
+            trace.push([islands.len(), queued]);
+        }
         self.check_islands(islands);
         self.check_views()
     }
@@ -269,14 +296,15 @@ impl Scene {
         let (subs, pairs) = self.pool.routing();
         // A worker serving several origins has no single destination island for this counter.
         let sites = self.members.len() / self.per_site;
-        let foreign_home_frames = (self.workers.len() == 2 * sites).then_some(s.foreign_origin);
+        let foreign_home_frames =
+            (self.workers.len() == self.owners_per_site * sites).then_some(s.foreign_origin);
         let mean_ms = |ns: u64| ns as f64 / ticks as f64 / 1e6;
         let topology_mean = mean_ms(s.topology_ns.iter().sum());
         Ok(
             json!({"phase":name,"ticks":ticks,"players":self.members.len(),"players_per_origin":self.per_site,
             "workers":self.workers.len(),"end_islands":self.pool.directory.islands().len(),"peak_islands":s.peak_islands,
             "end_pairs":pairs,"peak_pairs":s.peak_pairs,"end_subscriptions":subs,"queue_peak":s.queue,
-            "step_ms":percentiles(&mut s.ns),"topology_query_ms":percentiles(&mut s.topology_ns),
+            "step_ms":percentiles(&mut s.ns),"spatial_ms":percentiles(&mut s.spatial_ns),"topology_query_ms":percentiles(&mut s.topology_ns),
             "step_with_topology_ms":percentiles(&mut s.with_topology_ns),
             "phase_mean_ms":{"simulate_publish":mean_ms(s.simulate_publish_ns),
                 "delivery_ack":mean_ms(s.delivery_ns),"topology":topology_mean},
@@ -289,6 +317,116 @@ impl Scene {
 
 fn travel(a: [i64; 3], b: [i64; 3], t: usize) -> [i64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t as i64 / TRAVEL as i64)
+}
+
+// Evaluate alternative geometric rules at measured positions, outside the timers.
+fn flight_geometry(scene: &Scene) -> Value {
+    let mut lo = [[i64::MAX; 3]; 2];
+    let mut hi = [[i64::MIN; 3]; 2];
+    let mut across = 0;
+    for m in &scene.members {
+        for k in 0..3 {
+            lo[m.origin][k] = lo[m.origin][k].min(m.mm[k] - 5000);
+            hi[m.origin][k] = hi[m.origin][k].max(m.mm[k] + 5000);
+        }
+        // With both fixed home centres on X, the Voronoi bisector is X = DISTANCE/2.
+        let x = m.mm[0] - DISTANCE / 2;
+        across += usize::from((m.origin == 0 && x > 1000) || (m.origin == 1 && x < -1000));
+    }
+    let overlap = (0..3).all(|k| lo[0][k] <= hi[1][k] && lo[1][k] <= hi[0][k]);
+    let contacts = scene.members[..scene.per_site]
+        .iter()
+        .map(|a| {
+            scene.members[scene.per_site..]
+                .iter()
+                .filter(|b| (0..3).all(|k| a.mm[k].abs_diff(b.mm[k]) <= 10_000))
+                .count()
+        })
+        .sum::<usize>();
+    json!({"growing_hulls_candidate_pairs": if overlap {scene.per_site.pow(2)} else {0},
+        "touching_player_pairs":contacts, "players_beyond_buffered_bisector":across})
+}
+
+// One healthy writer for each home group. The positions, writer generations, interest
+// and installed replicas are checked independently after every tick, outside the timers.
+fn flight() -> Result<Value> {
+    const PLAYERS: usize = 100;
+    let mut scene = Scene::with_owners(2, PLAYERS, 2, 1)?;
+    scene.pool.policy.every = 1;
+    scene.flight_trace = Some(Vec::new());
+    let directions: Vec<[i64; 3]> = (0..PLAYERS)
+        .map(|i| {
+            let z = 1. - 2. * (i as f64 + 0.5) / PLAYERS as f64;
+            let r = (1. - z * z).sqrt();
+            let angle = i as f64 * std::f64::consts::PI * (3. - 5_f64.sqrt());
+            [r * angle.cos(), r * angle.sin(), z].map(|v| (v * 256_000.).round() as i64)
+        })
+        .collect();
+    let inside = scene.segment("inside", 32, |_, m| site(m.origin))?;
+    assert_eq!(inside["end_islands"], 2);
+    assert_eq!(inside["frames"], 0);
+    let initial_geometry = flight_geometry(&scene);
+    let radial = |t: usize, m: &Member| {
+        if m.origin == 0 {
+            travel(site(0), directions[m.index], t)
+        } else {
+            site(m.origin)
+        }
+    };
+    let outward = scene.segment("starburst", TRAVEL, radial)?;
+    assert_eq!(outward["end_islands"], PLAYERS + 1);
+    assert_eq!(outward["end_subscriptions"], 0);
+    let spread_geometry = flight_geometry(&scene);
+    assert_eq!(
+        spread_geometry["growing_hulls_candidate_pairs"],
+        PLAYERS * PLAYERS
+    );
+    assert_eq!(spread_geometry["touching_player_pairs"], 0);
+    let regroup = scene.segment("regroup", TRAVEL, |t, m| radial(TRAVEL - t, m))?;
+    assert_eq!(regroup["end_islands"], 2);
+    assert_eq!(regroup["end_subscriptions"], 0);
+    let approach = scene.segment("approach", TRAVEL, |t, m| {
+        if m.origin == 0 && m.index == 0 {
+            travel(site(0), [DISTANCE - 10_000, 0, 0], t)
+        } else {
+            site(m.origin)
+        }
+    })?;
+    let explorer = scene.members[0].id;
+    let to = Recipient::Worker(scene.workers[1]);
+    let visible = |s: &Scene| {
+        s.pool
+            .directory
+            .subscribers(explorer)
+            .any(|(&r, _)| r == to)
+    };
+    assert!(visible(&scene), "other worker must see first contact");
+    let mut edge = Sample::default();
+    let mut boundary = Vec::new();
+    for (distance, expected) in [
+        (10_500, true),
+        (11_000, true),
+        (11_001, false),
+        (10_500, false),
+        (10_000, true),
+    ] {
+        scene.tick(&mut edge, |m| {
+            if m.origin == 0 && m.index == 0 {
+                [DISTANCE - distance, 0, 0]
+            } else {
+                site(m.origin)
+            }
+        })?;
+        assert_eq!(visible(&scene), expected);
+        boundary.push(json!({"distance_mm":distance,"replica":expected}));
+    }
+    Ok(
+        json!({"version":1,"os":std::env::consts::OS,"players_per_home":PLAYERS,
+        "workers":2,"warmup_ticks":6,"retention_mm":1000,"phases":[inside,outward,regroup,approach],
+        "boundary":boundary,"authority_generation":1,
+        "trace_columns":["physical_islands","worker_updates"], "trace":scene.flight_trace,
+        "geometry":{"inside":initial_geometry,"starburst_end":spread_geometry,"bisector_buffer_mm":1000}}),
+    )
 }
 
 // Same actors, writers, update rates and worker worlds. Only the positions change.
@@ -339,6 +477,9 @@ fn run() -> Result<()> {
     let quick = match args.next() {
         None => false,
         Some(arg) if arg == "--quick" => true,
+        Some(arg) if arg == "--flight" && args.next().is_none() => {
+            return write_report(path, &flight()?);
+        }
         Some(arg) if arg == "--crowd" => {
             let players: usize = args
                 .next()
@@ -353,7 +494,7 @@ fn run() -> Result<()> {
                 &json!({"version":2,"os":std::env::consts::OS,"matched_layouts":[compare_layout(players,32)?]}),
             );
         }
-        _ => return Err(invalid("expected --quick or --crowd PLAYERS")),
+        _ => return Err(invalid("expected --quick, --flight or --crowd PLAYERS")),
     };
     if args.next().is_some() {
         return Err(invalid("unexpected benchmark argument"));
