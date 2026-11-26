@@ -1,5 +1,7 @@
 # 10.000 Spieler auf mehreren Kernen
 
+Die folgende Kernplanung beruht auf unabhängigen Inseln mit gemeinsamem Store im RAM. Mit dauerhaftem Dateispeicher überschritt der Windows-Test auf vier Simulationsthreads schon bei einfacher Bewegung das 50-ms-Budget in 55 von 120 Ticks. Zusätzliche Spielregeln und der Vergleich mit dem Ursprungsprojekt stehen im [Einsatzaudit mit 10.000 aktiven Figuren](einsatzaudit.md).
+
 **Für den ersten EPYC-Lastlauf mit 10.000 regional verteilten Spielern würde ich acht physische Kerne für die Simulation budgetieren und mit vier sowie acht Simulationsthreads beginnen.** Wenn Spielzugang, mTLS, Persistenz und Betriebssystem auf derselben Maschine laufen, sind 16 physische Kerne eine erste Planungsgröße. Die zweite Hälfte ist geschätzte Reserve. Gemessen wurden Windows auf einem Core i7-13850HX mit 20 Kernen und Debian auf demselben Rechner mit sechs vCPUs. Die Abnahme für 10.000 gleichzeitige mTLS-Spielclients auf physischer Hardware steht aus. [Aufbau und Abnahmekriterien](kapazitaetsplan.md)
 
 ![Tick-p95 nach Simulationsthreads und Allokationen auf Sender und Empfänger](benchmarks/kernskalierung-10000.png)

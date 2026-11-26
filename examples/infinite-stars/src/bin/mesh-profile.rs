@@ -1,4 +1,6 @@
 //! Profile moving, session-bound players against the local authoritative mesh.
+#[path = "mesh-profile/gameplay.rs"]
+mod gameplay;
 use bevy::prelude::Entity;
 use infinite_stars::{movement::Drive, world, Inventory, Player, Position, PLANET_ID};
 use serde_json::{json, Value};
@@ -95,6 +97,7 @@ struct Options {
     ticks: usize,
     partitions: usize,
     active_percent: usize,
+    effects: gameplay::Settings,
     require_20hz: bool,
     database: String,
     output: Option<String>,
@@ -108,6 +111,11 @@ impl Options {
             ticks: 60,
             partitions: 1,
             active_percent: 100,
+            effects: gameplay::Settings {
+                count: 0,
+                interval: 1,
+                local_only: false,
+            },
             require_20hz: false,
             database: ":memory:".into(),
             output: None,
@@ -116,6 +124,10 @@ impl Options {
         while let Some(key) = args.next() {
             if key == "--require-20hz" {
                 o.require_20hz = true;
+                continue;
+            }
+            if key == "--local-effects" {
+                o.effects.local_only = true;
                 continue;
             }
             let v = args
@@ -132,6 +144,11 @@ impl Options {
                 "--ticks" => o.ticks = number()?,
                 "--partitions" => o.partitions = number()?,
                 "--active-percent" => o.active_percent = number()?,
+                "--status-effects" => o.effects.count = number()?,
+                "--effect-interval" => {
+                    o.effects.interval =
+                        v.parse().map_err(|_| invalid("invalid effect interval"))?
+                }
                 "--database" => o.database = v,
                 "--output" => o.output = Some(v),
                 _ => return Err(invalid(format!("unknown option {key}"))),
@@ -151,6 +168,13 @@ impl Options {
         }
         if o.active_percent > 100 {
             return Err(invalid("active percent must be between 0 and 100"));
+        }
+        if !(1..=64).contains(&o.effects.interval)
+            || o.effects.count > 4096
+            || o.players.saturating_mul(o.effects.count) > 32_000_000
+            || (o.effects.count == 0 && (o.effects.local_only || o.effects.interval != 1))
+        {
+            return Err(invalid("use 1..4096 status effects, up to 32 million total, with an optional interval of 1..64 ticks or --local-effects"));
         }
         if o.partitions == 0
             || o.partitions > o.workers / 2
@@ -192,7 +216,9 @@ fn lane(
     let mut workers = Vec::new();
     for slot in 1..=o.workers {
         let w = db.start_worker((partition * o.workers + slot) as u32)?;
-        pool.add(w, world(&db, w))?;
+        let mut app = world(&db, w);
+        gameplay::install(&mut app, o.effects)?;
+        pool.add(w, app)?;
         workers.push(w);
     }
     let mut actors = Vec::new();
@@ -222,6 +248,12 @@ fn lane(
                 Inventory::default(),
             ))
             .id();
+        gameplay::attach(
+            pool.app_mut(owner)?.world_mut(),
+            entity,
+            first_player + i,
+            o.effects,
+        );
         let session = Id::numbered(3_000_000 + (first_player + i) as u128);
         db.session(session, id)?;
         actors.push(Actor {
@@ -251,6 +283,7 @@ fn lane(
     let mut cpu_cycles = 0;
     let moving = actors.iter().filter(|a| a.moving).count();
     let mut projections = 0;
+    let mut warm_gameplay = (Duration::ZERO, 0);
     let mut ingress: Vec<Vec<(Id, Input)>> = (0..o.workers).map(|_| Vec::new()).collect();
     for tick in 0..o.ticks + 4 {
         let measured = tick >= 4;
@@ -333,6 +366,7 @@ fn lane(
         }
         if tick == 3 {
             projections = pool.link_stats().0;
+            warm_gameplay = gameplay::totals(&pool, &workers)?;
         }
         if let Some(c) = &clock {
             c.ready()?;
@@ -353,6 +387,14 @@ fn lane(
             .get(&a.id)
             .copied()
             .ok_or_else(|| invalid("remote entity missing"))?;
+        gameplay::verify(
+            source,
+            a.entity,
+            target,
+            remote,
+            (o.ticks + 5) as u32,
+            o.effects,
+        )?;
         let expected_z = if a.moving {
             let steps = o.ticks + 4 - i % 4;
             let travel = if o.active_percent < 100 {
@@ -380,6 +422,9 @@ fn lane(
             ));
         }
     }
+    let (game_time, game_updates) = gameplay::totals(&pool, &workers)?;
+    let game_updates = game_updates - warm_gameplay.1;
+    gameplay::verify_checkpoint(&db, actors[0].id, (o.ticks + 5) as u32, o.effects)?;
     for w in workers {
         let s = pool.app(w)?.world().resource::<MeshState>();
         if !s.diagnostics.is_empty() {
@@ -404,6 +449,9 @@ fn lane(
         "equivalent_hz":o.ticks as f64/runtime.as_secs_f64(),"ticks_over_50ms":deadline_misses,
         "inputs_acked":acks,"peer_updates_applied":frames,"cross_island_subscriptions":0,
         "active_percent":o.active_percent,"moving_players":moving,"component_projections":pool.link_stats().0-projections,
+        "status_effects":o.effects.count,"effect_interval":o.effects.interval,"local_effects":o.effects.local_only,
+        "gameplay_player_updates":game_updates,"effect_checks":game_updates*o.effects.count as u64,
+        "sum_gameplay_system_ms_per_tick":(game_time-warm_gameplay.0).as_secs_f64()*1000./o.ticks as f64,
         "worker_cpu_ms_per_tick":cpu_ns as f64/(1e6*o.ticks as f64),
         "worker_cycles_per_tick":(cpu_cycles>0).then_some(cpu_cycles/o.ticks as u64),
         "octree_candidates":candidate_checks,"stages":stages}),
@@ -480,6 +528,9 @@ fn run(o: &Options) -> Result<Value> {
         "store":if o.database==":memory:"{"shared memory SQLite"}else{"shared file SQLite"},
         "inputs_acked":sum("inputs_acked"),"peer_updates_applied":sum("peer_updates_applied"),
         "moving_players":sum("moving_players"),"active_percent":o.active_percent,"component_projections":sum("component_projections"),
+        "status_effects":o.effects.count,"effect_interval":o.effects.interval,"local_effects":o.effects.local_only,
+        "gameplay_player_updates":sum("gameplay_player_updates"),"effect_checks":sum("effect_checks"),
+        "sum_gameplay_system_ms_per_tick":lanes.iter().map(|p|p["sum_gameplay_system_ms_per_tick"].as_f64().unwrap()).sum::<f64>(),
         "cross_island_subscriptions":sum("cross_island_subscriptions"),
         "ticks_over_50ms":times.iter().filter(|&&t|t>50.).count(),
         "equivalent_hz":o.ticks as f64*1000./times.iter().sum::<f64>(),

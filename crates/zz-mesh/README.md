@@ -6,7 +6,7 @@ Mit `zz-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definier
 
 Für getrennte Rechner zeigt die Betriebsanleitung die Einrichtung von Authority, Worker-Slots, Zertifikaten und Spielerclient. Sie ordnet die Anforderungen den zugehörigen Integrationstests zu. [Betrieb und Abnahme](../../docs/produktionsabnahme.md)
 
-Für die Dimensionierung deines Spiels kannst du aktive Spieler, ruhende Spieler, Worker-Parallelität und dauerhafte Checkpoints getrennt messen. [Tickprofil, Messkurven und Startbefehle](../../docs/tickprofil.md)
+Für die Dimensionierung deines Spiels kannst du aktive Spieler, ruhende Spieler, Worker-Parallelität und dauerhafte Checkpoints getrennt messen. [Tickprofil und Startbefehle](../../docs/tickprofil.md) · [Einsatzaudit mit eigenen ECS-Spielregeln und Freigabekriterien](../../docs/einsatzaudit.md)
 
 1. Lege das Spiel und diesen Checkout nebeneinander. Ergänze im **Spiel** die Abhängigkeiten. Ein bestehendes `bevy = "0.15"` kann die beiden Bevy-Teilcrates ersetzen, wenn du deren Typen aus `bevy::prelude` importierst.
 

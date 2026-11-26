@@ -1,4 +1,6 @@
-use super::{apply_checkpoint, invalid, Authority, Connection, Error, Id, Manifest, Record, Result};
+use super::{
+    apply_checkpoint, invalid, Authority, Connection, Error, Id, Manifest, Record, Result,
+};
 use rusqlite::{OpenFlags, TransactionBehavior};
 use std::{
     collections::BTreeMap,
