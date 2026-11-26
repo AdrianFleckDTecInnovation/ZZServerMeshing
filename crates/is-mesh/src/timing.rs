@@ -67,6 +67,16 @@ pub fn thread_cpu_cycles() -> u64 {
 /// Sample at control-plane frequency, outside per-entity loops.
 #[cfg(windows)]
 pub fn process_usage() -> (u64, u64) {
+    let (cpu, current, _) = windows_process_usage();
+    (cpu, current)
+}
+/// Operating-system high-water mark for this process, including setup and teardown.
+#[cfg(windows)]
+pub fn peak_resident_bytes() -> u64 {
+    windows_process_usage().2
+}
+#[cfg(windows)]
+fn windows_process_usage() -> (u64, u64, u64) {
     #[repr(C)]
     #[derive(Default)]
     struct Memory {
@@ -102,7 +112,23 @@ pub fn process_usage() -> (u64, u64) {
         GetProcessTimes(p, &mut create, &mut exit, &mut kernel, &mut user);
         K32GetProcessMemoryInfo(p, &mut memory, memory.size);
     }
-    ((kernel + user) * 100, memory.resident as u64)
+    (
+        (kernel + user) * 100,
+        memory.resident as u64,
+        memory.peak as u64,
+    )
+}
+#[cfg(target_os = "linux")]
+pub fn peak_resident_bytes() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0 {
+        return (unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64).saturating_mul(1024);
+    }
+    0
+}
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn peak_resident_bytes() -> u64 {
+    0
 }
 #[cfg(target_os = "linux")]
 pub fn process_usage() -> (u64, u64) {

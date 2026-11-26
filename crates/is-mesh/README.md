@@ -1,6 +1,6 @@
 # is-mesh in ein Bevy-Spiel integrieren
 
-Mit `is-mesh` 0.1 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definiert Komponenten, Simulationssysteme und Spielregeln. Die Bibliothek speichert stabile Objekt-IDs, prüft Schreibrechte und übergibt zusammengehörige Entities als Gruppe an einen anderen Worker.
+Mit `is-mesh` 1.0 besitzt jeder Worker eine Bevy-0.15-World. Dein Spiel definiert Komponenten, Simulationssysteme und Spielregeln. Die Bibliothek speichert stabile Objekt-IDs, prüft Schreibrechte und übergibt zusammengehörige Entities als Gruppe an einen anderen Worker. [Verbindlicher Funktionsumfang und Nachweise](../../docs/mesh-v1-abnahme.md)
 
 ## Vom Checkout zum ersten Spielstand
 
@@ -14,7 +14,7 @@ Für die Dimensionierung deines Spiels kannst du aktive Spieler, ruhende Spieler
 
    ```toml
    [dependencies]
-   is-mesh = { path = "../ZZServerMeshing/crates/is-mesh" }
+   is-mesh = { version = "1", path = "../ZZServerMeshing/crates/is-mesh" }
    bevy_app = "0.15"
    bevy_ecs = "0.15"
    serde = { version = "1", features = ["derive"] }
@@ -43,10 +43,22 @@ Ersetze im Spiel den lokalen Pfad durch `is-mesh = { git = "https://github.com/A
 | Komponenten | Registriere jeden Typ über `mesh_component` mit fester Schema-ID, Version und Codec. `persist` steuert Checkpoints, `migrate` die Übergabe. `Public` erreicht abonnierende Clients und Worker, `Private` den berechtigten Besitzer, `Workers` abonnierende Worker, `Local` keine Replikation. |
 | Spielschritte | Filtere schreibende Systeme mit `With<Simulated>`. Eine `Replica` ist eine entfernte Sicht. `Staged` kennzeichnet vorbereitete Objekte während einer Übergabe. Lokale Ableitungen wie Collider und Bevy-Referenzen baut `mesh_rebuild` aus importierten Komponenten auf. |
 | Start und Neustart | Für einen lokalen Store öffne die bisherige Weltdatei, rufe einmal pro Prozess und Slot `start_worker(slot)` auf, installiere `MeshPlugin::persistent` und registriere Codecs und Provider. Lade vor dem ersten Tick jede Gruppe aus `store.owned(slot)?` mit `restore_group(app.world_mut(), group)?`. Das gilt auch für eine leere Gruppe nach einem abgebrochenen Erststart. Erzeuge Startobjekte nur bei `Lookup::Unknown`. `Deleted` bleibt belegt. |
-| Bewegung und Aktionen | Bewegung kann nach einem Ausfall bis zum letzten Checkpoint zurückspringen. `checkpoint_group` nach dem Spielschritt schreibt ausstehende Komponentenänderungen. Verwende für Handel, Abbau und Inventar typisierte `mesh_action`-Handler und `commit_batch`. Wiederhole eine ausstehende Aktion mit derselben Session, Sequenz und Nutzlast. |
+| Bewegung und externe Ergebnisse | `checkpoint_group` bestätigt den technischen Stand. Ein Fachdienst hält seinen eigenen Buchungsstand. Nach einem Umzug löst der Adapter das Objekt erneut auf und übergibt die externe Revision mit `apply_external`. `hydrate_external` lädt den maßgeblichen Fachstand nach Restore. Das persistente Referenzspiel verwendet für eigene Beispielaktionen weiterhin typisierte `mesh_action`-Handler. |
 | Spielercluster und große Daten | Melde Objekte als `Presence` und Interessenbereiche als `Area` an die `Directory`. Beim Annähern kommen räumliche Abonnements hinzu, beim Trennen laufen sie aus. Getrennte Inseln benötigen weiterhin Kontrollverkehr. `mesh_provider` und `mesh_datasets` verknüpfen Chunks und Baupläne mit geprüften Datenmanifesten. |
 
-## Betrieb und Prüfung
+## Spiel und Session anbinden
+
+Ein vollständiges externes Spiel mit eigenen Components lässt sich mit `cargo run --locked -p is-mesh --example session_game` ausführen. `npm run test:game` kompiliert es auch außerhalb des Workspace. Das Beispiel enthält die Registrierung, ein gewöhnliches Bewegungssystem und die Übernahme lokaler Bevy-Referenzen nach dem Wechsel der World. [Vollständiges Spielbeispiel](examples/session_game.rs)
+
+1. **World aufbauen.** Für lokalen Betrieb ohne Datenbank `MeshPlugin::transient()`, `MeshSessionPlugin` und `LocalSubscriberPlugin` installieren. Für dauerhaft koordinierte Worker `MeshPlugin::persistent(store, worker)` verwenden. `SpatialRule` meldet die Ausdehnung, `SightRule` den Bezugspunkt. `SpatialDependencies` enthält die Schema-IDs aller Komponenten, von denen diese Regeln abhängen. Bei Änderungen externer Transformdaten die betroffenen Objekte mit `refresh_spatial` melden.
+2. **Eingaben übernehmen.** Der serverseitige Sessionadapter übergibt einen geprüften `SessionGrant` mit Principal, logischer Session, Objekt, Control-Epoch und Ablauf. `admit` bindet die konkrete Verbindung. `SessionIngress::submit` erhält das zugehörige `ControlBinding` und eine steigende Sequenz. Erneuern, Suspendieren, Widerrufen und Schließen verwenden dieselbe Bindung. Für die Übernahme durch eine neue Verbindung muss der vertrauenswürdige Aussteller die Control-Epoch erhöhen.
+3. **Simulieren.** Im `PreUpdate` laufen `MeshSystems::Ingress → Authority → Control` mit Deferred-Barrieren. Das Spiel verarbeitet in `Update` nur `ValidatedInput` an Entities mit `Simulated` und `MeshReady`. Eigene fachliche Bereitschaft kann als zusätzlicher Query-Filter hinzukommen. Bei angewandtem Widerruf, Ablauf oder fehlender Koordinationsbestätigung entfernt der Worker die Steuerfreigabe vor dem nächsten Spielschritt. Eine bereits begonnene Simulation kann zu Ende laufen. Uhren der Hosts müssen synchronisiert sein.
+4. **Sicht zustellen.** Der Adapter bindet eine `SubscriberId`. Nach der Änderungserfassung in `PostUpdate` kann `MeshSystems::Output` die Ausgabe abholen. Lokal liefert `SubscriberStream::next_local` Ereignisse, im Pool `next`, über mehrere Prozesse `WorkerSubscription`. Erst nach Anwendung des Frames `applied` bestätigen. Das Raster für Worker-Kontakte und die persönliche Reichweite sind getrennt einstellbar. [Spielersicht und Frame-Vertrag](../../docs/spielersicht.md)
+5. **Nach Unterbrechung fortsetzen.** Die Sessionintegration entscheidet über den erneuten Zugang. Bei passender Stream-ID und bestätigter Baseline setzt das Mesh mit Deltas fort. Andernfalls verwirft der Adapter bei `Reset` seinen bisherigen Sichtstand und installiert den neuen Snapshot. Eine ersetzte Verbindung kann die aktuelle Bindung weder steuern noch durch einen verspäteten Disconnect schließen.
+
+## Versionen und Betrieb
+
+Die öffentliche Rust-API folgt SemVer. Für reproduzierbare Builds im Spiel den freigegebenen Git-Commit und die eigene `Cargo.lock` festhalten. Der bisherige Paketname `zz-mesh` und Import `zz_mesh` werden über eine Fassade weiter unterstützt. Globale Objekt-IDs, Schema-IDs, Checkpoint-Hashdomäne und bestehende Nachrichten des Worker-Protokolls v3 behalten ihre Bedeutung. Die zusätzliche Operatorabfrage `metrics` benötigt einen aktualisierten Worker. Das technische Store-Format 2 prüft Datensätze per SHA-256. Beim Upgrade alter Formate zuerst eine vollständige Sicherung anlegen. Ein Rückwechsel auf eine Binärdatei für Format 1 benötigt das ursprüngliche Backup. [Kompatibilitätsprobe](../zz-mesh/examples/store_roundtrip.rs) · [Betrieb und Wiederanlauf](../../docs/produktionsabnahme.md)
 
 - **Speicher.** Im lokalen Pool öffnet das Spiel seine SQLite-Welt. Für getrennte Hosts öffnet allein der Authority-Dienst das Welt-Volume. Die Worker verwenden den typisierten Store über gegenseitiges TLS. Für ein kaltes Backup Authority und Verwaltungsbefehle beenden, das vollständige geschützte Kontrollverzeichnis sichern und den Wiederanlauf auf einer Kopie prüfen. [Bereitstellung und Recovery](../../docs/produktionsabnahme.md)
 - **Kompatibilität.** Der Store erkennt bestehende Weltdateien aus diesem Projekt und markiert ihr Format beim ersten Öffnen. Ein unbekanntes Format bricht den Start ab. Ein geändertes Komponentenformat benötigt eine geplante Datenmigration. Unbekannte Schema-IDs und inkompatible Versionen verhindern die Aktivierung einer Gruppe.

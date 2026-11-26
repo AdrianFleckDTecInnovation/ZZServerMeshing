@@ -60,5 +60,5 @@ mod cpu;
 pub mod remote;
 pub use cpu::apply_cpu_budget;
 mod timing;
-pub use timing::{process_usage, thread_cpu_cycles, thread_cpu_ns};
+pub use timing::{peak_resident_bytes, process_usage, thread_cpu_cycles, thread_cpu_ns};
 pub mod network_mesh;

@@ -4,6 +4,8 @@
 
 ![Oben der gemessene Empfang beim Weltwachstum und bei höherer Dichte. Unten der berechnete Regionsverkehr und die Bevy-Tickzeiten.](benchmarks/kapazitaet-10000.png)
 
+Die Messungen dieses Plans beschreiben die damalige Browser-Demo und die Referenzadapter. Die aktuelle Modulfreigabe misst die transportunabhängige Schnittstelle. Kapazitätsmessungen des vollständigen Spiels mit `is-session`, Zielhardware und mehreren Maschinen folgen bei Integration. [Modulabnahme und Kernskalierung](mesh-v1-abnahme.md)
+
 ## Wie viel muss eine Region versenden?
 
 Die genaueste Rechnung summiert für jeden Client die Änderungen seiner tatsächlichen sichtbaren Objekte. Bei 47 Byte je bewegtem Nachbarn und 20 Updates/s gilt für vollständig gegenseitig sichtbare Gruppen

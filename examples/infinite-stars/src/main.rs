@@ -14,7 +14,7 @@ use std::{
 mod supervisor;
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS | health DIR ADDRESS | shutdown DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS | health DIR ADDRESS | metrics DIR ADDRESS | shutdown DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {

@@ -104,6 +104,7 @@ for (let r = 0; r < runs; r++) {
       cpu_ids: data.cpu_ids,
       process_cpu_seconds: data.process_cpu_seconds,
       resident_bytes: data.resident_bytes,
+      peak_resident_bytes: data.peak_resident_bytes,
       wall_seconds_with_setup: data.wall_seconds_with_setup,
       players: data.players, workers: data.workers,
       p50_ms: data.tick_ms.p50,

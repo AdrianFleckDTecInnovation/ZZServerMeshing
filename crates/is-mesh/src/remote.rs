@@ -82,6 +82,7 @@ impl Default for RequestBudgets {
 type Job = (Role, Work, SyncSender<Result<Response>>, Instant);
 struct SightAccess {
     rules: SightRanges,
+    max_visible: usize,
     connect: Box<dyn Fn(Worker) -> Result<Client> + Send + Sync>,
     directory: Mutex<Option<(Worker, Client)>>,
 }
@@ -142,7 +143,14 @@ pub fn worker_with_sight(
     rules: SightRanges,
     connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
 ) -> (Arc<WorkerEndpoint>, WorkerLoop) {
-    worker_with_budgets(service, initial, rules, connect, RequestBudgets::default())
+    worker_with_budgets(
+        service,
+        initial,
+        rules,
+        connect,
+        RequestBudgets::default(),
+        SubscriberPolicy::default(),
+    )
 }
 pub fn worker_with_budgets(
     service: Arc<Service>,
@@ -150,12 +158,14 @@ pub fn worker_with_budgets(
     rules: SightRanges,
     connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
     budgets: RequestBudgets,
+    policy: SubscriberPolicy,
 ) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     make_worker(
         service,
         initial,
         Some(SightAccess {
             rules,
+            max_visible: policy.max_visible,
             connect: Box::new(connect),
             directory: Mutex::default(),
         }),
@@ -249,7 +259,11 @@ impl WorkerEndpoint {
             if index.presence(actor).is_some_and(|p| p.owner == source) {
                 members.push(actor);
             }
-            let limit = SubscriberPolicy::default().max_visible;
+            let limit = self
+                .sight
+                .as_ref()
+                .ok_or_else(|| invalid("subscriber sight is missing"))?
+                .max_visible;
             let origin = index.visit_visible(
                 actor,
                 rules,

@@ -283,6 +283,18 @@ pub struct SubscriberPolicy {
     pub far_period: u64,
     pub ack_timeout_ticks: u64,
 }
+impl SubscriberPolicy {
+    pub fn validate(&self) -> Result<()> {
+        if !(32..=MAX_FRAME).contains(&self.bytes_per_poll)
+            || self.events_per_poll == 0
+            || self.max_visible == 0
+            || self.ack_timeout_ticks == 0
+        {
+            return Err(invalid("invalid subscriber budget"));
+        }
+        Ok(())
+    }
+}
 impl Default for SubscriberPolicy {
     fn default() -> Self {
         Self {
@@ -403,14 +415,7 @@ impl SubscriberStream {
         if !directory.authorized_subscriber(binding, subscriber)? {
             return Err(Error::Denied);
         }
-        if policy.bytes_per_poll < 32
-            || policy.bytes_per_poll > MAX_FRAME
-            || policy.events_per_poll == 0
-            || policy.max_visible == 0
-            || policy.ack_timeout_ticks == 0
-        {
-            return Err(invalid("invalid subscriber budget"));
-        }
+        policy.validate()?;
         Ok(Self {
             binding,
             subscriber,

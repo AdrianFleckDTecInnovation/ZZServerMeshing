@@ -627,6 +627,7 @@ fn main() -> Result<()> {
     report["cpu_ids"] = serde_json::json!(cpu_ids);
     report["process_cpu_seconds"] = serde_json::json!((after.0 - before.0) as f64 / 1e9);
     report["resident_bytes"] = serde_json::json!(after.1);
+    report["peak_resident_bytes"] = serde_json::json!(peak_resident_bytes());
     report["wall_seconds_with_setup"] = serde_json::json!(start.elapsed().as_secs_f64());
     report["paced_20hz"] = serde_json::json!(options.pace);
     let result = serde_json::to_string_pretty(&report).map_err(|e| invalid(e.to_string()))?;

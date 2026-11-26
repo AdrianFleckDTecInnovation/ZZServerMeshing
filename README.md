@@ -1,5 +1,7 @@
 # InfiniteStars Server Meshing
 
+Use `is-mesh` 1.0 from your Bevy 0.15 game. The integration example registers a figure, a ship, an asteroid and a chunk, transfers authority between workers and resumes an individual player's view. The release checklist records each of the 23 module requirements, its evidence and its operating limits. [Spielintegration](crates/is-mesh/README.md) · [Abnahme und Messwerte](docs/mesh-v1-abnahme.md)
+
 Run `npm run observe` to watch four local mTLS server processes share the same game world. The admin map shows which servers own players in each octree island, how two islands merge and split, and how client reception changes through a handoff. [Live-Monitor starten](docs/live-monitor.md)
 
 For sizing a regional game world, the capacity plan compares 10,000 players in separate groups, merging groups and one fully visible battle. It includes measured client traffic, worker scaling and a physical mTLS test configuration. [Kapazitätsplan und Regionskurven](docs/kapazitaetsplan.md)

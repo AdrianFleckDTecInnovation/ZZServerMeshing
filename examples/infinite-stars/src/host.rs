@@ -66,6 +66,7 @@ impl HostLimits {
         if limits.tick_budget_us == 0 || limits.memory_bytes == 0 {
             return Err(invalid("capacity budgets must be positive"));
         }
+        limits.subscriber.validate()?;
         let available = std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN);
         if limits.cpu_cores > available {
             return Err(invalid(format!(
@@ -347,6 +348,7 @@ pub(crate) fn run_node(
         app.world().resource::<SightRanges>().clone(),
         connect.clone(),
         limits.requests,
+        limits.subscriber,
     );
     event_loop.observe_transport(listener.traffic.clone());
     event_loop.observe_transport(traffic);

@@ -1,5 +1,7 @@
 # Infinite Stars betreiben und abnehmen
 
+Die Modulfreigabe für `is-mesh` 1.0 umfasst die Bibliothek, den explizit koordinierten Worker-Betrieb und den öffentlichen Bevy- und Sessionadapter. Die Abnahmematrix nennt die geprüften Lasten und Fehlerfälle. Die älteren Bestandsaufnahmen weiter unten beziehen sich auf ihre jeweiligen Ausgangsstände. [Modulabnahme M01–M23](mesh-v1-abnahme.md)
+
 ## Delta-Analyse für die Bibliotheksfinalisierung
 
 Ausgangsstand ist `732a8af`. Die [ECS- und Prozessmessungen](tickprofil.md), die [Sichtmessung](spielersicht.md) und ihre Rohdaten unter `docs/benchmarks` bleiben versionsgebundene Referenzen. Der Windows-Release-Build dieses Commits reproduzierte mit 10.000 stehenden Spielern, 32 Worlds, vier Partitionen, 128 privaten Effekten und 40 Ticks 500.000 Projektionen, null Peer-Updates und 18,26 ms p95. Das Bewegungsszenario ohne Effekte bestätigte 400.000 Peer-Updates bei 18,07 ms p95. Die folgenden Einstufungen beschreiben den Stand **vor** den Änderungen.
@@ -54,9 +56,12 @@ Einmal `cargo build --release --locked -p infinite-stars --bin infinite-stars` a
 | Spieler, sichtbare Nachbarn über einen Einstiegsworker abrufen | `infinite-stars sight player-a 10.20.0.11:8641` |
 | Authority-Rechner, Beispielgruppe an Slot 2 übergeben | `infinite-stars migrate control 10.20.0.11:8641 10.20.0.12:8642 2` |
 | Authority-Rechner, Diagnose | `infinite-stars status control 10.20.0.12:8642` |
+| Operator, Bereitschaft und Zahl der Gruppen | `infinite-stars health control 10.20.0.12:8642` |
+| Operator, CPU, Speicher, Phasen, Codec und Warteschlangen | `infinite-stars metrics control 10.20.0.12:8642` |
 | Authority-Rechner, automatische Lastverteilung im Vordergrund | `infinite-stars balance control` |
 | Authority-Rechner, Slot leeren und für neue Zuständigkeiten sperren | `infinite-stars drain control 2` |
 | Authority-Rechner, Slot wieder freigeben | `infinite-stars resume control 2` |
+| Operator, nach erfolgreichem Drain und null Gruppen beenden | `infinite-stars shutdown control 10.20.0.12:8642` |
 
 Übertrage jedes erzeugte Verzeichnis geschützt an seinen Empfänger. `control` enthält Welt, Zulassungen, CA- und Operatorschlüssel und bleibt auf dem Authority-Rechner. Unter Windows die Zugriffsrechte des Dienstkontos für das Verzeichnis setzen. Unter Linux werden private Schlüssel mit Modus 0600 erzeugt. Bei Bindung an eine Wildcard gehört die für Peers erreichbare Adresse als `IP:Port` in `advertise.txt` im Worker-Verzeichnis. Slot 1 betreibt das Directory. Eine weitere Worker-Instanz erhält einen eigenen Slot und ein eigenes Verzeichnis.
 
@@ -66,7 +71,26 @@ Bei jedem Prozessstart erzeugt der Worker ein neues Schlüsselpaar. Der Authorit
 
 ## Betrieb und Grenzen
 
-Der Controller fragt alle zwei Sekunden die registrierten Prozesse ab. `balance control --once` führt einen einzelnen Durchgang aus. Eine fachliche Gruppe wechselt bei Bedarf als Ganzes. Der Controller berücksichtigt angeforderte Komponenten je Peer und verifizierte Cacheinhalte am Ziel. Standardwerte sind 40 ms Tickarbeit, 256 MiB Cachebudget, 8 MiB Transferbudget und vier Sekunden Mindestverweildauer. Ein Worker kann seine beiden Kapazitätsbudgets per `capacity.json` im eigenen Verzeichnis setzen, beispielsweise `{"tick_budget_us":25000,"memory_bytes":134217728}`. Das Speicherbudget erfasst den Blobcache. Zusätzliche Bevy- und Spielallokationen müssen bei der Dimensionierung des Hosts berücksichtigt werden. Gibt es kein geeignetes Ziel, meldet der Controller die Gruppe und der bisherige Writer behält die Zuständigkeit.
+Für den internen Worker-Zugang lässt sich folgendes `capacity.json` je Worker einsetzen. `reference_players: false` beschränkt diesen Listener auf interne Rollen. Der Spieladapter nutzt die Bibliotheks-API. In diesem Modus gehört der Listener in das interne Netz. Das mitgelieferte mTLS-Spielerbeispiel verwendet `reference_players: true`.
+
+```json
+{
+  "cpu_cores": 4,
+  "session_capacity": 4096,
+  "internal_connections": 32,
+  "reference_players": false,
+  "requests": {"interactive": 32, "per_session": 8, "peers": 8, "administration": 8},
+  "subscriber": {"bytes_per_poll": 131072, "events_per_poll": 128, "max_visible": 16384, "near_period": 1, "far_period": 4, "ack_timeout_ticks": 40},
+  "checkpoint_groups": 4,
+  "checkpoint_bytes": 8388608
+}
+```
+
+- **CPU und I/O.** `cpu_cores` begrenzt die ausführenden logischen CPUs des gesamten Workers und initialisiert die prozessweiten Bevy-Pools. Optionale `cpu_ids` wählen konkrete zulässige CPUs. Beim Start mehrerer Worker auf einem Host disjunkte Budgets für Simulation und eigene Ressourcen für Authority, Betriebssystem und externe Dienste vorsehen. Linux vererbt die Affinität an neu erzeugte Threads. Unter Windows liegen explizite CPU-IDs in einer Prozessorgruppe. Ein gemeinsam geklonter `BulkExecutor` startet bei Bedarf einen Hintergrundthread.
+- **Rückstau.** Interaktive Jobs erhalten einen begrenzten Eingangs- und einen begrenzten Verteilungspuffer. Bearbeitung rotiert zwischen Verwaltung, Peer-Replikation und interaktiven Sessions. Volle Puffer liefern `Busy`. Pro Subscriber und Quelle wartet höchstens ein Anwendungsframe auf Bestätigung. Nach Ablauf des ACK-Budgets beginnt der Stream mit einem Reset. Das interne Protokoll begrenzt einen Frame auf 1 MiB, ein Komponentenfeld auf 128 KiB, Bulkblöcke auf 32 KiB und einzelne Blobs auf 64 MiB. Spieladapter dürfen engere Grenzen wählen.
+- **Messwerte.** `health` meldet Bereitschaft, Zahl der Authority-Gruppen und Prozesslast. `metrics` liefert zusätzlich Spatial-/Routing-, Publish- und Subscriber-Zeit, Codec-CPU, TLS-Bytes, ausstehende Eingaben, unbestätigte Subscriber-Bytes sowie laufende Checkpoint- und Request-Bytes. Prozess-CPU von 1.000 Promille bedeutet einen ausgelasteten logischen Kern. Phasen sind Teilzeiten. Der Controller berücksichtigt serielle Tick- und Requestarbeit, CPU relativ zum Budget, längste Wartezeit und RSS. `GroupTimings::observe` meldet Gruppenarbeit aus dem Spiel. Fehlt sie, schätzt der Controller mit Workerlast geteilt durch Gruppenzahl. [Ressourcenmessung](../crates/is-mesh/src/placement.rs) · [Platzierung](../examples/infinite-stars/src/supervisor.rs)
+
+Der Controller fragt alle zwei Sekunden die registrierten Prozesse ab. `balance control --once` führt einen einzelnen Durchgang aus. Eine fachliche Gruppe wechselt bei Bedarf als Ganzes. Der Controller berücksichtigt angeforderte Komponenten je Peer und verifizierte Cacheinhalte am Ziel. Standardwerte sind 40 ms Tickarbeit, 256 MiB Cachebudget, 8 MiB Transferbudget und vier Sekunden Mindestverweildauer. Ein Worker kann seine beiden Kapazitätsbudgets per `capacity.json` im eigenen Verzeichnis setzen, beispielsweise `{"tick_budget_us":25000,"memory_bytes":134217728}`. Für die Platzierung verwendet der Controller den größeren Wert aus Prozess-RSS und belegtem Blobcache. Der konfigurierte Wert ist ein Platzierungsbudget. Ein hartes Betriebssystemlimit lässt sich über den Dienstmanager setzen. Gibt es kein geeignetes Ziel, meldet der Controller die Gruppe und der bisherige Writer behält die Zuständigkeit.
 
 - **Ausfall eines Workers.** Mit demselben Slot neu starten. Der Worker stellt seine Gruppen einschließlich bestätigter wirtschaftlicher Änderungen wieder her. Beim geordneten Handoff gilt der exakte Endstand. Kontinuierliche Daten starten nach Absturz beim letzten haltbaren Checkpoint. [Haltbarkeitsregeln](infinite-stars.md)
 - **Ausfall des Authority-Dienstes.** Schreibende Operationen brauchen dessen Bestätigung. Den Dienst an seiner bisherigen Adresse mit dem intakten Datenträger wieder starten. Eine ungeklärte Aktion mit derselben Session und Sequenz wiederholen. Bei unklarem Handoff dasselbe Ticket fortsetzen oder über `abort` den gespeicherten Ausgang klären. Der Beispiel-Controller führt dafür eine haltbare Ticketdatei. [Prozessabnahme](../examples/infinite-stars/tests/process.rs)
@@ -74,11 +98,17 @@ Der Controller fragt alle zwei Sekunden die registrierten Prozesse ab. `balance 
 - **Dichte und Kapazität.** Ein Objekt hat pro interessiertem Worker höchstens eine zusammengefasste Subscription. Individuelle Clients können jeweils eine eigene Sicht benötigen. Der Standardbroker unterstützt bis zu 64 Worker-Slots. Die Octree-Inselrampe prüfte bis zu 1.024 bewegte Bevy-Figuren. Der interne Ticktest prüfte 10.000 Spieler in 625 Inseln. Im WebSocket-Test hielten 10.000 Spieler in 5.000 Zweiergruppen gleichzeitig die Verbindung. Die Lastkurven für dichte Gruppen und die Ergebnisse je Plattform stehen im [Messbericht](tickprofil.md).
 - **Betriebsumgebung.** Der kurze Test prüft das Modell vertrauenswürdiger Worker. Die Standardbereitstellung benötigt eine erreichbare Authority und für neue Routen ein erreichbares Directory. Automatische Bereitstellung weiterer Maschinen, redundanter Speicher und ein Kapazitätsziel mit dem eigenen Gameplay sind Entscheidungen des Betreibers.
 
+**Wiederanlauf.** Bei einem Worker-Absturz denselben Slot mit seinem provisionierten Verzeichnis gegen die laufende Authority starten. Die neue Inkarnation sperrt den alten Writer. Bei Ausfall von Slot 1 müssen neue Routen und Sichtpläne auf das Directory warten. Nach einem Authority-Ausfall zuerst den Dienst mit seinem intakten Volume starten, den Status eines offenen Handoffs abfragen und den zuletzt bestätigten technischen Stand laden. Der Sessionadapter prüft Teilnehmer und Bindung erneut. Externe Zustände werden von ihrer maßgeblichen Quelle hydratisiert, danach Eingaben freigeben.
+
+**Datenverlust und Zeit.** Die periodische Checkpointplanung verteilt Gruppen über 20 Ticks, bei 20 Hz nominell eine Sekunde. Der tatsächlich mögliche Rücksprung reicht bis zur letzten erfolgreichen Bestätigung. Rückstau oder ein unterbrochener Speicherdienst können ihn vergrößern. Für einen ausdrücklich benötigten haltbaren Stand auf `checkpoint_group` warten. Bei Wiederherstellung eines älteren Backups alte Worker vor dem Start isolieren, ihre Zulassungen rotieren und externe Session-Epochen neu vergeben. Ein zurückgespieltes Backup enthält auch die damaligen Fencing- und Zulassungsdaten. Extern bestätigte Fachrevisionen erneut abrufen. Eine garantierte Wiederherstellungszeit und automatische Übernahme eines verlorenen Hosts benötigen eine separate Betriebsabnahme.
+
 ## Abnahme wiederholen
 
 ```sh
 npm test
 npm run test:game
+npm run test:abnahme
+npm run bench:v1
 npm run smoke
 cargo run --release --locked -p infinite-stars --bin cluster-bench -- target/islands.json --quick
 npm run bench:distributed

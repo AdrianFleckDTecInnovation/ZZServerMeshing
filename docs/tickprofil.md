@@ -1,5 +1,7 @@
 # Tickkosten und 10.000 Spieler
 
+Die Zahlen auf dieser Seite gehören zum jeweils angegebenen Messstand. Die aktuellen V1-Grenzwerte und ihr reproduzierbarer Lastlauf stehen in der [Modulabnahme](mesh-v1-abnahme.md).
+
 Die neueste Vergleichsmessung untersucht Änderungen an Octree, Replikation und Speicherbedarf. Der kurze Kerntest ermittelt auf dem Zielrechner, wie viele parallele Simulationsthreads das 50-ms-Budget einhalten. [Kernskalierung und AMD-EPYC-Planung](kernskalierung.md)
 
 Wie die Gruppengröße den Verkehr bestimmt, zeigen zusätzliche Messungen mit 1.024 bis 4.096 WebSocket-Clients. Für 10.000 mTLS-Sitzungen und eine gemeinsame Schlacht gibt es einen dimensionierten Testaufbau mit Abnahmekriterien. [Kapazitätsplan und Regionskurven](kapazitaetsplan.md)

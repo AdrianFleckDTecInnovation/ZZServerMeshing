@@ -2,7 +2,9 @@
 
 Für den Einstieg in ein eigenes Spiel gibt es ein kompaktes Beispiel mit einer persistenten Komponente. Dieser Leitfaden beschreibt anschließend den Betrieb mehrerer Worker und die Erweiterung um eigene Aktionen, Daten und Abonnements. [Spielintegration](../crates/is-mesh/README.md) · [Ausführbarer Einstieg](../crates/is-mesh/examples/persistent_game.rs) · [Clustermessungen](cluster-performance.md)
 
-`is-mesh` ist eine Rust-Bibliothek für ein persistentes Spiel. Ein Worker besitzt eine Bevy-World. Eine Gruppe kann mehrere Entities enthalten. Ein Worker darf viele Gruppen in verschiedenen Regionen simulieren. Die eigenständige Beispiel-Crate implementiert Spieler, Inventare, Werkzeuge, Planeten, Chunks, zusammengesetzte Voxelobjekte, Abbau, Bau, Drop, Pickup und Handel. [Bibliothek](../crates/is-mesh/src/lib.rs) · [Spiel-Plugin](../examples/infinite-stars/src/lib.rs)
+`is-mesh` 1.0 unterstützt lokale Bevy-Simulation ohne Datenbank sowie dauerhaft koordinierte Worker. Das externe Sessionbeispiel führt Zulassung, individuelle Zustellung, Migration und Wiederanlauf mit eigenen Typen aus. [Versionierte Integration](../crates/is-mesh/README.md) · [Modulabnahme](mesh-v1-abnahme.md)
+
+Im persistenten Referenzspiel gilt folgendes Modell. Ein Worker besitzt eine Bevy-World. Eine Gruppe kann mehrere Entities enthalten. Ein Worker darf viele Gruppen in verschiedenen Regionen simulieren. Die eigenständige Beispiel-Crate implementiert Spieler, Inventare, Werkzeuge, Planeten, Chunks, zusammengesetzte Voxelobjekte, Abbau, Bau, Drop, Pickup und Handel. [Bibliothek](../crates/is-mesh/src/lib.rs) · [Spiel-Plugin](../examples/infinite-stars/src/lib.rs)
 
 ## Starten
 

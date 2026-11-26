@@ -27,6 +27,10 @@ Die **10 und 11 m** aus dem Flugtest beschreiben den Worker-Kontakt zweier 5-m-B
 
 Für angrenzende Sektoren mit möglichem Sichtkontakt meldet das Spiel Positionen in einem gemeinsamen Frame, etwa relativ zum selben Stern. Räumliche Inseln und Worker können sich innerhalb dieses Frames ändern. Verwendet das Spiel zusätzlich schiffslokale Koordinaten, rechnet es sie für die Sichtprüfung in diesen gemeinsamen Frame um.
 
+Für ausgedehnte Objekte kann das Spiel `SightRanges::millimetres(...).with_bounds([SHIP])` registrieren. Dann entscheidet die kürzeste 3D-Distanz vom Beobachter zur registrierten achsenparallelen Box. Eine Schiffshülle mit Mittelpunkt bei 520 m und 20 m Halbausdehnung ist bei 500 m Reichweite gerade sichtbar. Die Standardregel für punktförmige Objekte bleibt die exakte Kugel.
+
+`SpatialRule` und `SightRule` liefern Raum, Achsen und Millimeterkoordinaten für denselben Simulationsstand. Bei lokalen Koordinaten liefert das Spiel die Transformation, bei gedrehten Hüllen auch deren umschließende Box im Zielraum. `Box3::translated` prüft ganzzahlige Verschiebungen auf Überlauf. Fehlt eine aktuelle Transformation, liefert die Regel `None`. Bei Änderung oder Wiederherstellung der Transformation meldet das Spiel mit `refresh_spatial(world, ids)` genau die betroffenen IDs. Der Test prüft Eintritt, Austritt, reine Größenänderung, fehlende Daten und Überlauf nahe `i64::MAX` auf zwei Workern. [Implementierung und Grenztest](../examples/infinite-stars/tests/player_sight.rs)
+
 ## Im Spiel nutzen
 
 Eine Spielfigur als `(Managed, Player, Position, …)` anlegen, ein Schiff als `(Managed, Ship, Position, …)`. Das Spiel vergibt die stabilen Objekt-IDs. Zusätzliche öffentliche Komponenten, etwa das Aussehen der Figur oder der Schiffstyp, mit `mesh_component` und `Visibility::Public` registrieren.

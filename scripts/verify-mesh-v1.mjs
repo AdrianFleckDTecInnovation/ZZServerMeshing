@@ -16,14 +16,16 @@ const published = resolve(root, values.report ?? 'docs/benchmarks/mesh-v1.json')
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
 const run = (command, args) => execFileSync(command, args.map(String), opt).trim();
 const git = (...args) => run('git', args);
-const code = ['Cargo.lock', 'crates/is-mesh/Cargo.toml', 'crates/zz-mesh/Cargo.toml',
+const code = ['Cargo.toml', 'Cargo.lock', 'crates/is-mesh/Cargo.toml', 'crates/zz-mesh/Cargo.toml',
   'examples/infinite-stars/Cargo.toml', ':(glob)crates/is-mesh/**/*.rs', 'crates/is-mesh/src/schema.sql',
   ':(glob)crates/zz-mesh/**/*.rs', ':(glob)examples/infinite-stars/**/*.rs',
+  'crates/zz-mesh/tests/fixtures', 'scripts/test-game-integration.mjs',
   'scripts/bench-cores.mjs', 'scripts/bench-quick.mjs', 'scripts/verify-mesh-v1.mjs'];
 // Git blob IDs are independent of checkout line endings and remain valid after a rebase.
 const fingerprint = () => createHash('sha256').update(git('ls-files', '--stage', '--', ...code)).digest('hex');
 
 function verifyMeasurements(r) {
+  assert.equal(git('status', '--porcelain', '--', ...code), '', 'Local module changes still need a matching release run');
   assert.equal(r.schema, 1);
   assert.equal(r.source_sha256, fingerprint(), 'Release evidence belongs to different source blobs');
   assert.match(r.revision, /^[a-f0-9]{40}$/);
@@ -41,7 +43,8 @@ function verifyMeasurements(r) {
     assert.equal(sample.cross_island_subscriptions, 0);
     assert.ok(sample.tick_ms.p95 <= 40 && sample.tick_ms.p99 <= 50 &&
       sample.ticks_over_50ms / sample.ticks <= 0.01, 'Tick or deadline budget exceeded in run ' + (n + 1));
-    assert.ok(sample.resident_bytes > 0 && sample.resident_bytes <= 512 * 1024 ** 2);
+    assert.ok(sample.resident_bytes > 0 && sample.peak_resident_bytes >= sample.resident_bytes &&
+      sample.peak_resident_bytes <= 512 * 1024 ** 2, 'Peak resident memory exceeded');
     assert.ok(sample.process_cpu_seconds > 0);
   }
   assert.ok(r.stability.wall_seconds_with_setup >= 60);

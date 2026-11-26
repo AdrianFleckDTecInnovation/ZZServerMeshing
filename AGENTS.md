@@ -2,6 +2,8 @@
 
 The binding module-release requirements are in [.codex/mesh-v1-auftrag.md](.codex/mesh-v1-auftrag.md). Track M01–M23 in the [acceptance ledger](docs/mesh-v1-abnahme.md). Record the public entry point, executed check, Git revision, measured outcome and limitation before marking a criterion BESTANDEN. is-session owns public connections and account verification. Game and domain crates own their rules and durable business records.
 
+Run `npm run test:abnahme` to verify the release ledger, measured source fingerprint and acceptance budgets. After a module change, run the functional suite and external game, commit the measured source, then run `npm run bench:v1 -- --report docs/benchmarks/mesh-v1.json`. The runner retains individual measurements under `target/` and publishes the report only after the gates pass.
+
 Run commands from the repository root. The local mesh runs natively on Windows and Linux. Use Rust stable, the platform C linker and Node.js 22.16 or newer with npm. On Windows use the MSVC Rust toolchain, Visual Studio C++ Build Tools and the Windows SDK.
 
 | Task | Command |
