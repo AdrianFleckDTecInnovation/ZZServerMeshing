@@ -541,6 +541,9 @@ impl PeerMesh {
         Ok(())
     }
     pub fn step(&mut self, w: &mut World) -> Result<()> {
+        let start = w
+            .contains_resource::<WorkerTimings>()
+            .then(std::time::Instant::now);
         self.tick += 1;
         let dirty = std::mem::take(&mut w.resource_mut::<MeshState>().dirty);
         let mut dirty = dirty.into_iter();
@@ -650,6 +653,10 @@ impl PeerMesh {
                 other => self.last_error = Some(format!("peer {to:?}: {other:?}")),
             }
         }
+        let publish = start.map(|s| {
+            w.resource_mut::<WorkerTimings>().spatial_routing_us += s.elapsed().as_micros() as u64;
+            std::time::Instant::now()
+        });
         for (to, batch) in self.publisher.flush(w, &self.own, self.tick, |id| {
             self.own
                 .descriptions
@@ -678,6 +685,9 @@ impl PeerMesh {
                     }
                 }
             }
+        }
+        if let Some(start) = publish {
+            w.resource_mut::<WorkerTimings>().peer_publish_us += start.elapsed().as_micros() as u64;
         }
         Ok(())
     }

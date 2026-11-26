@@ -60,6 +60,25 @@ enum Work {
     Rpc(Request),
     Sight(SightPlan),
 }
+/// Independent admission budgets for the simulation thread.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RequestBudgets {
+    pub interactive: std::num::NonZeroUsize,
+    pub per_session: std::num::NonZeroUsize,
+    pub peers: std::num::NonZeroUsize,
+    pub administration: std::num::NonZeroUsize,
+}
+impl Default for RequestBudgets {
+    fn default() -> Self {
+        Self {
+            interactive: 32.try_into().unwrap(),
+            per_session: 8.try_into().unwrap(),
+            peers: 8.try_into().unwrap(),
+            administration: 8.try_into().unwrap(),
+        }
+    }
+}
 type Job = (Role, Work, SyncSender<Result<Response>>, Instant);
 struct SightAccess {
     rules: SightRanges,
@@ -76,6 +95,8 @@ pub struct WorkerEndpoint {
     broker: Option<Mutex<crate::network_mesh::Broker>>,
     service: Arc<Service>,
     requests: SyncSender<Job>,
+    peer_requests: SyncSender<Job>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
     management: SyncSender<Job>,
     downloads: Arc<Mutex<Downloads>>,
 }
@@ -89,6 +110,12 @@ pub struct WorkerLoop {
     pub peers: Option<crate::network_mesh::PeerMesh>,
     service: Arc<Service>,
     rx: Receiver<Job>,
+    peer_requests: Receiver<Job>,
+    budgets: RequestBudgets,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    next_lane: u8,
+    traffic: Vec<Arc<wire::Traffic>>,
+    last_detail: WorkerTimings,
     management: Receiver<Job>,
     downloads: Arc<Mutex<Downloads>>,
     staged: Option<(Handoff, Prepared)>,
@@ -107,13 +134,22 @@ struct LiveStream {
     last: Instant,
 }
 pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>, WorkerLoop) {
-    make_worker(service, initial, None)
+    make_worker(service, initial, None, RequestBudgets::default())
 }
 pub fn worker_with_sight(
     service: Arc<Service>,
     initial: BlobCache,
     rules: SightRanges,
     connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
+) -> (Arc<WorkerEndpoint>, WorkerLoop) {
+    worker_with_budgets(service, initial, rules, connect, RequestBudgets::default())
+}
+pub fn worker_with_budgets(
+    service: Arc<Service>,
+    initial: BlobCache,
+    rules: SightRanges,
+    connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
+    budgets: RequestBudgets,
 ) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     make_worker(
         service,
@@ -123,15 +159,19 @@ pub fn worker_with_sight(
             connect: Box::new(connect),
             directory: Mutex::default(),
         }),
+        budgets,
     )
 }
 fn make_worker(
     service: Arc<Service>,
     initial: BlobCache,
     sight: Option<SightAccess>,
+    budgets: RequestBudgets,
 ) -> (Arc<WorkerEndpoint>, WorkerLoop) {
-    let (tx, rx) = mpsc::sync_channel(32);
-    let (management, admin) = mpsc::sync_channel(8);
+    let (tx, rx) = mpsc::sync_channel(budgets.interactive.get());
+    let (peer_tx, peer_rx) = mpsc::sync_channel(budgets.peers.get());
+    let (management, admin) = mpsc::sync_channel(budgets.administration.get());
+    let pending = Arc::<std::sync::atomic::AtomicUsize>::default();
     let downloads = Arc::new(Mutex::new(Downloads {
         cache: initial,
         partial: None,
@@ -147,6 +187,8 @@ fn make_worker(
             broker,
             service: service.clone(),
             requests: tx,
+            peer_requests: peer_tx,
+            pending: pending.clone(),
             management,
             downloads: downloads.clone(),
         }),
@@ -163,6 +205,12 @@ fn make_worker(
             peers: None,
             service,
             rx,
+            peer_requests: peer_rx,
+            budgets,
+            pending,
+            next_lane: 0,
+            traffic: Vec::new(),
+            last_detail: WorkerTimings::default(),
             management: admin,
             downloads,
             staged: None,
@@ -308,22 +356,36 @@ impl WorkerEndpoint {
         Ok(response)
     }
     fn enqueue(&self, role: Role, work: Work) -> Result<Response> {
+        self.try_enqueue(role, work)?
+            .recv_timeout(Duration::from_secs(4))
+            .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
+    }
+    fn try_enqueue(&self, role: Role, work: Work) -> Result<Receiver<Result<Response>>> {
         let (tx, rx) = mpsc::sync_channel(1);
         let queue = if matches!(
             work,
             Work::Rpc(
-                Request::Health | Request::Shutdown | Request::Load { .. } | Request::Control(..)
+                Request::Health
+                    | Request::Telemetry
+                    | Request::Shutdown
+                    | Request::Load { .. }
+                    | Request::Control(..)
             )
         ) {
             &self.management
+        } else if matches!(work, Work::Rpc(Request::Push(_))) {
+            &self.peer_requests
         } else {
             &self.requests
         };
-        queue
-            .try_send((role, work, tx, Instant::now()))
-            .map_err(|_| Error::Busy("worker request queue"))?;
-        rx.recv_timeout(Duration::from_secs(4))
-            .map_err(|_| Error::Busy("response timeout; retry same action or transfer"))?
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if queue.try_send((role, work, tx, Instant::now())).is_err() {
+            self.pending
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(Error::Busy("worker request queue"));
+        }
+        Ok(rx)
     }
     /// Inspect the directory on its host when it is idle. No requests or sampling
     /// are scheduled by the mesh. Keep the callback short as it borrows the index.
@@ -486,7 +548,7 @@ impl Endpoint for WorkerEndpoint {
                 };
                 return self.player_page(viewer, *after, *known);
             }
-            Request::Health | Request::Shutdown => {
+            Request::Health | Request::Telemetry | Request::Shutdown => {
                 if role != Role::Operator {
                     return Err(Error::Denied);
                 }
@@ -582,11 +644,16 @@ impl Endpoint for WorkerEndpoint {
                     return Ok(Response::Control(a));
                 }
             }
+            Request::Push(_) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+            }
             Request::Sync { .. }
             | Request::Diagnostics
             | Request::Input(_)
-            | Request::Actions(_)
-            | Request::Push(_) => {}
+            | Request::Actions(_) => {}
             _ => return self.service.dispatch(role, request),
         }
         self.enqueue(role, Work::Rpc(request))
@@ -594,10 +661,13 @@ impl Endpoint for WorkerEndpoint {
 }
 fn exact(world: &World, db: &Store, t: Handoff, view: View) -> Result<Option<Snapshot>> {
     let mut snapshot = db.snapshot(t.group)?;
-    let (owner, revision) = world
-        .resource::<MeshState>()
-        .group_state(t.group)
-        .ok_or(Error::Fenced)?;
+    let Some((owner, revision)) = world.resource::<MeshState>().group_state(t.group) else {
+        db.check_authority(t.group, t.source, false)?;
+        if snapshot.records.is_empty() {
+            return Ok(Some(snapshot));
+        }
+        return Ok(None);
+    };
     if owner != t.source {
         return Err(Error::Fenced);
     }
@@ -647,6 +717,38 @@ fn flush_inputs(
     }
 }
 impl WorkerLoop {
+    /// Register independent socket counters once, before serving.
+    pub fn observe_transport(&mut self, traffic: Arc<wire::Traffic>) {
+        if !self.traffic.iter().any(|t| Arc::ptr_eq(t, &traffic)) {
+            self.traffic.push(traffic);
+        }
+    }
+    fn next_job(&mut self) -> Option<Job> {
+        // Across pump calls, every ready lane gets a turn even with a one-job time slice.
+        for _ in 0..3 {
+            let lane = self.next_lane;
+            self.next_lane = (lane + 1) % 3;
+            let job = match lane {
+                0 => self.management.try_recv().ok(),
+                1 => self.peer_requests.try_recv().ok(),
+                _ => self.turns.pop_front().and_then(|session| {
+                    let q = self.sessions.get_mut(&session)?;
+                    let job = q.pop_front()?;
+                    if q.is_empty() {
+                        self.sessions.remove(&session);
+                    } else {
+                        self.turns.push_back(session);
+                    }
+                    self.queued -= 1;
+                    Some(job)
+                }),
+            };
+            if job.is_some() {
+                return job;
+            }
+        }
+        None
+    }
     pub fn record_tick(&mut self, elapsed: Duration) {
         self.record_cycle(elapsed, Duration::ZERO, Duration::ZERO, Default::default());
     }
@@ -671,6 +773,7 @@ impl WorkerLoop {
         self.process.input_us = detail.input_us;
         self.process.action_us = detail.action_us;
         self.process.migration_us = detail.migration_us;
+        self.last_detail = detail;
         if busy.max(elapsed + lateness) > Duration::from_millis(50) {
             self.process.deadline_misses += 1;
         }
@@ -692,6 +795,11 @@ impl WorkerLoop {
     /// after the soft deadline. Both its target count and its bytes have hard limits.
     pub fn pump(&mut self, w: &mut World, max: usize, time: Duration) {
         let pump_start = Instant::now();
+        self.process.pending_requests = self.pending.load(std::sync::atomic::Ordering::Relaxed);
+        self.process.max_queue_depth = self
+            .process
+            .max_queue_depth
+            .max(self.process.pending_requests);
         if Instant::now() >= self.next_decision_check {
             self.streams
                 .retain(|_, s| s.last.elapsed() < Duration::from_secs(60));
@@ -719,19 +827,8 @@ impl WorkerLoop {
             }
         }
         let start = Instant::now();
-        // Admit reserved control work even when the ordinary round-robin is full.
-        for _ in 0..40 {
-            let administrative = (self.queued < 40)
-                .then(|| self.management.try_recv().ok())
-                .flatten();
-            let priority = administrative.is_some();
-            let Some(job) = administrative.or_else(|| {
-                if self.queued < 32 {
-                    self.rx.try_recv().ok()
-                } else {
-                    None
-                }
-            }) else {
+        for _ in self.queued..self.budgets.interactive.get() {
+            let Ok(job) = self.rx.try_recv() else {
                 break;
             };
             let session = match &job.1 {
@@ -739,6 +836,10 @@ impl WorkerLoop {
                     a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0))
                 }
                 Work::Rpc(Request::Input(i)) => i.session,
+                Work::Rpc(Request::SessionInputs(batch)) => batch
+                    .first()
+                    .map_or(Id::numbered(0), |i| i.binding.session.0),
+                Work::Rpc(Request::SessionProgress(binding)) => binding.session.0,
                 Work::Rpc(Request::Sync { session, .. }) => *session,
                 Work::Sight(_) => match job.0 {
                     Role::Player(id) => id,
@@ -748,22 +849,16 @@ impl WorkerLoop {
                 _ => Id::numbered(0),
             };
             let queue = self.sessions.entry(session).or_default();
-            if !priority && queue.len() >= 8 {
+            if queue.len() >= self.budgets.per_session.get() {
+                self.pending
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 let _ = job.2.send(Err(Error::Busy("per-session request queue")));
                 continue;
             }
             if queue.is_empty() {
-                if priority {
-                    self.turns.push_front(session);
-                } else {
-                    self.turns.push_back(session);
-                }
+                self.turns.push_back(session);
             }
-            if priority {
-                queue.push_front(job);
-            } else {
-                queue.push_back(job);
-            }
+            queue.push_back(job);
             self.queued += 1;
             self.process.max_queue_depth = self.process.max_queue_depth.max(self.queued);
         }
@@ -782,28 +877,29 @@ impl WorkerLoop {
             if start.elapsed() >= time {
                 break;
             }
-            let Some(session) = self.turns.pop_front() else {
+            let Some((role, req, reply, enqueued)) = self.next_job() else {
                 break;
             };
-            let queue = self.sessions.get_mut(&session).unwrap();
-            let (role, req, reply, enqueued) = queue.pop_front().unwrap();
+            self.process.pending_requests = self
+                .pending
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                - 1;
             self.queue_wait = self.queue_wait.max(enqueued.elapsed());
-            if queue.is_empty() {
-                self.sessions.remove(&session);
-            } else {
-                self.turns.push_back(session)
-            }
-            self.queued -= 1;
             let req = match req {
                 Work::Rpc(r) => r,
                 Work::Subscriber(poll, plan) => {
                     flush_inputs(w, &mut samples, &mut replies);
+                    let start = Instant::now();
                     let result = self.stream(w, poll, plan);
+                    if let Some(mut t) = w.get_resource_mut::<WorkerTimings>() {
+                        t.subscriber_us += start.elapsed().as_micros() as u64;
+                    }
                     let _ = reply.send(result);
                     continue;
                 }
                 Work::Sight(plan) => {
                     flush_inputs(w, &mut samples, &mut replies);
+                    let start = Instant::now();
                     let result = match role {
                         Role::Player(viewer) => {
                             crate::sight::sight_page(w, viewer, self.service.worker, plan)
@@ -811,6 +907,9 @@ impl WorkerLoop {
                         }
                         _ => Err(Error::Denied),
                     };
+                    if let Some(mut t) = w.get_resource_mut::<WorkerTimings>() {
+                        t.subscriber_us += start.elapsed().as_micros() as u64;
+                    }
                     let _ = reply.send(result);
                     continue;
                 }
@@ -829,6 +928,30 @@ impl WorkerLoop {
             let action = matches!(req, Request::Actions(_));
             let migration = matches!(req, Request::Control(..));
             let result = match req {
+                Request::Telemetry => {
+                    let mut result = WorkerTelemetry {
+                        process: self.process,
+                        spatial_routing_us: self.last_detail.spatial_routing_us,
+                        peer_publish_us: self.last_detail.peer_publish_us,
+                        subscriber_us: self.last_detail.subscriber_us,
+                        pending_input_bindings: w
+                            .get_resource::<SessionIngress>()
+                            .map_or(0, SessionIngress::pending),
+                        pending_checkpoint_bytes: w
+                            .get_resource::<AsyncCheckpoints>()
+                            .map_or(0, |c| c.pending().1),
+                        subscriber_unacked_bytes: self
+                            .streams
+                            .values()
+                            .map(|s| s.view.unacked_bytes())
+                            .sum(),
+                        ..Default::default()
+                    };
+                    for counters in &self.traffic {
+                        counters.add_to(&mut result);
+                    }
+                    Ok(Response::Telemetry(result))
+                }
                 Request::Health => self.service.store.drain_status(self.service.worker).map(
                     |(draining, groups)| Response::Health {
                         worker: self.service.worker,
@@ -877,10 +1000,7 @@ impl WorkerLoop {
                             .tick_us
                             .max(hints.and_then(|h| h.0.values().copied().max()).unwrap_or(0)),
                         cache_bytes: cache.bytes() as u64,
-                        process: ProcessLoad {
-                            pending_requests: self.queued,
-                            ..self.process
-                        },
+                        process: self.process,
                         groups: w.resource::<MeshState>().owned_groups().count(),
                         group_us: group.and_then(|g| hints?.0.get(&g).copied()),
                         affinity: group
@@ -1307,6 +1427,69 @@ pub fn migrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saturated_sessions_leave_peer_and_operator_turns_available() -> Result<()> {
+        let db = Store::open(":memory:")?;
+        let here = db.start_worker(1)?;
+        let other = db.start_worker(2)?;
+        let mut app = bevy_app::App::new();
+        app.add_plugins(MeshPlugin::persistent(db.clone(), here));
+        app.update();
+        let service = Arc::new(Service {
+            worker: here,
+            store: db.clone(),
+            actions: Default::default(),
+            providers: Default::default(),
+            replicas: Default::default(),
+            bulk: Default::default(),
+        });
+        let (endpoint, mut worker) = worker(service, BlobCache::default());
+        worker.peers = Some(crate::network_mesh::PeerMesh::new(db, here, |_| {
+            Err(Error::Denied)
+        }));
+        let player = Role::Player(Id::numbered(0));
+        let job = || Work::Rpc(Request::Diagnostics);
+        let mut public = Vec::new();
+        for _ in 0..worker.budgets.interactive.get() {
+            public.push(endpoint.try_enqueue(player, job())?);
+        }
+        assert!(matches!(
+            endpoint.try_enqueue(player, job()),
+            Err(Error::Busy(_))
+        ));
+        assert!(matches!(
+            endpoint.dispatch(player, Request::Push(vec![])),
+            Err(Error::Denied)
+        ));
+        assert!(matches!(
+            endpoint.dispatch(player, Request::Telemetry),
+            Err(Error::Denied)
+        ));
+        let peer = endpoint.try_enqueue(Role::Worker(other), Work::Rpc(Request::Push(vec![])))?;
+        let admin = endpoint.try_enqueue(Role::Operator, Work::Rpc(Request::Health))?;
+        for _ in 0..3 {
+            worker.pump(app.world_mut(), 1, Duration::from_secs(1));
+        }
+        assert!(matches!(
+            admin.try_recv().unwrap()?,
+            Response::Health { ready: true, .. }
+        ));
+        assert!(matches!(peer.try_recv().unwrap()?, Response::Applied(_)));
+        assert!(matches!(public[0].try_recv().unwrap(), Err(Error::Denied)));
+        assert!(matches!(
+            public.last().unwrap().try_recv().unwrap(),
+            Err(Error::Busy(_))
+        ));
+        // Placement must see work performed between ECS ticks, including backpressure.
+        worker.queue_wait = Duration::from_millis(70);
+        worker.request_work += Duration::from_millis(55);
+        worker.record_tick(Duration::from_micros(1));
+        assert!(worker.process.request_work_us >= 55_000);
+        assert_eq!(worker.process.deadline_misses, 1);
+        assert!(worker.tick_us >= 70_000 / 8);
+        assert!(worker.process.max_queue_depth >= 34);
+        Ok(())
+    }
     #[test]
     fn preview_and_freeze_wait_for_a_committed_spawn_before_the_next_tick() -> Result<()> {
         let db = Store::open(":memory:")?;

@@ -1,5 +1,6 @@
 //! Versioned, deterministic workloads for release builds on Windows and Linux.
 use infinite_stars::{host::*, *};
+use is_mesh::{wire::*, *};
 use serde_json::{json, Value};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -13,7 +14,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use is_mesh::{wire::*, *};
 
 struct CountAlloc;
 static ALLOCS: AtomicU64 = AtomicU64::new(0);

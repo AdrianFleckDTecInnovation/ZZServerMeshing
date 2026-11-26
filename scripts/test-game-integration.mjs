@@ -4,12 +4,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
 // Build the documented example as a separate Cargo project against the committed checkout.
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
 const revision = git('rev-parse', 'HEAD').trim();
-const modified = git('status', '--porcelain', '--', 'crates/is-mesh').trim().length > 0;
+const modified = git('status', '--porcelain', '--', 'crates/is-mesh/Cargo.toml',
+  'crates/is-mesh/src', 'crates/is-mesh/examples').trim().length > 0;
 const library = modified
   ? `{ path = ${JSON.stringify(resolve(repo, 'crates/is-mesh').replaceAll('\\', '/'))} }`
   : `{ git = "${pathToFileURL(repo).href}", rev = "${revision}" }`;
@@ -20,6 +22,9 @@ try {
   writeFileSync(join(game,'Cargo.lock'),readFileSync(join(repo,'Cargo.lock')));
   writeFileSync(join(game, 'src', 'main.rs'), example('persistent_game'));
   writeFileSync(join(game, 'src/bin/session_game.rs'), example('session_game'));
+  const probe = readFileSync(join(repo, 'crates/zz-mesh/examples/store_roundtrip.rs'), 'utf8');
+  writeFileSync(join(game, 'src/bin/store_roundtrip.rs'), probe.replace('use zz_mesh::*;', 'use is_mesh::*;'));
+  writeFileSync(join(game, 'original.sqlite'), gunzipSync(readFileSync(join(repo, 'crates/zz-mesh/tests/fixtures/15739c8.sqlite.gz'))));
   writeFileSync(join(game, 'Cargo.toml'), `[package]
 name = "mesh-game-smoke"
 version = "0.1.0"
@@ -41,6 +46,13 @@ serde = { version = "1", features = ["derive"] }
     console.log(result);
   }
   execFileSync('cargo', ['run', '--quiet', '--locked', '--bin', 'session_game'], { cwd: game, env, stdio: 'inherit' });
+  const fingerprint = mode => execFileSync('cargo',
+    ['run','--quiet','--locked','--bin','store_roundtrip','--',mode,mode === 'read' ? 'original.sqlite' : 'current.sqlite'],
+    {cwd:game, env, encoding:'utf8'}).trim();
+  const expected = readFileSync(join(repo,'crates/zz-mesh/tests/fixtures/15739c8.txt'),'utf8').trim();
+  assert.equal(fingerprint('read'), expected);
+  assert.equal(fingerprint('write'), expected);
+  console.log('Original checkpoint, global child ID, schema, snapshot hash and wire fixtures passed.');
   console.log(`Game integration passed at ${modified ? 'working tree based on ' : ''}${revision}`);
 } finally {
   rmSync(game, { recursive: true, force: true });

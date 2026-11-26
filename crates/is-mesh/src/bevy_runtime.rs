@@ -153,6 +153,29 @@ const CHECKPOINT_PERIOD: usize = 20;
 #[derive(Resource)]
 pub struct SpatialDependencies(pub BTreeSet<u32>);
 
+/// Call when an external frame transform changes or expires. Re-evaluate only its members.
+/// Both spatial callbacks must return coordinates in the same currently valid comparison frame.
+pub fn refresh_spatial(world: &mut World, ids: &[Id]) {
+    if let Some(mut source) = world.get_resource_mut::<SubscriberSource>() {
+        for &id in ids {
+            source.invalidate_spatial(id);
+        }
+    }
+    if world.contains_resource::<Node>() {
+        let mut state = world.resource_mut::<MeshState>();
+        for &id in ids {
+            state
+                .dirty
+                .entry(id)
+                .and_modify(|c| c.spatial = true)
+                .or_insert(ObjectChange {
+                    spatial: true,
+                    fields: ChangedFields::SpatialOnly,
+                });
+        }
+    }
+}
+
 pub(crate) struct ObjectChange {
     pub(crate) spatial: bool,
     // None denotes a lifecycle change that invalidates every field.
@@ -163,6 +186,7 @@ pub(crate) struct ObjectChange {
 pub(crate) enum ChangedFields {
     #[default]
     All,
+    SpatialOnly,
     Inline([u32; 2]),
     More(Box<Vec<u32>>),
 }
@@ -173,6 +197,7 @@ impl ChangedFields {
     fn add(&mut self, id: u32) {
         match self {
             Self::All => (),
+            Self::SpatialOnly => *self = Self::new(id),
             Self::Inline(v) if v.contains(&id) => (),
             Self::Inline(v) if v[1] == 0 => v[1] = id,
             Self::Inline(v) => *self = Self::More(Box::new(vec![v[0], v[1], id])),
@@ -186,6 +211,7 @@ impl ChangedFields {
     pub(crate) fn slice(&self) -> Option<&[u32]> {
         match self {
             Self::All => None,
+            Self::SpatialOnly => Some(&[]),
             Self::Inline(v) => Some(if v[1] == 0 { &v[..1] } else { v }),
             Self::More(v) => Some(v),
         }
@@ -506,7 +532,20 @@ impl Plugin for MeshPlugin {
             });
             app.insert_resource(n.0.clone()).insert_resource(n);
         }
-        app.add_systems(
+        app.configure_sets(
+            PreUpdate,
+            (
+                MeshSystems::Ingress,
+                MeshSystems::Authority,
+                MeshSystems::Control,
+            )
+                .chain(),
+        )
+        .configure_sets(
+            PostUpdate,
+            (TrackFields, MeshSystems::Track, MeshSystems::Output).chain(),
+        )
+        .add_systems(
             PreUpdate,
             (pull, discover).chain().in_set(MeshSystems::Authority),
         )
@@ -521,6 +560,10 @@ impl Plugin for MeshPlugin {
 }
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum MeshSystems {
+    /// Trusted adapter commands, external revocations and spawns. Deferred commands are applied before authority/input checks.
+    Ingress,
+    /// Extract subscriber state after gameplay, field tracking and spatial indexing.
+    Output,
     /// Restore and fence ownership, then discover newly spawned objects in PreUpdate.
     Authority,
     /// Validate external control before ordinary gameplay runs in Update.

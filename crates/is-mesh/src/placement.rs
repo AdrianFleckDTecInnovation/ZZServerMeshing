@@ -64,6 +64,26 @@ pub struct WorkerTimings {
     pub input_us: u64,
     pub action_us: u64,
     pub migration_us: u64,
+    pub spatial_routing_us: u64,
+    pub peer_publish_us: u64,
+    pub subscriber_us: u64,
+}
+/// Phase times are nested within ECS, peer or request work. Byte and codec
+/// counters are cumulative per worker process, including coordination sockets.
+#[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct WorkerTelemetry {
+    pub process: ProcessLoad,
+    pub spatial_routing_us: u64,
+    pub peer_publish_us: u64,
+    pub subscriber_us: u64,
+    pub pending_input_bindings: usize,
+    pub pending_checkpoint_bytes: usize,
+    pub subscriber_unacked_bytes: usize,
+    pub request_bytes_in_service: u64,
+    pub transport_in_bytes: u64,
+    pub transport_out_bytes: u64,
+    pub encode_cpu_ns: u64,
+    pub decode_cpu_ns: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {

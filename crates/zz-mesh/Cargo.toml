@@ -6,4 +6,4 @@ publish = false
 description = "Compatibility import for InfiniteStars Server Meshing"
 
 [dependencies]
-is-mesh = { path = "../is-mesh" }
+is-mesh = { version = "1.0.0", path = "../is-mesh" }

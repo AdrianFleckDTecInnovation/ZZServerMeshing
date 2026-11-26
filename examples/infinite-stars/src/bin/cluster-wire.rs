@@ -5,6 +5,10 @@ use infinite_stars::{
     host::{identity, init_tls, provision_worker, service, worker_name},
     world, Inventory, Player, Position, PLANET_ID, STONE,
 };
+use is_mesh::{
+    wire::{Client, Endpoint, Listener, Request, Response, Role},
+    *,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -17,10 +21,6 @@ use std::{
     sync::{atomic::Ordering::Relaxed, mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
-};
-use is_mesh::{
-    wire::{Client, Endpoint, Listener, Request, Response, Role},
-    *,
 };
 const MEMBERS: usize = 8;
 type Point = [i64; 3];

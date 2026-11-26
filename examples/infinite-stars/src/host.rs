@@ -1,11 +1,11 @@
 use crate::*;
+use is_mesh::wire::{Identity, Role, Service};
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use is_mesh::wire::{Identity, Role, Service};
 
 pub(crate) fn write_new_credential(path: &Path, data: &[u8]) -> mesh::Result<()> {
     use std::io::Write;
@@ -28,8 +28,10 @@ pub(crate) struct HostLimits {
     tick_budget_us: u64,
     memory_bytes: u64,
     cpu_cores: std::num::NonZeroUsize,
+    cpu_ids: Option<Vec<usize>>,
     internal_connections: Option<std::num::NonZeroUsize>,
     reference_players: bool,
+    requests: mesh::remote::RequestBudgets,
     subscriber: SubscriberPolicy,
     checkpoint_groups: usize,
     checkpoint_bytes: std::num::NonZeroUsize,
@@ -44,6 +46,8 @@ impl Default for HostLimits {
             cpu_cores: std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
             internal_connections: None,
             reference_players: true,
+            requests: Default::default(),
+            cpu_ids: None,
             subscriber: Default::default(),
             checkpoint_groups: 0,
             checkpoint_bytes: (8 * 1024 * 1024).try_into().unwrap(),
@@ -67,6 +71,9 @@ impl HostLimits {
             return Err(invalid(format!(
                 "cpu_cores exceeds {available} available processors"
             )));
+        }
+        if limits.cpu_cores != available || limits.cpu_ids.is_some() {
+            apply_cpu_budget(limits.cpu_cores, limits.cpu_ids.as_deref())?;
         }
         // Bevy 0.15 initializes its process-wide pools once, before the first World.
         bevy::core::TaskPoolOptions::with_num_threads(limits.cpu_cores.get())
@@ -318,20 +325,34 @@ pub(crate) fn run_node(
     );
     let ca = fs::read(dir.join("ca.der"))?;
     let registry = db.clone();
+    let traffic = Arc::<mesh::wire::Traffic>::default();
+    let outbound = traffic.clone();
     let connect = move |target: Worker| {
         let name = if distributed {
             crate::deployment::worker_dns(target.slot)
         } else {
             "localhost".into()
         };
-        mesh::wire::Client::connect(registry.address(target)?, &name, &ca, &cred)
+        mesh::wire::Client::connect_counted(
+            registry.address(target)?,
+            &name,
+            &ca,
+            &cred,
+            outbound.clone(),
+        )
     };
-    let (svc, mut event_loop) = mesh::remote::worker_with_sight(
+    let (svc, mut event_loop) = mesh::remote::worker_with_budgets(
         service(&db, w),
         app.world().resource::<BlobCache>().clone(),
         app.world().resource::<SightRanges>().clone(),
         connect.clone(),
+        limits.requests,
     );
+    event_loop.observe_transport(listener.traffic.clone());
+    event_loop.observe_transport(traffic);
+    if let Some(traffic) = db.network_traffic() {
+        event_loop.observe_transport(traffic);
+    }
     event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(db.clone(), w, connect));
     event_loop.cpu_budget = limits.cpu_cores;
     let connections = limits

@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
 use is_mesh::*;
+use std::collections::{BTreeMap, BTreeSet};
 fn w(n: u32) -> Worker {
     Worker {
         slot: n,

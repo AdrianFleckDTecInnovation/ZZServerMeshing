@@ -21,6 +21,12 @@ struct FieldVersions {
     fields: Vec<(u32, u64)>,
 }
 impl SubscriberSource {
+    pub(crate) fn invalidate_spatial(&mut self, id: Id) {
+        self.spatial = self.spatial.wrapping_add(1);
+        if let Some(p) = &mut self.pending {
+            p.insert(id);
+        }
+    }
     pub(crate) fn changed(
         &mut self,
         id: Id,
@@ -66,7 +72,12 @@ impl bevy_app::Plugin for LocalSubscriberPlugin {
         app.init_resource::<SubscriberSource>()
             .init_resource::<LocalIndex>();
         app.world_mut().resource_mut::<SubscriberSource>().pending = Some(BTreeSet::new());
-        app.add_systems(bevy_app::PostUpdate, index_local.after(MeshSystems::Track));
+        app.add_systems(
+            bevy_app::PostUpdate,
+            index_local
+                .after(MeshSystems::Track)
+                .before(MeshSystems::Output),
+        );
     }
 }
 fn index_local(world: &mut World) {
@@ -359,6 +370,7 @@ impl Default for SubscriberEncoder {
     }
 }
 struct PendingFrame {
+    bytes: usize,
     seq: u64,
     tick: u64,
     changes: Vec<(Id, Option<Known>)>,
@@ -378,6 +390,10 @@ pub struct SubscriberStream {
     allowance: Option<(u64, usize, usize)>,
 }
 impl SubscriberStream {
+    /// Budgeted application payload awaiting confirmation in this source stream.
+    pub fn unacked_bytes(&self) -> usize {
+        self.pending.as_ref().map_or(0, |p| p.bytes)
+    }
     pub fn open(
         directory: &SessionDirectory,
         binding: ControlBinding,
@@ -562,6 +578,9 @@ impl SubscriberStream {
                     let Some((frame, point)) = (w.resource::<SightRule>().0)(w, e) else {
                         continue;
                     };
+                    let Some(point) = rules.current_target(w, e, plan.origin, frame, point) else {
+                        continue;
+                    };
                     if id == actor || plan.origin.includes(&rules.radii, frame, point) {
                         visible.insert(
                             id,
@@ -632,6 +651,7 @@ impl SubscriberStream {
         }
         let mut events = Vec::new();
         let mut changes = Vec::new();
+        let mut fences = BTreeMap::<Worker, BTreeMap<Id, Authority>>::new();
         let mut bytes = 0;
         if self.reset {
             events.push(SubscriberEvent::Reset);
@@ -712,10 +732,6 @@ impl SubscriberStream {
                 .get(&key)
                 .is_some_and(|v| v.known.stamp == stamp)
             {
-                // Check the actual writer even when an ECS world has not seen a cutover notice yet.
-                if let Some(db) = w.get_resource::<Store>() {
-                    db.check_authority(m.group, grant, true)?;
-                }
                 let view = if private {
                     View::Client {
                         principal: actor,
@@ -806,6 +822,9 @@ impl SubscriberStream {
             if bytes + cost > byte_limit {
                 break;
             }
+            if w.contains_resource::<Store>() {
+                fences.entry(worker).or_default().insert(m.group, grant);
+            }
             bytes += cost;
             events.push(event);
             changes.push((id, Some(p.known.clone())));
@@ -813,6 +832,22 @@ impl SubscriberStream {
         }
         if events.is_empty() {
             return Ok(None);
+        }
+        // Fence every emitted projection, including shared cache hits. Validate
+        // once per batch of distinct groups at the source, before publishing.
+        for (worker, grants) in fences {
+            let db = source.world(worker)?.resource::<Store>();
+            let ids: Vec<_> = grants.keys().copied().collect();
+            for batch in ids.chunks(MAX_TARGETS) {
+                let states = db.group_states(batch, Some(worker))?;
+                if batch
+                    .iter()
+                    .any(|id| states.get(id) != Some(&(grants[id], false)))
+                {
+                    self.clear();
+                    return Err(Error::Fenced);
+                }
+            }
         }
         self.reset = false;
         self.allowance = Some((
@@ -825,6 +860,7 @@ impl SubscriberStream {
             .checked_add(1)
             .ok_or_else(|| invalid("subscriber sequence exhausted"))?;
         self.pending = Some(PendingFrame {
+            bytes,
             seq: self.sequence,
             tick: source.tick(),
             changes,

@@ -1,8 +1,8 @@
 //! Game-owned schemas and rules. This crate is also an external API consumer.
 use bevy::prelude::*;
+use is_mesh::{self as mesh, *};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use is_mesh::{self as mesh, *};
 pub mod data;
 pub mod deployment;
 pub mod host;

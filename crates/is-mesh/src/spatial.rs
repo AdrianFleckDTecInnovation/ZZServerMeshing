@@ -25,6 +25,21 @@ impl Box3 {
         }
         Ok(Self { frame, lo, hi })
     }
+    /// Checked translation into a game-chosen comparison frame. Overflow or missing transforms
+    /// should suppress the presence until a fresh valid transform is available.
+    pub fn translated(self, frame: Id, offset: [i64; 3]) -> Result<Self> {
+        let mut out = self;
+        out.frame = frame;
+        for (axis, delta) in offset.into_iter().enumerate() {
+            out.lo[axis] = self.lo[axis]
+                .checked_add(delta)
+                .ok_or_else(|| invalid("frame translation overflow"))?;
+            out.hi[axis] = self.hi[axis]
+                .checked_add(delta)
+                .ok_or_else(|| invalid("frame translation overflow"))?;
+        }
+        Ok(out)
+    }
     pub fn intersects(self, b: Self) -> bool {
         self.frame == b.frame && self.overlaps_axes(&b)
     }
@@ -144,7 +159,7 @@ impl Directory {
         let changed = self.sight_points.get(&id).copied() != d.sight
             || self.presence(id).is_none_or(|p| {
                 p.owner != d.presence.owner
-                    || p.bounds.frame != d.presence.bounds.frame
+                    || p.bounds != d.presence.bounds
                     || p.principal != d.presence.principal
             });
         self.describe_physics(d.presence, d.area)?;

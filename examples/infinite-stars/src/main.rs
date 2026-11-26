@@ -1,4 +1,8 @@
 use infinite_stars::{host::*, prediction::*, *};
+use is_mesh::{
+    wire::{Client, Request, Response},
+    *,
+};
 use rusqlite::{Connection, OptionalExtension};
 use std::{
     fs,
@@ -6,10 +10,6 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
-};
-use is_mesh::{
-    wire::{Client, Request, Response},
-    *,
 };
 mod supervisor;
 
@@ -110,14 +110,18 @@ fn run() -> Result<()> {
             argument(args.next(), "target slot")?,
         ),
         "abort" => abort(&dir, argument(args.next(), "target slot")?),
-        "health" | "shutdown" => {
+        "health" | "metrics" | "shutdown" => {
             let addr = argument(args.next(), "worker address")?;
-            let request = if mode == "health" {
-                Request::Health
-            } else {
-                Request::Shutdown
+            let request = match mode.as_str() {
+                "health" => Request::Health,
+                "metrics" => Request::Telemetry,
+                _ => Request::Shutdown,
             };
             match connect(&dir, addr, "operator")?.call(&request)? {
+                Response::Telemetry(report) => {
+                    println!("{}", serde_json::json!(report));
+                    Ok(())
+                }
                 Response::Stopped => {
                     println!("Worker stopped");
                     Ok(())

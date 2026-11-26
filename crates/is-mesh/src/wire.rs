@@ -77,6 +77,7 @@ pub enum Request {
     SubscriberSources(ControlBinding, SubscriberId),
     SubscriberPoll(StreamPoll),
     SubscriberPlan(StreamPoll, Worker),
+    Telemetry,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -129,6 +130,7 @@ pub enum Response {
         load: ProcessLoad,
     },
     Stopped,
+    Telemetry(WorkerTelemetry),
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -145,6 +147,7 @@ impl Endpoint for Service {
     fn dispatch(&self, role: Role, r: Request) -> Result<Response> {
         match r {
             Request::Storage(_)
+            | Request::Telemetry
             | Request::Health
             | Request::Shutdown
             | Request::SessionInputs(_)
@@ -383,6 +386,7 @@ pub fn direct(service: &dyn Endpoint, role: Role, req: Request) -> Result<Respon
 }
 #[derive(Default)]
 pub struct Traffic {
+    pub in_service: AtomicU64,
     pub sent: AtomicU64,
     pub received: AtomicU64,
     pub payload_out: AtomicU64,
@@ -391,6 +395,15 @@ pub struct Traffic {
     pub decode_ns: AtomicU64,
     pub encode_cycles: AtomicU64,
     pub decode_cycles: AtomicU64,
+}
+impl Traffic {
+    pub(crate) fn add_to(&self, report: &mut WorkerTelemetry) {
+        report.request_bytes_in_service += self.in_service.load(Ordering::Relaxed);
+        report.transport_in_bytes += self.received.load(Ordering::Relaxed);
+        report.transport_out_bytes += self.sent.load(Ordering::Relaxed);
+        report.encode_cpu_ns += self.encode_ns.load(Ordering::Relaxed);
+        report.decode_cpu_ns += self.decode_ns.load(Ordering::Relaxed);
+    }
 }
 struct Counted(TcpStream, Arc<Traffic>);
 impl Read for Counted {
@@ -438,6 +451,9 @@ fn framed<T: Serialize>(w: &mut impl Write, value: &T, stats: &Traffic) -> Resul
     Ok(())
 }
 fn receive<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<T> {
+    receive_sized(r, stats).map(|(value, _)| value)
+}
+fn receive_sized<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<(T, usize)> {
     let mut h = [0; 10];
     r.read_exact(&mut h)?;
     if h[..4] != MAGIC || u16::from_le_bytes([h[4], h[5]]) != WIRE_VERSION {
@@ -460,7 +476,7 @@ fn receive<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<T>
     stats
         .decode_ns
         .fetch_add(thread_cpu_ns().saturating_sub(now), Ordering::Relaxed);
-    Ok(v)
+    Ok((v, n))
 }
 #[derive(Clone)]
 pub struct Identity {
@@ -497,7 +513,7 @@ impl Client {
     pub fn connect(addr: SocketAddr, name: &str, ca: &[u8], id: &Identity) -> Result<Self> {
         Self::connect_counted(addr, name, ca, id, Arc::default())
     }
-    pub(crate) fn connect_counted(
+    pub fn connect_counted(
         addr: SocketAddr,
         name: &str,
         ca: &[u8],
@@ -615,13 +631,15 @@ impl Listener {
                     let role = peers(digest(cert.as_ref()))?;
                     let mut stream = StreamOwned::new(conn, socket);
                     for _ in 0..4096 {
-                        let req = receive(&mut stream, &stats)?;
+                        let (req, bytes) = receive_sized(&mut stream, &stats)?;
+                        stats.in_service.fetch_add(bytes as u64, Ordering::Relaxed);
                         let answer = svc
                             .dispatch(role, req)
                             .unwrap_or_else(|e| Response::Error(e.to_string()));
                         let retiring =
                             matches!(answer, Response::Stopped) && role == Role::Operator;
                         let sent = framed(&mut stream, &answer, &stats);
+                        stats.in_service.fetch_sub(bytes as u64, Ordering::Relaxed);
                         if retiring {
                             stopping.store(true, Ordering::Release);
                             sent?;

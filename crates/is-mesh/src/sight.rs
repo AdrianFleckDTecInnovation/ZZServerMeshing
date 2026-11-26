@@ -22,15 +22,52 @@ pub struct SightRanges {
     observer_kind: u32,
     pub(crate) radii: BTreeMap<u32, u64>,
     max: u64,
+    bounds_kinds: BTreeSet<u32>,
 }
 impl SightRanges {
     pub fn millimetres(observer_kind: u32, radii: impl IntoIterator<Item = (u32, u64)>) -> Self {
         let radii: BTreeMap<_, _> = radii.into_iter().collect();
         Self {
             observer_kind,
+            bounds_kinds: Default::default(),
             max: radii.values().copied().max().unwrap_or(0),
             radii,
         }
+    }
+    /// For these target kinds, sight ends at the nearest point of their registered physical AABB.
+    /// Other kinds keep their exact game-provided anchor. Use the same policy on all workers.
+    pub fn with_bounds(mut self, kinds: impl IntoIterator<Item = u32>) -> Self {
+        self.bounds_kinds.extend(kinds);
+        self
+    }
+    fn target(&self, origin: SightOrigin, point: SightPoint, bounds: Box3) -> SightPoint {
+        if self.bounds_kinds.contains(&point.kind) {
+            SightPoint {
+                kind: point.kind,
+                mm: std::array::from_fn(|axis| {
+                    origin.mm[axis].clamp(bounds.lo[axis], bounds.hi[axis])
+                }),
+            }
+        } else {
+            point
+        }
+    }
+    pub(crate) fn current_target(
+        &self,
+        world: &World,
+        entity: Entity,
+        origin: SightOrigin,
+        frame: Id,
+        point: SightPoint,
+    ) -> Option<SightPoint> {
+        if !self.bounds_kinds.contains(&point.kind) {
+            return Some(point);
+        }
+        let bounds = (world.get_resource::<SpatialRule>()?.0)(world, entity)?.bounds;
+        if bounds.frame != frame || (0..3).any(|a| bounds.lo[a] > bounds.hi[a]) {
+            return None;
+        }
+        Some(self.target(origin, point, bounds))
     }
 }
 impl SightOrigin {
@@ -138,9 +175,13 @@ impl Directory {
                 continue;
             }
             if let Some(target) = self.presence(id) {
-                if point_for(&target)
-                    .is_some_and(|point| origin.includes(&rules.radii, target.bounds.frame, point))
-                {
+                if point_for(&target).is_some_and(|point| {
+                    origin.includes(
+                        &rules.radii,
+                        target.bounds.frame,
+                        rules.target(origin, point, target.bounds),
+                    )
+                }) {
                     visit(id, target.owner);
                 }
             }
@@ -236,6 +277,12 @@ pub(crate) fn sight_page(
             continue;
         };
         let Some((frame, point)) = classify(world, entity) else {
+            continue;
+        };
+        let rules = world
+            .get_resource::<SightRanges>()
+            .ok_or_else(|| invalid("missing sight ranges"))?;
+        let Some(point) = rules.current_target(world, entity, origin, frame, point) else {
             continue;
         };
         if !origin.includes(&plan.radii, frame, point) {

@@ -6,6 +6,10 @@ use crate::{
     },
     *,
 };
+use is_mesh::{
+    authority_store::AuthorityService,
+    wire::{Client, Endpoint, Identity, Listener, Request, Response, Role},
+};
 use rcgen::{Certificate, CertificateParams, ExtendedKeyUsagePurpose, KeyPair, PublicKeyData};
 use rusqlite::{Connection, OptionalExtension};
 use std::{
@@ -13,10 +17,6 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-};
-use is_mesh::{
-    authority_store::AuthorityService,
-    wire::{Client, Endpoint, Identity, Listener, Request, Response, Role},
 };
 
 const STORE_DNS: &str = "authority.mesh.internal";

@@ -1,11 +1,11 @@
 use crate::{movement::Drive, Chunk, Player, Position, Ship, CHUNK, PLAYER, POSITION, SHIP};
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 use is_mesh::{
     invalid, Box3, Demand, Detail, Managed, Result, SightPoint, SightRanges, SightRule,
     SpatialProfile, SpatialRule,
 };
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 
 /// The configuration file uses metres. The runtime uses integer millimetres.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Resource, Serialize, Deserialize)]

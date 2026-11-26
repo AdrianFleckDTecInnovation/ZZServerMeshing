@@ -32,6 +32,161 @@ fn ids(records: &std::collections::BTreeMap<Id, Record>) -> Vec<Id> {
 }
 
 #[test]
+fn a_blocked_bulk_transfer_keeps_input_and_subscriber_service_within_budget() -> is_mesh::Result<()>
+{
+    use std::{
+        sync::{mpsc, Arc, Mutex},
+        time::{Duration, Instant, SystemTime},
+    };
+    #[derive(Component, serde::Serialize, serde::Deserialize)]
+    struct ChunkRef(Manifest);
+    struct Source {
+        manifest: Manifest,
+        bytes: Arc<[u8]>,
+        waiting: mpsc::Sender<()>,
+        release: Arc<Mutex<mpsc::Receiver<()>>>,
+    }
+    impl DataProvider for Source {
+        fn schema(&self) -> u32 {
+            self.manifest.key.provider
+        }
+        fn describe(&self, key: DataKey) -> is_mesh::Result<Manifest> {
+            if key != self.manifest.key {
+                return Err(invalid("unknown test chunk"));
+            }
+            Ok(self.manifest.clone())
+        }
+        fn snapshot(&self, _: &Manifest) -> is_mesh::Result<Vec<u8>> {
+            self.waiting
+                .send(())
+                .map_err(|_| invalid("bulk test stopped"))?;
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| invalid("bulk release timed out"))?;
+            Ok(self.bytes.to_vec())
+        }
+    }
+    let db = Store::open(":memory:")?;
+    let a = db.start_worker(1)?;
+    let b = db.start_worker(2)?;
+    let bytes: Arc<[u8]> = vec![37; 1024 * 1024].into();
+    let hash = digest(&bytes);
+    let chunk = Id::new();
+    let manifest = Manifest {
+        key: DataKey {
+            provider: 700,
+            object: chunk,
+            part: 1,
+        },
+        revision: 3,
+        basis: Basis::Artifact(hash),
+        hash,
+        length: bytes.len() as u64,
+        dependencies: vec![],
+    };
+    let (started, waiting) = mpsc::channel();
+    let (resume, gate) = mpsc::channel();
+    let gate = Arc::new(Mutex::new(gate));
+    let mut pool = Pool::new(db.clone(), 128);
+    let actor = Id::new();
+    for worker in [a, b] {
+        let mut app = world(&db, worker);
+        app.add_plugins(MeshSessionPlugin::default())
+            .init_resource::<SubscriberSource>();
+        app.mesh_component::<ChunkRef>(
+            701,
+            1,
+            Rules {
+                visibility: Visibility::Local,
+                migrate: true,
+                persist: true,
+            },
+            Default::default(),
+        )?
+        .mesh_datasets::<ChunkRef>(|v| Ok(vec![v.0.clone()]))?
+        .mesh_provider(Source {
+            manifest: manifest.clone(),
+            bytes: bytes.clone(),
+            waiting: started.clone(),
+            release: gate.clone(),
+        })?;
+        if worker == a {
+            player(app.world_mut(), actor, actor, PLANET_ID, [0; 3]);
+            app.world_mut()
+                .spawn((Managed::new(chunk, chunk), ChunkRef(manifest.clone())));
+        }
+        pool.add(worker, app)?;
+    }
+    pool.step()?;
+    let directory = SessionDirectory::persistent(db.clone());
+    let binding = directory.admit(
+        SessionGrant {
+            object: actor,
+            principal: PrincipalId(actor),
+            session: SessionId(Id::new()),
+            control_epoch: 1,
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+        },
+        ConnectionId(Id::new()),
+    )?;
+    let sub = SubscriberId(Id::new());
+    directory.subscribe(binding, Some(sub))?;
+    let mut stream = SubscriberStream::open(&directory, binding, sub, Default::default())?;
+    let mut encoder = SubscriberEncoder::default();
+    let first = stream.next(&pool, &mut encoder)?.unwrap();
+    stream.applied(binding, first.sequence)?;
+    let mut migration = pool.begin(chunk, b, bytes.len())?;
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    let start = Instant::now();
+    let w = pool.app_mut(a)?.world_mut();
+    let e = w.resource::<MeshState>().entities[&actor];
+    let at_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    w.resource::<SessionIngress>().submit(SessionInput {
+        binding,
+        sequence: 1,
+        at_ms,
+        axes: [1, 0, 0],
+    })?;
+    w.get_mut::<Position>(e).unwrap().mm[0] += 1000;
+    pool.step()?;
+    assert_eq!(
+        confirmed_session_input(pool.app(a)?.world(), binding)?.sequence,
+        1
+    );
+    let frame = stream.next(&pool, &mut encoder)?.unwrap();
+    assert!(frame.events.iter().any(|e| matches!(e, SubscriberEvent::Delta{object,fields,..} if *object==actor && fields.iter().any(|(s,_)|*s==POSITION))));
+    let interactive = start.elapsed();
+    assert!(interactive <= Duration::from_millis(250), "{interactive:?}");
+    assert!(pool.poll(&mut migration)?.is_none());
+    resume.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(cost) = pool.poll(&mut migration)? {
+            assert_eq!(cost.payload, bytes.len());
+            assert_eq!(cost.authority.worker, b);
+            assert!(pool
+                .app(b)?
+                .world()
+                .resource::<BlobCache>()
+                .ready(&manifest));
+            println!(
+                "bulk_bytes={} interactive_us={}",
+                cost.payload,
+                interactive.as_micros()
+            );
+            return Ok(());
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+}
+
+#[test]
 fn private_checkpoints_skip_public_codecs_spatial_rules_and_peer_projection() {
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -494,4 +649,166 @@ fn transient_subscriber_budget_ack_timeout_and_field_removal_are_isolated() {
         slow.next_local(app.world(), &mut enc),
         Err(is_mesh::Error::Denied)
     ));
+}
+
+#[test]
+fn bounds_and_frame_revision_refresh_both_paged_and_streamed_sight_at_universe_edge(
+) -> is_mesh::Result<()> {
+    use std::time::{Duration, SystemTime};
+    #[derive(Component, serde::Serialize, serde::Deserialize)]
+    struct Radius(i64);
+    #[derive(Resource)]
+    struct Transform(Option<i64>);
+    fn point(w: &World, e: Entity) -> Option<Box3> {
+        let pos = w.get::<Position>(e)?;
+        let b = Box3::new(pos.frame, pos.mm, pos.mm).ok()?;
+        if pos.frame == PLANET_ID {
+            Some(b)
+        } else {
+            b.translated(PLANET_ID, [w.resource::<Transform>().0?, 0, 0])
+                .ok()
+        }
+    }
+    let db = Store::open(":memory:")?;
+    let a = db.start_worker(1)?;
+    let b = db.start_worker(2)?;
+    let mut pool = Pool::new(db.clone(), 512);
+    let viewer = Id::numbered(110);
+    let ship = Id::numbered(111);
+    let x = i64::MAX - 600_000;
+    for worker in [a, b] {
+        let mut app = world(&db, worker);
+        app.add_plugins(MeshSessionPlugin::default());
+        app.init_resource::<SubscriberSource>();
+        app.mesh_component::<Radius>(
+            200,
+            1,
+            Rules {
+                visibility: Visibility::Local,
+                migrate: true,
+                persist: true,
+            },
+            Default::default(),
+        )?;
+        app.insert_resource(Transform(Some(x)))
+            .insert_resource(SpatialDependencies([POSITION, SHIP, PLAYER, 200].into()))
+            .insert_resource(
+                SightRanges::millimetres(PLAYER, [(SHIP, 500_000), (PLAYER, 100_000)])
+                    .with_bounds([SHIP]),
+            )
+            .insert_resource(SpatialRule(|w, e| {
+                let mut bounds = point(w, e)?;
+                let half = w.get::<Radius>(e).map_or(0, |r| r.0);
+                bounds.lo[0] = bounds.lo[0].checked_sub(half)?;
+                bounds.hi[0] = bounds.hi[0].checked_add(half)?;
+                Some(SpatialProfile {
+                    bounds,
+                    principal: w.get::<Managed>(e)?.id,
+                    velocity: [0; 3],
+                    ahead: 0,
+                    active: true,
+                    retention: 0,
+                    needs: Default::default(),
+                })
+            }))
+            .insert_resource(SightRule(|w, e| {
+                Some((
+                    PLANET_ID,
+                    SightPoint {
+                        kind: if w.get::<Ship>(e).is_some() {
+                            SHIP
+                        } else {
+                            PLAYER
+                        },
+                        mm: point(w, e)?.lo,
+                    },
+                ))
+            }));
+        if worker == a {
+            player(app.world_mut(), viewer, viewer, PLANET_ID, [x, 0, 0]);
+        } else {
+            app.world_mut().spawn((
+                Managed::new(ship, ship),
+                Ship,
+                Radius(20_000),
+                Position {
+                    frame: Id::numbered(99),
+                    mm: [520_000, 0, 0],
+                },
+            ));
+        }
+        pool.add(worker, app)?;
+    }
+    pool.step()?;
+    let d = SessionDirectory::persistent(db.clone());
+    let sub = SubscriberId(Id::new());
+    let binding = d.admit(
+        SessionGrant {
+            object: viewer,
+            principal: PrincipalId(viewer),
+            session: SessionId(Id::new()),
+            control_epoch: 1,
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+        },
+        ConnectionId(Id::new()),
+    )?;
+    d.subscribe(binding, Some(sub))?;
+    let mut stream = SubscriberStream::open(&d, binding, sub, Default::default())?;
+    let mut encoder = SubscriberEncoder::default();
+    assert!(pool.player_sight(viewer)?.contains_key(&ship));
+    let f = stream.next(&pool, &mut encoder)?.unwrap();
+    assert!(f
+        .events
+        .iter()
+        .any(|e| matches!(e,SubscriberEvent::Enter{object,..} if *object==ship)));
+    stream.applied(binding, f.sequence)?;
+    let entity = pool.app(b)?.world().resource::<MeshState>().entities[&ship];
+    pool.app_mut(b)?
+        .world_mut()
+        .get_mut::<Radius>(entity)
+        .unwrap()
+        .0 -= 1;
+    pool.step()?;
+    assert!(!pool.player_sight(viewer)?.contains_key(&ship));
+    let f = stream.next(&pool, &mut encoder)?.unwrap();
+    assert!(f
+        .events
+        .iter()
+        .any(|e| matches!(e,SubscriberEvent::Leave(id) if *id==ship)));
+    stream.applied(binding, f.sequence)?;
+    pool.app_mut(b)?
+        .world_mut()
+        .get_mut::<Radius>(entity)
+        .unwrap()
+        .0 += 1;
+    pool.step()?;
+    assert!(pool.player_sight(viewer)?.contains_key(&ship));
+    for offset in [None, Some(i64::MAX), Some(x)] {
+        let w = pool.app_mut(b)?.world_mut();
+        w.resource_mut::<Transform>().0 = offset;
+        refresh_spatial(w, &[ship]);
+        pool.step()?;
+        assert_eq!(
+            pool.player_sight(viewer)?.contains_key(&ship),
+            offset == Some(x)
+        );
+    }
+    // A second adapter poll in the very same ECS tick can hit the shared
+    // projection cache after the actual source has already frozen.
+    let open = || SubscriberStream::open(&d, binding, sub, Default::default());
+    assert!(open()?.next(&pool, &mut encoder)?.is_some());
+    let ticket = Handoff {
+        id: Id::new(),
+        group: ship,
+        source: db.owner(ship)?,
+        target: a,
+    };
+    db.begin_handoff(ticket)?;
+    let snapshot = db.snapshot(ship)?;
+    db.freeze(ticket, snapshot.revision, &snapshot.records)?;
+    assert!(matches!(
+        open()?.next(&pool, &mut encoder),
+        Err(is_mesh::Error::Fenced)
+    ));
+    Ok(())
 }

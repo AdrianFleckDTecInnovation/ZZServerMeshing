@@ -1,4 +1,5 @@
 use infinite_stars::{host::*, *};
+use is_mesh::{wire::*, *};
 use std::{
     collections::BTreeMap,
     fs,
@@ -7,7 +8,6 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
-use is_mesh::{wire::*, *};
 
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
@@ -936,6 +936,16 @@ fn separate_volumes_resume_after_authority_restart_handoff_and_worker_replacemen
     let health: serde_json::Value =
         serde_json::from_str(&run("health", &authority, &[&aa])).unwrap();
     assert_eq!(health["ready"], true);
+    let metrics: serde_json::Value =
+        serde_json::from_str(&run("metrics", &authority, &[&aa])).unwrap();
+    assert!(metrics["transport_in_bytes"].as_u64().unwrap() > 0);
+    assert!(metrics["transport_out_bytes"].as_u64().unwrap() > 0);
+    assert!(metrics["process"]["resident_bytes"].as_u64().unwrap() > 0);
+    assert!(metrics["request_bytes_in_service"].as_u64().unwrap() > 0);
+    assert!(matches!(
+        connect_player(&aa).call(&Request::Telemetry),
+        Ok(Response::Error(_))
+    ));
     assert!(matches!(
         connect_player(&aa).call(&Request::Shutdown),
         Ok(Response::Error(_))

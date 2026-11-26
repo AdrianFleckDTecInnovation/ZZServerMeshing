@@ -3,6 +3,7 @@
 mod gameplay;
 use bevy::prelude::Entity;
 use infinite_stars::{movement::Drive, world, Inventory, Player, Position, PLANET_ID};
+use is_mesh::*;
 use serde_json::{json, Value};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -10,7 +11,6 @@ use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
 };
-use is_mesh::*;
 
 struct Meter;
 thread_local! {
@@ -97,6 +97,8 @@ struct Options {
     ticks: usize,
     partitions: usize,
     cpu_budget: Option<usize>,
+    pace: bool,
+    hot_group: bool,
     active_percent: usize,
     effects: gameplay::Settings,
     require_20hz: bool,
@@ -112,6 +114,8 @@ impl Options {
             ticks: 60,
             partitions: 1,
             cpu_budget: None,
+            pace: false,
+            hot_group: false,
             active_percent: 100,
             effects: gameplay::Settings {
                 count: 0,
@@ -124,6 +128,14 @@ impl Options {
         };
         let mut args = std::env::args().skip(1);
         while let Some(key) = args.next() {
+            if key == "--hot-group" {
+                o.hot_group = true;
+                continue;
+            }
+            if key == "--pace-20hz" {
+                o.pace = true;
+                continue;
+            }
             if key == "--require-20hz" {
                 o.require_20hz = true;
                 continue;
@@ -165,6 +177,16 @@ impl Options {
             || !(20..=10_000).contains(&o.ticks)
         {
             return Err(invalid("require 2..65536 players in complete islands of 2..128, an even worker count in 2..256, and 20..10000 ticks"));
+        }
+        if o.hot_group
+            && (o.players != o.island_size
+                || o.partitions != 1
+                || o.workers != 2
+                || o.effects.count == 0)
+        {
+            return Err(invalid(
+                "--hot-group requires one island, two workers, one partition and status effects",
+            ));
         }
         if o.database != ":memory:" && std::path::Path::new(&o.database).exists() {
             return Err(invalid("benchmark database path already exists"));
@@ -235,11 +257,17 @@ fn lane(
     let mut actors = Vec::new();
     for i in 0..o.players {
         let site = i / o.island_size;
-        let lane = (site * 2 + i % 2) % o.workers;
+        // The last actor witnesses the entire hot group from a second authority.
+        let side = if o.hot_group {
+            usize::from(i + 1 == o.players)
+        } else {
+            i % 2
+        };
+        let lane = (site * 2 + side) % o.workers;
         let owner = workers[lane];
         let id = Id::numbered(1_000_000 + (first_player + i) as u128);
         let group =
-            Id::numbered(2_000_000 + ((first_player / o.island_size + site) * 2 + i % 2) as u128);
+            Id::numbered(2_000_000 + ((first_player / o.island_size + site) * 2 + side) as u128);
         let start = [site as i64 * 128_000, (i % o.island_size) as i64 * 32, 0];
         let entity = pool
             .app_mut(owner)?
@@ -259,12 +287,14 @@ fn lane(
                 Inventory::default(),
             ))
             .id();
-        gameplay::attach(
-            pool.app_mut(owner)?.world_mut(),
-            entity,
-            first_player + i,
-            o.effects,
-        );
+        if !o.hot_group || side == 0 {
+            gameplay::attach(
+                pool.app_mut(owner)?.world_mut(),
+                entity,
+                first_player + i,
+                o.effects,
+            );
+        }
         let session = Id::numbered(3_000_000 + (first_player + i) as u128);
         db.session(session, id)?;
         actors.push(Actor {
@@ -301,6 +331,7 @@ fn lane(
         if let Some(c) = &clock {
             c.start()?;
         }
+        let started = Instant::now();
         let mut costs = [Cost::default(); STAGES.len()];
         let candidates = pool.directory.candidates;
         let mut timer = Timer::start();
@@ -381,6 +412,8 @@ fn lane(
         }
         if let Some(c) = &clock {
             c.ready()?;
+        } else if o.pace {
+            std::thread::sleep(Duration::from_millis(50).saturating_sub(started.elapsed()));
         }
     }
     // Inspect actual receiver ECS components and every routing edge outside the timer.
@@ -398,14 +431,16 @@ fn lane(
             .get(&a.id)
             .copied()
             .ok_or_else(|| invalid("remote entity missing"))?;
-        gameplay::verify(
-            source,
-            a.entity,
-            target,
-            remote,
-            (o.ticks + 5) as u32,
-            o.effects,
-        )?;
+        if !o.hot_group || i + 1 < o.players {
+            gameplay::verify(
+                source,
+                a.entity,
+                target,
+                remote,
+                (o.ticks + 5) as u32,
+                o.effects,
+            )?;
+        }
         let expected_z = if a.moving {
             let steps = o.ticks + 4 - i % 4;
             let travel = if o.active_percent < 100 {
@@ -456,6 +491,7 @@ fn lane(
         json!({"schema":1,"workload":"session inputs, Bevy movement, worker replication, checkpoints, physical islands",
         "target_os":std::env::consts::OS,"players":o.players,"workers":o.workers,"active_workers":active_workers.len(),
         "island_size":o.island_size,"islands":o.players/o.island_size,"ticks":o.ticks,"warmup_ticks":4,
+        "expensive_group_players":o.hot_group.then_some(o.players - 1),
         "store":if o.database==":memory:"{"memory"}else{"file"},"lane_samples_ms":clock.is_some().then(||tick_ms.as_slice()),"tick_ms":quantiles(tick_ms.clone()),
         "equivalent_hz":o.ticks as f64/runtime.as_secs_f64(),"ticks_over_50ms":deadline_misses,
         "inputs_acked":acks,"peer_updates_applied":frames,"cross_island_subscriptions":0,
@@ -525,6 +561,9 @@ fn run(o: &Options) -> Result<Value> {
             if tick >= 4 {
                 times.push((end.0 - start.0).as_secs_f64() * 1000.);
             }
+            if o.pace {
+                std::thread::sleep(Duration::from_millis(50).saturating_sub(start.0.elapsed()));
+            }
         }
         Ok(())
     })();
@@ -577,7 +616,19 @@ fn run(o: &Options) -> Result<Value> {
 }
 fn main() -> Result<()> {
     let options = Options::read()?;
-    let report = run(&options)?;
+    let cpu_ids = options
+        .cpu_budget
+        .map(|n| apply_cpu_budget(n.try_into().map_err(|_| invalid("CPU budget"))?, None))
+        .transpose()?;
+    let start = Instant::now();
+    let before = process_usage();
+    let mut report = run(&options)?;
+    let after = process_usage();
+    report["cpu_ids"] = serde_json::json!(cpu_ids);
+    report["process_cpu_seconds"] = serde_json::json!((after.0 - before.0) as f64 / 1e9);
+    report["resident_bytes"] = serde_json::json!(after.1);
+    report["wall_seconds_with_setup"] = serde_json::json!(start.elapsed().as_secs_f64());
+    report["paced_20hz"] = serde_json::json!(options.pace);
     let result = serde_json::to_string_pretty(&report).map_err(|e| invalid(e.to_string()))?;
     if let Some(path) = options.output {
         std::fs::write(path, &result)?;

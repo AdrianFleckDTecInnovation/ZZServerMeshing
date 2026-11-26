@@ -1,10 +1,10 @@
 use bevy_app::App;
+use is_mesh::*;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, Barrier},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use is_mesh::*;
 
 fn grant(actor: Id, principal: PrincipalId, session: SessionId, epoch: u64) -> SessionGrant {
     SessionGrant {
@@ -187,4 +187,65 @@ fn compatibility_handler_can_open_an_independent_sql_writer_before_atomic_commit
     );
     drop(db);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn deferred_grant_revocation_and_full_mailbox_are_fenced_before_gameplay() -> Result<()> {
+    use bevy_app::{PreUpdate, Update};
+    use bevy_ecs::prelude::*;
+    let mut app = App::new();
+    app.add_plugins((
+        MeshPlugin::transient(),
+        MeshSessionPlugin {
+            capacity: 1.try_into().unwrap(),
+        },
+    ));
+    let actor = Id::new();
+    app.world_mut().spawn(Managed::new(actor, actor));
+    let dir = app.world().resource::<SessionDirectory>().clone();
+    let binding = dir.admit(
+        grant(actor, PrincipalId(actor), SessionId(Id::new()), 1),
+        ConnectionId(Id::new()),
+    )?;
+    let inbox = app.world().resource::<SessionIngress>().clone();
+    inbox.attach(binding)?;
+    let mut wrong = binding;
+    wrong.object = Id::new();
+    assert!(matches!(inbox.attach(wrong), Err(Error::Busy(_))));
+    app.update();
+    assert!(matches!(inbox.attach(wrong), Err(Error::Busy(_))));
+    inbox.submit(SessionInput {
+        binding,
+        sequence: 2,
+        at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+        axes: [32; 3],
+    })?;
+    app.add_systems(
+        PreUpdate,
+        (move |mut commands: Commands| {
+            commands.queue(move |world: &mut World| {
+                world
+                    .resource::<SessionDirectory>()
+                    .revoke(binding)
+                    .unwrap();
+            });
+        })
+        .in_set(MeshSystems::Ingress),
+    );
+    #[derive(Resource, Default)]
+    struct Executions(usize);
+    app.init_resource::<Executions>().add_systems(
+        Update,
+        |q: Query<&ValidatedInput, (With<MeshReady>, With<Simulated>)>,
+         mut count: ResMut<Executions>| {
+            count.0 += q.iter().count();
+        },
+    );
+    app.update();
+    assert_eq!(app.world().resource::<Executions>().0, 0);
+    inbox.attach(wrong)?;
+    Ok(())
 }

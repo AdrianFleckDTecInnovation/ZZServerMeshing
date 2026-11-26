@@ -1,7 +1,7 @@
 use bevy_app::{App, Update};
 use bevy_ecs::prelude::*;
-use serde::{Deserialize, Serialize};
 use is_mesh::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Component, Serialize, Deserialize)]
 struct Energy(u32);

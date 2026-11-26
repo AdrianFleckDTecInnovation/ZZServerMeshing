@@ -1,11 +1,11 @@
 //! Measure on-demand, exact player views outside the simulation tick.
 use infinite_stars::{world, Inventory, Player, Position, Ship, INVENTORY, PLANET_ID};
-use serde_json::{json, Value};
-use std::time::Instant;
 use is_mesh::{
     wire::{Request, Response},
     *,
 };
+use serde_json::{json, Value};
+use std::time::Instant;
 
 fn group(site: usize, slot: usize) -> Id {
     Id::numbered(1_000_000 + (site * 2 + slot) as u128)
@@ -265,10 +265,13 @@ fn stream_run(
     let start = Instant::now();
     let mut enters = 0usize;
     let mut bytes = 0usize;
-    for (binding, s) in &mut streams {
+    let mut poll_ns = Vec::with_capacity(streams.len());
+    for (index, (binding, s)) in streams.iter_mut().enumerate() {
+        let poll = Instant::now();
         let frame = s
             .next(pool, &mut encoder)?
             .ok_or_else(|| invalid("missing initial snapshot"))?;
+        poll_ns.push(poll.elapsed().as_nanos() as u64);
         let mut members = std::collections::BTreeSet::new();
         for event in frame.events {
             bytes += event.budget_bytes();
@@ -279,15 +282,21 @@ fn stream_run(
                 members.insert(object);
             }
         }
-        if members.len() != group_size + usize::from(group_size > 1)
-            || !members.contains(&binding.object)
-        {
+        let site = index / group_size;
+        let expected = actors[site * group_size..(site + 1) * group_size]
+            .iter()
+            .copied()
+            .chain((group_size > 1).then(|| ship(site)))
+            .collect();
+        if members != expected {
             return Err(invalid("incomplete subscriber visibility"));
         }
         enters += members.len();
         s.applied(*binding, frame.sequence)?;
     }
     let initial_ms = start.elapsed().as_secs_f64() * 1000.;
+    poll_ns.sort_unstable();
+    let us = |percent: usize| poll_ns[(poll_ns.len() * percent).div_ceil(100) - 1] as f64 / 1000.;
     let mut idle = Vec::new();
     for _ in 0..5 {
         let start = Instant::now();
@@ -301,6 +310,6 @@ fn stream_run(
     let rss = process_usage().1;
     Ok(
         json!({"subscribers":actors.len(),"players_per_island":group_size,"enter_records":enters,"initial_ms":initial_ms,"initial_budgeted_bytes":bytes,
-        "idle_ms":idle,"resident_bytes":rss,"rss_growth_per_subscriber":rss.saturating_sub(before)/actors.len() as u64,"confirmed_inputs":streams.len(),"input_and_tick_ms":input_ms,"adapter_threads":1,"transport":"Tokio current-thread logical adapter; two Bevy workers"}),
+        "initial_poll_us":{"p50":us(50),"p95":us(95),"p99":us(99)},"idle_ms":idle,"resident_bytes":rss,"rss_growth_per_subscriber":rss.saturating_sub(before)/actors.len() as u64,"confirmed_inputs":streams.len(),"input_and_tick_ms":input_ms,"adapter_threads":1,"transport":"Tokio current-thread logical adapter; two Bevy workers"}),
     )
 }

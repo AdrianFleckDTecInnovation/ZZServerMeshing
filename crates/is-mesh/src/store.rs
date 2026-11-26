@@ -590,6 +590,12 @@ impl Store {
                 "INSERT INTO units(id,slot,inc,gen) VALUES(?,?,?,1)",
                 params![g, w.slot, w.incarnation],
             )?;
+            // A provisioned empty group has no object checkpoint to announce it.
+            c.execute("UPDATE clock SET mark=mark+1", [])?;
+            c.execute(
+                "INSERT OR REPLACE INTO notices(slot,unit,mark) SELECT ?,?,mark FROM clock",
+                params![w.slot, g],
+            )?;
             authority(c, g)
         })
     }

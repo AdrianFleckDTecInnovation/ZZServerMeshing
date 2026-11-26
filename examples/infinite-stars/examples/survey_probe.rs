@@ -1,7 +1,7 @@
 //! A new game type, bulk dependency and action implemented by an application.
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
 use is_mesh::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Component, Serialize, Deserialize)]
 struct Probe {

@@ -1,11 +1,11 @@
 //! Optional authoritative Bevy workload for the profiler.
 use bevy::prelude::*;
 use infinite_stars::Player;
-use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 use is_mesh::{
     invalid, Id, Lookup, MeshApp, Pool, Result, Rules, Simulated, Store, Visibility, Worker,
 };
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 const VITALS: u32 = 60_001;
 

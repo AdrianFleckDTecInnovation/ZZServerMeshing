@@ -4,6 +4,10 @@ use infinite_stars::{
     host::{identity, init_tls, provision_worker, service, worker_name},
     world, Player, Position, PLANET_ID,
 };
+use is_mesh::{
+    wire::{Client, Listener, Role},
+    *,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -18,10 +22,6 @@ use std::{
     },
     thread,
     time::{Duration, Instant},
-};
-use is_mesh::{
-    wire::{Client, Listener, Role},
-    *,
 };
 
 const WORKERS: u32 = 4;

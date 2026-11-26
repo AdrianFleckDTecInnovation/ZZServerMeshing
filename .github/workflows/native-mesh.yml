@@ -52,6 +52,7 @@ jobs:
           node-version: 22
       - run: rustup default stable
       - run: npm run setup
+      - run: npm run test:abnahme
       - run: cargo fmt -p is-mesh -p infinite-stars --check
       - run: npm test
       - name: Import the committed library from a separate game and restart it

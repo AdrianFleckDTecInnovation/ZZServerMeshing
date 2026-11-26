@@ -1,6 +1,6 @@
 use super::{Chunk, CHUNK};
-use std::{collections::VecDeque, sync::Mutex};
 use is_mesh::*;
+use std::{collections::VecDeque, sync::Mutex};
 pub const VOXELS: u32 = 301;
 pub const BLUEPRINT: u32 = 302;
 fn voxels(c: &Chunk) -> Result<Vec<u8>> {
