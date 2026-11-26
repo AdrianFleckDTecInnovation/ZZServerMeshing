@@ -33,6 +33,8 @@ Für ausgedehnte Objekte kann das Spiel `SightRanges::millimetres(...).with_boun
 
 ## Im Spiel nutzen
 
+Für kontinuierliche Ausgabe verbindet der externe Sessionadapter jeden Teilnehmer mit einem `SubscriberStream`. `next_local`, `next` oder die prozessübergreifende `WorkerSubscription` liefern Änderungen innerhalb seines Budgets. Jeder Empfänger bestätigt den angewandten Stand separat. Bei unveränderter Raumrevision bleibt der Sichtplan erhalten. Ändert sich eine Quell- oder Directory-Raumrevision, können auch weiter entfernte Leser beim nächsten Poll ihre räumlichen Kandidaten erneut prüfen. Getrennte Inseln sparen fachliche Updates und begrenzen die Kandidaten des Octrees. Die mit vielen gleichzeitig bewegten Subscribern mögliche Ausgaberate hängt deshalb zusätzlich von der Änderungsrate und dem Polltakt ab. [Spielintegration](../crates/is-mesh/examples/session_game.rs) · [Subscriber-Implementierung](../crates/is-mesh/src/subscriber.rs)
+
 Eine Spielfigur als `(Managed, Player, Position, …)` anlegen, ein Schiff als `(Managed, Ship, Position, …)`. Das Spiel vergibt die stabilen Objekt-IDs. Zusätzliche öffentliche Komponenten, etwa das Aussehen der Figur oder der Schiffstyp, mit `mesh_component` und `Visibility::Public` registrieren.
 
 - **Mehrere Welten im Prozess.** Nach `pool.step()?` liefert `pool.player_sight(actor_id)?` eine nach Objekt-ID geordnete Sicht. Für viele gleichzeitige Leser erhält `pool.visit_player_sights(&actor_ids, |actor, records| …)?` die öffentlichen Datensätze als geliehene Referenzen. Benachbarte Leser im selben Aufruf teilen sich die Projektion. Der eigene Actor hat seinen separaten bestätigten Zustand.

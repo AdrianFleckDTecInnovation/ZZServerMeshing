@@ -239,15 +239,56 @@ def draw_server_count(report, out):
     plt.close(fig)
 
 
+def draw_v1(report, out):
+    fig, (strong, weak, space, sight) = panels("InfiniteStars · lokale Modulabnahme")
+    for key, name, color in [("strong", "16 Worker-Welten", TEAL), ("topology", "32 Worker-Welten", BLUE)]:
+        group = report["scaling"][key]
+        rows = group["summary"]
+        line(strong, [r["threads"] for r in rows], [r["p50_ms"] for r in rows], name, color)
+        for sample in group["samples"]:
+            strong.scatter(sample["threads"], sample["p50_ms"], color=color, alpha=.35, s=15)
+    powers(strong, [1, 2, 4, 8])
+    label(strong, "4.096 bewegte Figuren · feste Last", "Logische CPUs für den gesamten Prozess", "Tickdauer p50 (ms)")
+    legend(strong)
+    rows = report["scaling"]["weak"]["summary"]
+    line(weak, [r["threads"] for r in rows], [r["player_ticks_per_second"] / 1000 for r in rows],
+         "256 Figuren je Partition", TEAL)
+    powers(weak, [1, 2, 4, 8])
+    label(weak, "Mehr unabhängige Inseln pro CPU-Budget", "Logische CPUs und Simulationspartitionen",
+          "Tausend Figurenticks/s bei p50")
+    weak.set_ylim(bottom=0)
+    legend(weak)
+    scenes = report["density"]["matched_layouts"][0]
+    labels = ["4 Inseln", "Verschmelzen*", "1 Insel", "Trennen*"]
+    space.bar(labels, [scenes[k]["step_ms"]["p95"] for k in ("separate","merge_step","dense","split_step")],
+              color=[TEAL,ORANGE,BLUE,ORANGE])
+    label(space, "Dieselben 256 Figuren auf acht Workern", "* Übergang jeweils ein gemessener Tick", "Schrittdauer p95 (ms)")
+    for offset, p, name, color in zip((-.18,.18), report["subscribers"]["profiles"],
+                                      ("Allein", "16 Spieler + 1 Schiff"), (TEAL, BLUE)):
+        sight.bar([i+offset for i in range(3)], [p["initial_poll_us"][k] for k in ("p50","p95","p99")],
+                  width=.34, label=name, color=color)
+    sight.set_xticks(range(3), ["p50","p95","p99"])
+    label(sight, "Erster Sichtframe je Subscriber", "1.024 berechtigte Subscriber · zwei Quellen", "Lokale Pollzeit (µs)")
+    legend(sight)
+    fig.supxlabel(f"{report['cpu']} · {report['os']} · Release {report['revision'][:8]} · Strong/Weak je drei Läufe", fontsize=10)
+    fig.savefig(out / "mesh-v1.png", dpi=150)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=ROOT / "docs/benchmarks/mesh-profile-2026-11-25.json")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--quick", type=Path, help="Replace this platform's spatial and input measurements")
     mode.add_argument("--server-count", type=Path, help="Plot a bench:servers report")
+    mode.add_argument("--v1", type=Path, help="Plot an accepted bench:v1 report")
     parser.add_argument("--output", type=Path, default=ROOT / "target/mesh-profile")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.v1:
+        draw_v1(json.loads(args.v1.read_bytes()), args.output)
+        print(args.output / "mesh-v1.png")
+        raise SystemExit(0)
     if args.server_count:
         draw_server_count(json.loads(args.server_count.read_bytes()), args.output)
         print(args.output / "mesh-serververgleich.png")

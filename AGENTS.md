@@ -4,6 +4,8 @@ The binding module-release requirements are in [.codex/mesh-v1-auftrag.md](.code
 
 Run `npm run test:abnahme` to verify the release ledger, measured source fingerprint and acceptance budgets. After a module change, run the functional suite and external game, commit the measured source, then run `npm run bench:v1 -- --report docs/benchmarks/mesh-v1.json`. The runner retains individual measurements under `target/` and publishes the report only after the gates pass.
 
+The Windows evidence uses `docs/benchmarks/mesh-v1.json`. Run the same profile on Linux with `--report docs/benchmarks/mesh-v1-debian.json`. CI checks both records against the module source. Keep the VM topology and physical-host identity with each capacity result.
+
 Run commands from the repository root. The local mesh runs natively on Windows and Linux. Use Rust stable, the platform C linker and Node.js 22.16 or newer with npm. On Windows use the MSVC Rust toolchain, Visual Studio C++ Build Tools and the Windows SDK.
 
 | Task | Command |
