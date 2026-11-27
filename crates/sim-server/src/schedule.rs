@@ -81,7 +81,9 @@ mod tests {
     #[test]
     fn full_tick_cycle() {
         let mut world = setup_world(1);
-        let state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        let mut state = EntityState::new_npc(Vec3::ZERO, ServerId(1));
+        // This NPC changes direction on tick two, after the tick under test.
+        state.id = shared::entity::EntityId(uuid::Uuid::from_u128(2));
         let eid = state.id;
         let entity = spawn_from_entity_state_direct(&mut world, &state, true, None);
 
