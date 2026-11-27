@@ -17,6 +17,7 @@ use std::{
 };
 
 const MAGIC: [u8; 4] = *b"ZZM1";
+mod workers;
 pub const WIRE_VERSION: u16 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Role {
@@ -78,6 +79,15 @@ pub enum Request {
     SubscriberPoll(StreamPoll),
     SubscriberPlan(StreamPoll, Worker),
     Telemetry,
+    /// Verify that the offered mesh frame covers this source's entire initial visibility set.
+    SubscriberBaseline(ControlBinding, SubscriberId, Id, u64),
+    /// Wait for the current worker to install the authority's latest exact binding/fence.
+    SessionFence(ControlBinding),
+    /// Gateway's earlier absolute deadline for this input batch, in UTC milliseconds.
+    SessionInputsUntil(Vec<SessionInput>, u64),
+    /// Independent movement samples with their original deadline and a submit/poll flag.
+    SessionMovement(Vec<(SessionInput, u64, bool)>),
+    SessionCommand(RoutedCommand),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -131,6 +141,8 @@ pub enum Response {
     },
     Stopped,
     Telemetry(WorkerTelemetry),
+    SessionMovement(Vec<Option<InputAck>>),
+    SessionCommand(CommandStatus),
 }
 pub trait Endpoint: Send + Sync + 'static {
     fn dispatch(&self, role: Role, request: Request) -> Result<Response>;
@@ -151,9 +163,14 @@ impl Endpoint for Service {
             | Request::Health
             | Request::Shutdown
             | Request::SessionInputs(_)
+            | Request::SessionInputsUntil(..)
+            | Request::SessionMovement(_)
+            | Request::SessionCommand(_)
             | Request::SessionProgress(_)
             | Request::SubscriberSources(..)
             | Request::SubscriberPoll(_)
+            | Request::SubscriberBaseline(..)
+            | Request::SessionFence(_)
             | Request::SubscriberPlan(..)
             | Request::Join { .. }
             | Request::Load { .. }
@@ -456,6 +473,12 @@ fn receive<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<T>
 fn receive_sized<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Result<(T, usize)> {
     let mut h = [0; 10];
     r.read_exact(&mut h)?;
+    let n = frame_length(&h)?;
+    let mut bytes = vec![0; n];
+    r.read_exact(&mut bytes)?;
+    decode_payload(&bytes, stats).map(|v| (v, n))
+}
+fn frame_length(h: &[u8; 10]) -> Result<usize> {
     if h[..4] != MAGIC || u16::from_le_bytes([h[4], h[5]]) != WIRE_VERSION {
         return Err(invalid("unsupported protocol version"));
     }
@@ -463,12 +486,15 @@ fn receive_sized<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Res
     if n > MAX_FRAME {
         return Err(Error::Busy("frame length"));
     }
-    let mut bytes = vec![0; n];
-    r.read_exact(&mut bytes)?;
-    stats.payload_in.fetch_add(n as u64, Ordering::Relaxed);
+    Ok(n)
+}
+fn decode_payload<T: DeserializeOwned>(bytes: &[u8], stats: &Traffic) -> Result<T> {
+    stats
+        .payload_in
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
     let now = thread_cpu_ns();
     let cycles = thread_cpu_cycles();
-    let v = decode(&bytes)?;
+    let v = decode(bytes)?;
     stats.decode_cycles.fetch_add(
         thread_cpu_cycles().saturating_sub(cycles),
         Ordering::Relaxed,
@@ -476,7 +502,7 @@ fn receive_sized<T: DeserializeOwned>(r: &mut impl Read, stats: &Traffic) -> Res
     stats
         .decode_ns
         .fetch_add(thread_cpu_ns().saturating_sub(now), Ordering::Relaxed);
-    Ok((v, n))
+    Ok(v)
 }
 #[derive(Clone)]
 pub struct Identity {

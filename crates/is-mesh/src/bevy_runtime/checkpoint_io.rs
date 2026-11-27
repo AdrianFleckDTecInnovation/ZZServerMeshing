@@ -40,6 +40,9 @@ impl AsyncCheckpoints {
     pub fn pending(&self) -> (usize, usize) {
         (self.in_flight.len(), self.bytes)
     }
+    pub(super) fn executor(&self) -> BulkExecutor {
+        self.executor.clone()
+    }
 }
 pub(super) fn pending(w: &World, g: Id) -> bool {
     w.get_resource::<AsyncCheckpoints>()

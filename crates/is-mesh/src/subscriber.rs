@@ -3,7 +3,7 @@ use crate::*;
 use bevy_ecs::prelude::{IntoSystemConfigs, Resource, World};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 /// Install in every Pool world which contributes state to external subscribers.
@@ -387,6 +387,69 @@ struct PendingFrame {
     tick: u64,
     changes: Vec<(Id, Option<Known>)>,
 }
+type SourceFences = BTreeMap<Worker, BTreeMap<Id, Authority>>;
+
+/// A private, one-use permit for a frame constructed by the simulation. The
+/// authenticated socket worker validates the emitted groups and subscriber again
+/// before it can send or confirm the baseline, including on cache hits.
+pub(crate) struct Publication {
+    binding: ControlBinding,
+    subscriber: SubscriberId,
+    groups: OnceLock<SourceFences>,
+    pub(crate) sent: OnceLock<bool>,
+}
+impl Publication {
+    pub(crate) fn new(poll: StreamPoll) -> Self {
+        Self {
+            binding: poll.binding,
+            subscriber: poll.subscriber,
+            groups: OnceLock::new(),
+            sent: OnceLock::new(),
+        }
+    }
+    pub(crate) fn validate(&self, store: &Store, worker: Worker) -> Result<()> {
+        let groups = self.groups.get().ok_or(Error::Fenced)?;
+        for (&source, grants) in groups {
+            if source != worker {
+                return Err(Error::Fenced);
+            }
+            check_projections(store, source, grants)?;
+        }
+        if !SessionDirectory::persistent(store.clone())
+            .authorized_subscriber(self.binding, self.subscriber)?
+        {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+}
+fn check_projections(db: &Store, worker: Worker, grants: &BTreeMap<Id, Authority>) -> Result<()> {
+    let ids: Vec<_> = grants.keys().copied().collect();
+    for batch in ids.chunks(MAX_TARGETS) {
+        let states = db.group_states(batch, Some(worker))?;
+        if batch
+            .iter()
+            .any(|id| states.get(id) != Some(&(grants[id], false)))
+        {
+            return Err(Error::Fenced);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ReadAccess<'a> {
+    Directory(&'a SessionDirectory),
+    Network(&'a Publication),
+}
+impl ReadAccess<'_> {
+    fn authorized(self, binding: ControlBinding, subscriber: SubscriberId) -> Result<bool> {
+        match self {
+            Self::Directory(dir) => dir.authorized_subscriber(binding, subscriber),
+            Self::Network(p) => Ok(p.binding == binding && p.subscriber == subscriber),
+        }
+    }
+}
 pub struct SubscriberStream {
     binding: ControlBinding,
     subscriber: SubscriberId,
@@ -402,6 +465,17 @@ pub struct SubscriberStream {
     allowance: Option<(u64, usize, usize)>,
 }
 impl SubscriberStream {
+    /// One-frame bootstrap profile. A paged initial view needs further
+    /// application acknowledgements before it can authorize player input.
+    pub(crate) fn offered_baseline(&self, binding: ControlBinding, sequence: u64) -> bool {
+        self.binding == binding
+            && self.pending.as_ref().is_some_and(|frame| {
+                frame.seq == sequence
+                    && self.known.is_empty()
+                    && frame.changes.iter().filter(|(_, v)| v.is_some()).count()
+                        == self.visible.len()
+            })
+    }
     /// Budgeted application payload awaiting confirmation in this source stream.
     pub fn unacked_bytes(&self) -> usize {
         self.pending.as_ref().map_or(0, |p| p.bytes)
@@ -412,7 +486,20 @@ impl SubscriberStream {
         subscriber: SubscriberId,
         policy: SubscriberPolicy,
     ) -> Result<Self> {
-        if !directory.authorized_subscriber(binding, subscriber)? {
+        Self::open_with(
+            ReadAccess::Directory(directory),
+            binding,
+            subscriber,
+            policy,
+        )
+    }
+    pub(crate) fn open_with(
+        access: ReadAccess<'_>,
+        binding: ControlBinding,
+        subscriber: SubscriberId,
+        policy: SubscriberPolicy,
+    ) -> Result<Self> {
+        if !access.authorized(binding, subscriber)? {
             return Err(Error::Denied);
         }
         policy.validate()?;
@@ -431,7 +518,7 @@ impl SubscriberStream {
             allowance: None,
         })
     }
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.known.clear();
         self.visible.clear();
         self.spatial.clear();
@@ -467,7 +554,21 @@ impl SubscriberStream {
         subscriber: SubscriberId,
         applied: u64,
     ) -> Result<()> {
-        if !directory.authorized_subscriber(binding, subscriber)? {
+        self.resume_with(
+            ReadAccess::Directory(directory),
+            binding,
+            subscriber,
+            applied,
+        )
+    }
+    fn resume_with(
+        &mut self,
+        access: ReadAccess<'_>,
+        binding: ControlBinding,
+        subscriber: SubscriberId,
+        applied: u64,
+    ) -> Result<()> {
+        if !access.authorized(binding, subscriber)? {
             return Err(Error::Denied);
         }
         if binding.principal != self.binding.principal
@@ -490,7 +591,11 @@ impl SubscriberStream {
         encoder: &mut SubscriberEncoder,
     ) -> Result<Option<SubscriberFrame>> {
         let directory = SessionDirectory::persistent(pool.store.clone());
-        self.poll(Source::Pool(pool), &directory, encoder)
+        self.poll(
+            Source::Pool(pool),
+            ReadAccess::Directory(&directory),
+            encoder,
+        )
     }
     pub fn next_local(
         &mut self,
@@ -499,9 +604,11 @@ impl SubscriberStream {
     ) -> Result<Option<SubscriberFrame>> {
         self.poll(
             Source::Local(world),
-            world
-                .get_resource::<SessionDirectory>()
-                .ok_or_else(|| invalid("missing MeshSessionPlugin"))?,
+            ReadAccess::Directory(
+                world
+                    .get_resource::<SessionDirectory>()
+                    .ok_or_else(|| invalid("missing MeshSessionPlugin"))?,
+            ),
             encoder,
         )
     }
@@ -510,21 +617,14 @@ impl SubscriberStream {
         w: &World,
         plan: &SubscriberPlan,
         encoder: &mut SubscriberEncoder,
+        access: ReadAccess<'_>,
     ) -> Result<Option<SubscriberFrame>> {
-        self.poll(
-            Source::Worker(w, plan),
-            w.resource::<SessionDirectory>(),
-            encoder,
-        )
+        self.poll(Source::Worker(w, plan), access, encoder)
     }
-    pub(crate) fn poll_binding(
-        &mut self,
-        directory: &SessionDirectory,
-        poll: StreamPoll,
-    ) -> Result<()> {
+    pub(crate) fn poll_binding(&mut self, access: ReadAccess<'_>, poll: StreamPoll) -> Result<()> {
         if self.binding != poll.binding {
-            self.resume(
-                directory,
+            self.resume_with(
+                access,
                 poll.binding,
                 poll.subscriber,
                 poll.applied.unwrap_or(0),
@@ -539,10 +639,10 @@ impl SubscriberStream {
     fn poll(
         &mut self,
         source: Source<'_>,
-        directory: &SessionDirectory,
+        access: ReadAccess<'_>,
         encoder: &mut SubscriberEncoder,
     ) -> Result<Option<SubscriberFrame>> {
-        if !directory.authorized_subscriber(self.binding, self.subscriber)? {
+        if !access.authorized(self.binding, self.subscriber)? {
             self.clear();
             return Err(Error::Denied);
         }
@@ -840,17 +940,18 @@ impl SubscriberStream {
         }
         // Fence every emitted projection, including shared cache hits. Validate
         // once per batch of distinct groups at the source, before publishing.
-        for (worker, grants) in fences {
-            let db = source.world(worker)?.resource::<Store>();
-            let ids: Vec<_> = grants.keys().copied().collect();
-            for batch in ids.chunks(MAX_TARGETS) {
-                let states = db.group_states(batch, Some(worker))?;
-                if batch
-                    .iter()
-                    .any(|id| states.get(id) != Some(&(grants[id], false)))
-                {
-                    self.clear();
-                    return Err(Error::Fenced);
+        match access {
+            ReadAccess::Network(permit) => permit.groups.set(fences).map_err(|_| Error::Fenced)?,
+            ReadAccess::Directory(_) => {
+                for (worker, grants) in fences {
+                    if let Err(error) = check_projections(
+                        source.world(worker)?.resource::<Store>(),
+                        worker,
+                        &grants,
+                    ) {
+                        self.clear();
+                        return Err(error);
+                    }
                 }
             }
         }

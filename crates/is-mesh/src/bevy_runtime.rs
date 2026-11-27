@@ -1,8 +1,12 @@
 use crate::*;
+mod authority_io;
 mod checkpoint_io;
+mod registration;
+pub use authority_io::PreparedAuthority;
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
 pub use checkpoint_io::AsyncCheckpoints;
+pub use registration::{PendingRegistration, RegistrationFailure, RegistrationStatus};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     any::TypeId,
@@ -255,6 +259,9 @@ impl Checkpoints {
     }
 }
 impl MeshState {
+    pub(crate) fn retry_group(&mut self, group: Id) {
+        self.retry_groups.insert(group);
+    }
     pub fn tick(&self) -> u64 {
         self.tick
     }
@@ -413,6 +420,9 @@ pub fn reconcile(w: &World, session: Id, actor: Id, group: Id) -> Result<(u64, u
     Ok((rev, seq, r))
 }
 pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
+    if registration::committing(w, group) {
+        return Err(Error::Busy("first managed checkpoint in flight"));
+    }
     let n = storage_node(w)?.clone();
     checkpoint_io::barrier(w, group)?;
     let mut ids: Vec<_> = w.resource::<MeshState>().pending.due[Checkpoints::slot(group)]
@@ -468,6 +478,19 @@ pub fn checkpoint_group(w: &mut World, group: Id) -> Result<()> {
         }
     }
     Ok(())
+}
+pub(crate) fn preparing_group(w: &World, group: Id) -> bool {
+    checkpoint_io::pending(w, group)
+        || registration::engaged(w, group)
+        || w.resource::<MeshState>()
+            .removed
+            .values()
+            .any(|g| *g == group)
+}
+pub(crate) fn background_worker(w: &World) -> BulkExecutor {
+    w.get_resource::<AsyncCheckpoints>()
+        .map(AsyncCheckpoints::executor)
+        .unwrap_or_else(|| w.resource::<PreparedAuthority>().executor())
 }
 
 /// Restore a group assigned to the local worker slot before starting simulation.
@@ -568,6 +591,9 @@ pub enum MeshSystems {
     Authority,
     /// Validate external control before ordinary gameplay runs in Update.
     Control,
+    /// Consume validated player inputs in Update or FixedUpdate after the
+    /// worker has refreshed its control components for that schedule.
+    GameplayInput,
     /// PostUpdate field tracking and storage checkpoint barrier.
     Track,
 }
@@ -692,7 +718,33 @@ type Unclaimed = (
     Without<Replica>,
     Without<Staged>,
 );
-fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>) {
+type RawUnclaimed = (
+    Without<Simulated>,
+    Without<Replica>,
+    Without<Staged>,
+    Without<Paused>,
+    Without<PendingRegistration>,
+    Without<RegistrationFailure>,
+);
+fn discover(
+    w: &mut World,
+    added: &mut QueryState<(Entity, &Managed), Unclaimed>,
+    raw: &mut QueryState<(Entity, &Managed), RawUnclaimed>,
+) {
+    if w.contains_resource::<PreparedAuthority>() {
+        if let Some(Node(db, worker)) = w.get_resource::<Node>().cloned() {
+            // Unseen objects remain visible to this query on the next frame.
+            // Neither a burst of spawns nor the number of existing players
+            // determines the amount of registration work in this tick.
+            let fresh = raw
+                .iter(w)
+                .take(MAX_TARGETS)
+                .map(|(entity, m)| (entity, *m))
+                .collect();
+            registration::step(w, db, worker, fresh);
+            return;
+        }
+    }
     let fresh: Vec<_> = added.iter(w).map(|(e, m)| (e, *m)).collect();
     if fresh.is_empty() {
         return;
@@ -769,7 +821,28 @@ fn discover(w: &mut World, added: &mut QueryState<(Entity, &Managed), Unclaimed>
         }
     }
 }
+/// Advance the captured checkpoint without overwriting the live source fields.
+/// Caller holds a fresh installation lease for this owner and new revision.
+pub(crate) fn acknowledge_frozen_checkpoint(
+    w: &mut World,
+    group: Id,
+    owner: Authority,
+    base: u64,
+    revision: u64,
+    changed: &[Record],
+) -> bool {
+    match w.resource::<MeshState>().group_state(group) {
+        Some((a, rev)) if a == owner && rev == revision => true,
+        Some((a, rev)) if a == owner && rev == base => {
+            checkpoint_io::acknowledge(w, group, owner, revision, &mut changed.to_vec());
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn pause_group(w: &mut World, group: Id, paused: bool) {
+    authority_io::invalidate(w, group);
     let ids: Vec<_> = w
         .query::<(Entity, &Managed, Option<&Simulated>, Option<&Paused>)>()
         .iter(w)
@@ -790,10 +863,19 @@ fn pull(w: &mut World) {
         return;
     };
     checkpoint_io::collect(w);
+    if w.contains_resource::<PreparedAuthority>() {
+        authority_io::poll(w, db, worker);
+        return;
+    }
     let mark = w.resource::<MeshState>().mark;
     let notices = match db.notices(worker, mark) {
         Ok(n) => n,
         Err(e) => {
+            if matches!(e, Error::Denied | Error::Fenced)
+                && !w.resource::<MeshState>().groups.is_empty()
+            {
+                demote_all(w);
+            }
             w.resource_mut::<MeshState>().report(e.to_string());
             return;
         }
@@ -842,13 +924,19 @@ fn pull(w: &mut World) {
     }
 }
 pub(crate) fn demote(w: &mut World, group: Id) {
+    authority_io::invalidate(w, group);
     let members: Vec<_> = w
         .query_filtered::<(Entity, &Managed), Or<(With<Simulated>, With<Paused>)>>()
         .iter(w)
         .filter(|(_, m)| m.group == group)
-        .map(|(e, m)| (e, m.id))
+        .map(|(e, m)| (e, *m))
         .collect();
-    for (e, id) in members {
+    demote_members(w, members);
+    w.resource_mut::<MeshState>().groups.remove(&group);
+    w.resource_mut::<MeshState>().pins.remove(&group);
+}
+fn demote_members(w: &mut World, members: Vec<(Entity, Managed)>) {
+    for (e, Managed { id, group }) in members {
         if let Some(mut source) = w.get_resource_mut::<SubscriberSource>() {
             source.remove(id);
         }
@@ -861,8 +949,18 @@ pub(crate) fn demote(w: &mut World, group: Id) {
         st.pending.remove(&id, group);
         st.dirty.insert(id, ObjectChange::lifecycle());
     }
-    w.resource_mut::<MeshState>().groups.remove(&group);
-    w.resource_mut::<MeshState>().pins.remove(&group);
+}
+fn demote_all(w: &mut World) {
+    let members = w
+        .query_filtered::<(Entity, &Managed), Or<(With<Simulated>, With<Paused>)>>()
+        .iter(w)
+        .map(|(entity, managed)| (entity, *managed))
+        .collect();
+    demote_members(w, members);
+    let mut state = w.resource_mut::<MeshState>();
+    let groups = std::mem::take(&mut state.groups);
+    state.retry_groups.extend(groups.into_keys());
+    state.pins.clear();
 }
 fn import_field(
     world: &mut World,
@@ -1171,7 +1269,10 @@ pub fn project_component(w: &World, id: Id, schema: u32, view: View) -> Result<O
         bytes,
     }))
 }
-fn checkpoint_claims(w: &World, records: &[Record]) -> Result<BTreeMap<Id, Vec<Manifest>>> {
+pub(crate) fn checkpoint_claims(
+    w: &World,
+    records: &[Record],
+) -> Result<BTreeMap<Id, Vec<Manifest>>> {
     let mut claims = BTreeMap::new();
     let state = w.resource::<MeshState>();
     let schemas = w.resource::<Schemas>();
@@ -1256,7 +1357,7 @@ fn flush(w: &mut World) {
             continue;
         }
         let group = w.get::<Managed>(e).unwrap().group;
-        if checkpoint_io::pending(w, group) {
+        if checkpoint_io::pending(w, group) || registration::committing(w, group) {
             w.resource_mut::<MeshState>().pending.urgent.insert(id);
             continue;
         }
@@ -1278,6 +1379,10 @@ fn flush(w: &mut World) {
     }
     let removed = std::mem::take(&mut w.resource_mut::<MeshState>().removed);
     for (id, g) in removed {
+        if registration::committing(w, g) {
+            w.resource_mut::<MeshState>().removed.insert(id, g);
+            continue;
+        }
         let mut r = Record::new(id, g);
         r.revision = w
             .resource::<MeshState>()
@@ -1376,6 +1481,27 @@ pub struct Prepared {
     pins: Vec<BlobPin>,
 }
 impl Prepared {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn install_until(
+        self,
+        world: &mut World,
+        owner: Authority,
+        until: std::time::Instant,
+    ) -> Result<()> {
+        if std::time::Instant::now() >= until {
+            self.discard(world);
+            return Err(Error::Fenced);
+        }
+        let group = self.group;
+        self.install(world, owner)?;
+        if std::time::Instant::now() >= until {
+            demote(world, group);
+            return Err(Error::Fenced);
+        }
+        Ok(())
+    }
     pub fn hash(&self) -> Digest {
         self.manifest
     }
@@ -1401,6 +1527,15 @@ impl Prepared {
             self.discard(w);
             return Err(err);
         }
+        self.install(w, owner)
+    }
+    // The caller holds either the immediate durable cutover check above or a
+    // versioned installation lease from the authority. Keep staging world local.
+    fn install(self, w: &mut World, owner: Authority) -> Result<()> {
+        if self.world != w.id() {
+            return Err(invalid("use the world that prepared this group"));
+        }
+        authority_io::invalidate(w, self.group);
         if let Some(Node(_, local)) = w.get_resource::<Node>() {
             if *local != owner.worker {
                 self.discard(w);

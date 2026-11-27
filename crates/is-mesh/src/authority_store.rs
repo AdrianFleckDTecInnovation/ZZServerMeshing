@@ -52,6 +52,14 @@ pub enum Operation {
     ChangeControl(ControlChange),
     ReadControls(Vec<Id>),
     WorkerControls(Worker, Vec<(Id, Id, u64)>),
+    ReserveControl(ControlAdmission),
+    ConfirmControl(ControlBinding),
+    PlaceInitialGroup(Id),
+    ObserveControls(Worker, Vec<Id>),
+    ReserveInstall(Id, Authority, u64),
+    ReleaseInstall(Id, Worker, Id),
+    ReserveRaw(Id, Id, Worker),
+    CommitRaw(Authority, u64, Id, Record, Vec<Manifest>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +102,16 @@ pub(crate) struct Connection {
     socket: Mutex<Option<Client>>,
 }
 impl Connection {
+    pub(crate) fn independent_link(&self) -> Self {
+        Self {
+            addr: self.addr,
+            name: self.name.clone(),
+            ca: self.ca.clone(),
+            credential: self.credential.clone(),
+            traffic: self.traffic.clone(),
+            socket: Mutex::default(),
+        }
+    }
     pub(crate) fn new(addr: SocketAddr, name: String, ca: Vec<u8>, credential: Identity) -> Self {
         Self {
             addr,
@@ -121,6 +139,7 @@ impl Connection {
                 | PlayerCredential(_)
                 | ReadControls(_)
                 | WorkerControls(..)
+                | ObserveControls(..)
                 | Owner(_)
                 | Group(_)
                 | Notices(..)
@@ -194,6 +213,29 @@ impl AuthorityService {
         };
         use Operation::*;
         match op {
+            ReserveRaw(object, group, worker) => {
+                own(worker)?;
+                encode(&db.reserve_raw(object, group, worker)?)
+            }
+            CommitRaw(owner, revision, token, record, claims) => {
+                own(owner.worker)?;
+                encode(&db.commit_raw(owner, revision, token, record, claims)?)
+            }
+            ReserveInstall(group, owner, revision) => {
+                own(owner.worker)?;
+                encode(&db.reserve_install(group, owner, revision)?)
+            }
+            ReleaseInstall(group, worker, token) => {
+                own(worker)?;
+                encode(&db.release_install(group, worker, token)?)
+            }
+            ReserveControl(request) => encode(&db.reserve_control(request)?),
+            ConfirmControl(binding) => encode(&db.confirm_control(binding)?),
+            PlaceInitialGroup(group) => encode(&db.place_initial_group(group)?),
+            ObserveControls(worker, objects) => {
+                own(worker)?;
+                encode(&db.control_observations(worker, &objects)?)
+            }
             ChangeControl(change) => encode(&db.control_change(change)?),
             ReadControls(objects) => encode(&db.control_states(&objects)?),
             WorkerControls(worker, objects) => {

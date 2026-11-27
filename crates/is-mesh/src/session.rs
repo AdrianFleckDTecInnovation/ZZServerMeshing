@@ -7,6 +7,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+mod prepared;
+pub use prepared::PreparedSessionControls;
 
 macro_rules! identity {
     ($name:ident) => {
@@ -20,6 +22,22 @@ identity!(PrincipalId);
 identity!(SessionId);
 identity!(ConnectionId);
 identity!(SubscriberId);
+
+/// A trusted gateway has verified the provider session. A takeover of a live
+/// connection requires the same verified session and its expected prior epoch.
+/// The authority allocates epochs and initially withholds worker input rights.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct ControlAdmission {
+    pub principal: PrincipalId,
+    pub session: SessionId,
+    pub object: Id,
+    pub connection: ConnectionId,
+    pub resume_epoch: Option<u64>,
+    pub expires_ms: u64,
+}
+
+/// Maximum lifetime of a freshly verified game admission.
+pub const MAX_CONTROL_LEASE_MS: u64 = 120_000;
 
 /// Constructed by a trusted server after external authorization. Epochs strictly
 /// increase per object, including reconnects; an exact retry is idempotent.
@@ -119,6 +137,39 @@ fn millis(t: SystemTime) -> Result<u64> {
         .and_then(|d| d.as_millis().try_into().ok())
         .ok_or_else(|| invalid("session time outside epoch"))
 }
+
+// A backward adjustment of UTC must never extend an already-issued lease.
+// Keep the greatest observed UTC offset from this process's monotonic clock.
+pub(crate) fn control_now() -> Result<u64> {
+    use std::sync::{atomic::AtomicU64, OnceLock};
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    static OFFSET: AtomicU64 = AtomicU64::new(0);
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    Ok(conservative_utc(
+        &OFFSET,
+        elapsed,
+        millis(SystemTime::now())?,
+    ))
+}
+fn conservative_utc(offset: &std::sync::atomic::AtomicU64, elapsed: u64, utc: u64) -> u64 {
+    let seen = utc.saturating_sub(elapsed);
+    elapsed.saturating_add(
+        offset
+            .fetch_max(seen, std::sync::atomic::Ordering::Relaxed)
+            .max(seen),
+    )
+}
+#[cfg(test)]
+#[test]
+fn clock_rollback_does_not_extend_an_issued_worker_deadline() {
+    let offset = std::sync::atomic::AtomicU64::new(0);
+    assert_eq!(conservative_utc(&offset, 0, 1000), 1000);
+    assert_eq!(conservative_utc(&offset, 10, 2010), 2010);
+    let deadline = 2020;
+    assert!(conservative_utc(&offset, 19, 1019) < deadline);
+    assert!(conservative_utc(&offset, 20, 1020) >= deadline);
+}
 #[derive(Default)]
 struct LocalControls {
     objects: BTreeMap<Id, ControlState>,
@@ -151,10 +202,7 @@ impl SessionDirectory {
                 if table.closed.contains(&b.session) && !matches!(change, ControlChange::Close(_)) {
                     return Err(Error::Denied);
                 }
-                let next = change.apply(
-                    table.objects.get(&b.object).copied(),
-                    millis(SystemTime::now())?,
-                )?;
+                let next = change.apply(table.objects.get(&b.object).copied(), control_now()?)?;
                 if let Some(identity) = table.sessions.get(&b.session) {
                     if *identity != (b.principal, b.object) {
                         return Err(Error::Denied);
@@ -236,7 +284,7 @@ impl SessionDirectory {
                     .collect()
             }
         };
-        let now = millis(SystemTime::now())?;
+        let now = control_now()?;
         Ok(states
             .into_iter()
             .map(|state| state.filter(|s| s.active && !s.closed && s.expires_ms > now))
@@ -263,26 +311,137 @@ impl SessionDirectory {
 }
 
 impl Store {
-    pub(crate) fn control_change(&self, change: ControlChange) -> Result<ControlState> {
+    /// Serialize simultaneous gateways inside the existing authority transaction.
+    /// Replaying an attempt cannot resurrect a replaced or suspended connection.
+    pub fn reserve_control(&self, request: ControlAdmission) -> Result<ControlBinding> {
         use rusqlite::{params, OptionalExtension};
+        if let Some(remote) = self.remote_connection() {
+            return remote.call(authority_store::Operation::ReserveControl(request));
+        }
+        self.write(|db| {
+            let now = control_now()?;
+            if request.expires_ms <= now
+                || request.expires_ms > now.saturating_add(MAX_CONTROL_LEASE_MS)
+            {
+                return Err(Error::Denied);
+            }
+            let old = read_control(db, request.object)?;
+            if let Some(s) = old {
+                let b = s.binding;
+                let live = s.active && !s.closed && s.expires_ms > now;
+                let same_session = b.principal == request.principal && b.session == request.session;
+                if b.connection == request.connection {
+                    return if live && same_session {
+                        Ok(b)
+                    } else {
+                        Err(Error::Fenced)
+                    };
+                }
+                match request.resume_epoch {
+                    Some(previous) if previous != b.epoch || !same_session || s.closed => {
+                        return Err(Error::Fenced)
+                    }
+                    None if live => return Err(Error::Denied),
+                    _ => (),
+                }
+            } else if request.resume_epoch.is_some() {
+                return Err(Error::Fenced);
+            }
+            if db
+                .query_row(
+                    "SELECT 1 FROM closed_control_sessions WHERE session=?",
+                    [request.session.0],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                return Err(Error::Denied);
+            }
+            db.execute("DELETE FROM control_attempts WHERE connection IN (
+                SELECT connection FROM control_attempts WHERE expires_ms<=? ORDER BY expires_ms LIMIT 64)", [now])?;
+            if db.execute(
+                "INSERT OR IGNORE INTO control_attempts(connection,expires_ms) VALUES(?,?)",
+                params![request.connection.0, request.expires_ms],
+            )? != 1
+            {
+                return Err(Error::Fenced);
+            }
+            let epoch = old
+                .map_or(0, |s| s.binding.epoch)
+                .checked_add(1)
+                .ok_or(Error::Fenced)?;
+            let binding = ControlBinding {
+                principal: request.principal,
+                session: request.session,
+                object: request.object,
+                connection: request.connection,
+                epoch,
+            };
+            let state = ControlState {
+                binding,
+                active: true,
+                closed: false,
+                expires_ms: request.expires_ms,
+                subscriber: None,
+            };
+            write_control(db, state)?;
+            db.execute(
+                "INSERT OR IGNORE INTO control_sync_pending(object) VALUES(?)",
+                [request.object],
+            )?;
+            Ok(binding)
+        })
+    }
+
+    /// Release worker steering only after the trusted gateway validated the
+    /// exact binding's application-level snapshot acknowledgement.
+    pub fn confirm_control(&self, binding: ControlBinding) -> Result<()> {
+        if let Some(remote) = self.remote_connection() {
+            return remote.call(authority_store::Operation::ConfirmControl(binding));
+        }
+        self.write(|db| {
+            let state = read_control(db, binding.object)?.ok_or(Error::Denied)?;
+            if state.binding != binding
+                || !state.active
+                || state.closed
+                || state.subscriber.is_none()
+                || state.expires_ms <= control_now()?
+            {
+                return Err(Error::Fenced);
+            }
+            db.execute(
+                "DELETE FROM control_sync_pending WHERE object=?",
+                [binding.object],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn control_change(&self, change: ControlChange) -> Result<ControlState> {
         if let Some(remote) = self.remote_connection() {
             return remote.call(authority_store::Operation::ChangeControl(change));
         }
         self.write(|db| {
             let b = change.binding();
-            if !matches!(change,ControlChange::Close(_)) && db.query_row("SELECT EXISTS(SELECT 1 FROM closed_control_sessions WHERE session=?)",[b.session.0],|r|r.get::<_,bool>(0))?{return Err(Error::Denied);}
-            let old: Option<Vec<u8>> = db.query_row("SELECT state FROM control_bindings WHERE object=?",[b.object],|r| r.get(0)).optional()?;
-            let next = change.apply(old.map(|v| decode(&v)).transpose()?, millis(SystemTime::now())?)?;
-            db.execute("INSERT OR IGNORE INTO control_sessions(session,principal,object) VALUES(?,?,?)",params![b.session.0,b.principal.0,b.object])?;
-            let matches: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM control_sessions WHERE session=? AND principal=? AND object=?)",params![b.session.0,b.principal.0,b.object], |r| r.get(0))?;
-            if !matches { return Err(Error::Denied); }
-            if next.closed{db.execute("INSERT OR IGNORE INTO closed_control_sessions(session) VALUES(?)",[b.session.0])?;}
-            db.execute("DELETE FROM control_subscribers WHERE object=?",[b.object])?;
-            if let Some(id)=next.subscriber {
-                let wrote=db.execute("INSERT OR IGNORE INTO control_subscribers(subscriber,object) VALUES(?,?)",params![id.0,b.object])?;
-                if wrote==0 {return Err(Error::Denied);}
+            if !matches!(change, ControlChange::Close(_))
+                && db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM closed_control_sessions WHERE session=?)",
+                    [b.session.0],
+                    |r| r.get::<_, bool>(0),
+                )?
+            {
+                return Err(Error::Denied);
             }
-            db.execute("INSERT INTO control_bindings(object,state) VALUES(?,?) ON CONFLICT(object) DO UPDATE SET state=excluded.state", params![b.object,encode(&next)?])?;
+            let old = read_control(db, b.object)?;
+            let next = change.apply(old, control_now()?)?;
+            write_control(db, next)?;
+            if matches!(change, ControlChange::Admit(_)) && old.is_none_or(|s| s.binding != b) {
+                db.execute(
+                    "DELETE FROM control_sync_pending WHERE object=?",
+                    [b.object],
+                )?;
+            }
             Ok(next)
         })
     }
@@ -326,7 +485,7 @@ impl Store {
         let placeholders = std::iter::repeat_n("(?,?,?)", objects.len())
             .collect::<Vec<_>>()
             .join(",");
-        let sql=format!("WITH wanted(object,unit,gen) AS (VALUES {placeholders}) SELECT b.object,b.state FROM wanted v JOIN control_bindings b ON b.object=v.object JOIN names n ON n.id=b.object AND n.unit=v.unit JOIN units u ON u.id=n.unit AND u.gen=v.gen JOIN workers w ON w.slot=u.slot AND w.incarnation=u.inc WHERE u.slot=? AND u.inc=? AND u.frozen IS NULL");
+        let sql=format!("WITH wanted(object,unit,gen) AS (VALUES {placeholders}) SELECT b.object,b.state FROM wanted v JOIN control_bindings b ON b.object=v.object JOIN names n ON n.id=b.object AND n.unit=v.unit JOIN units u ON u.id=n.unit AND u.gen=v.gen JOIN workers w ON w.slot=u.slot AND w.incarnation=u.inc WHERE u.slot=? AND u.inc=? AND u.frozen IS NULL AND NOT EXISTS(SELECT 1 FROM control_sync_pending p WHERE p.object=b.object)");
         let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(objects.len() * 3 + 2);
         for (object, group, generation) in objects {
             parameters.extend([object as &dyn rusqlite::ToSql, group, generation]);
@@ -337,7 +496,7 @@ impl Store {
         let rows = query.query_map(parameters.as_slice(), |r| {
             Ok((r.get::<_, Id>(0)?, r.get::<_, Vec<u8>>(1)?))
         })?;
-        let now = millis(SystemTime::now())?;
+        let now = control_now()?;
         let mut result = std::collections::HashMap::with_capacity(objects.len());
         for row in rows {
             let (id, bytes) = row?;
@@ -351,6 +510,50 @@ impl Store {
             .map(|(id, _, _)| result.get(id).copied())
             .collect())
     }
+}
+
+fn read_control(db: &rusqlite::Connection, object: Id) -> Result<Option<ControlState>> {
+    use rusqlite::OptionalExtension;
+    let bytes: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT state FROM control_bindings WHERE object=?",
+            [object],
+            |r| r.get(0),
+        )
+        .optional()?;
+    bytes.map(|v| decode(&v)).transpose()
+}
+
+fn write_control(db: &rusqlite::Connection, state: ControlState) -> Result<()> {
+    use rusqlite::params;
+    let b = state.binding;
+    db.execute(
+        "INSERT OR IGNORE INTO control_sessions(session,principal,object) VALUES(?,?,?)",
+        params![b.session.0, b.principal.0, b.object],
+    )?;
+    let matches: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM control_sessions WHERE session=? AND principal=? AND object=?)",
+        params![b.session.0,b.principal.0,b.object], |r| r.get(0))?;
+    if !matches {
+        return Err(Error::Denied);
+    }
+    if state.closed {
+        db.execute(
+            "INSERT OR IGNORE INTO closed_control_sessions(session) VALUES(?)",
+            [b.session.0],
+        )?;
+    }
+    db.execute("DELETE FROM control_subscribers WHERE object=?", [b.object])?;
+    if let Some(id) = state.subscriber {
+        if db.execute(
+            "INSERT OR IGNORE INTO control_subscribers(subscriber,object) VALUES(?,?)",
+            params![id.0, b.object],
+        )? == 0
+        {
+            return Err(Error::Denied);
+        }
+    }
+    db.execute("INSERT INTO control_bindings(object,state) VALUES(?,?) ON CONFLICT(object) DO UPDATE SET state=excluded.state", params![b.object,encode(&state)?])?;
+    Ok(())
 }
 
 /// A latest-state input submitted by a trusted adapter. The consumer rechecks
@@ -367,9 +570,11 @@ pub struct ValidatedInput {
     pub sequence: u64,
     pub axes: [i16; 3],
     pub at_ms: u64,
+    binding: ControlBinding,
+    expires_ms: u64,
 }
 #[derive(Component, Default, Serialize, Deserialize)]
-struct InputCursor {
+pub struct InputCursor {
     binding: Option<ControlBinding>,
     through: u64,
 }
@@ -379,10 +584,7 @@ pub fn confirmed_session_input(world: &World, binding: ControlBinding) -> Result
     let group = world.get::<Managed>(e).ok_or(Error::Fenced)?.group;
     let a = state.authority(group).ok_or(Error::Fenced)?;
     if world.get::<Simulated>(e).is_none()
-        || world
-            .get_resource::<SessionDirectory>()
-            .ok_or(Error::Denied)?
-            .for_worker(a.worker, &[(binding.object, group, a.generation)])?[0]
+        || worker_states(world, a.worker, &[(binding.object, group, a.generation)])?[0]
             .is_none_or(|s| s.binding != binding)
     {
         return Err(Error::Denied);
@@ -402,6 +604,7 @@ pub struct MeshReady;
 struct Pending {
     binding: ControlBinding,
     input: Option<SessionInput>,
+    input_deadline: u64,
 }
 #[derive(Default)]
 struct MailboxShard {
@@ -409,6 +612,7 @@ struct MailboxShard {
     reserved: std::collections::HashSet<Id>,
 }
 struct Mailboxes {
+    prepared: std::sync::OnceLock<PreparedSessionControls>,
     shards: Vec<Mutex<MailboxShard>>,
     occupied: std::sync::atomic::AtomicUsize,
     limit: usize,
@@ -436,6 +640,11 @@ impl SessionIngress {
     }
     fn put(&self, new: Pending) -> Result<()> {
         use std::sync::atomic::Ordering::Relaxed;
+        if let Some(prepared) = self.0.prepared.get() {
+            if !prepared.accepts(new.binding)? {
+                return Err(Error::Denied);
+            }
+        }
         let id = new.binding.object;
         let mut shard = self.shard(id).lock().map_err(|_| Error::Fenced)?;
         if let Some(old) = shard.pending.get_mut(&id) {
@@ -466,19 +675,22 @@ impl SessionIngress {
         self.put(Pending {
             binding,
             input: None,
+            input_deadline: 0,
         })
     }
     pub fn submit(&self, input: SessionInput) -> Result<()> {
-        let now = millis(SystemTime::now())?;
-        if input.sequence == 0
-            || input.at_ms > now.saturating_add(100)
-            || now.saturating_sub(input.at_ms) > 500
-        {
+        self.submit_until(input, u64::MAX)
+    }
+    pub fn submit_until(&self, input: SessionInput, expires_ms: u64) -> Result<()> {
+        let now = control_now()?;
+        let input_deadline = expires_ms.min(input.at_ms.saturating_add(500));
+        if input.sequence == 0 || input.at_ms > now.saturating_add(100) || now >= input_deadline {
             return Err(invalid("session input outside time window"));
         }
         self.put(Pending {
             binding: input.binding,
             input: Some(input),
+            input_deadline,
         })
     }
     pub fn pending(&self) -> usize {
@@ -500,7 +712,9 @@ impl Default for MeshSessionPlugin {
 }
 impl bevy_app::Plugin for MeshSessionPlugin {
     fn build(&self, app: &mut bevy_app::App) {
-        use bevy_ecs::schedule::IntoSystemConfigs;
+        use bevy_ecs::schedule::{
+            common_conditions::resource_exists, IntoSystemConfigs, IntoSystemSetConfigs,
+        };
         let directory = app
             .world()
             .get_resource::<Store>()
@@ -521,6 +735,7 @@ impl bevy_app::Plugin for MeshSessionPlugin {
         app.insert_resource(directory)
             .init_resource::<Controlled>()
             .insert_resource(SessionIngress(Arc::new(Mailboxes {
+                prepared: Default::default(),
                 shards: (0..self.capacity.get().min(32))
                     .map(|_| Mutex::default())
                     .collect(),
@@ -533,8 +748,76 @@ impl bevy_app::Plugin for MeshSessionPlugin {
                 apply_control
                     .in_set(MeshSystems::Control)
                     .after(MeshSystems::Authority),
+            )
+            .configure_sets(
+                bevy_app::Update,
+                (MeshSystems::Control, MeshSystems::GameplayInput).chain(),
+            )
+            .configure_sets(
+                bevy_app::FixedUpdate,
+                (MeshSystems::Control, MeshSystems::GameplayInput).chain(),
+            )
+            .add_systems(
+                bevy_app::FixedFirst,
+                apply_control.run_if(resource_exists::<PreparedSessionControls>),
+            )
+            .add_systems(
+                bevy_app::FixedUpdate,
+                apply_control
+                    .in_set(MeshSystems::Control)
+                    .run_if(resource_exists::<PreparedSessionControls>),
+            )
+            .add_systems(
+                bevy_app::Update,
+                apply_control
+                    .in_set(MeshSystems::Control)
+                    .run_if(resource_exists::<PreparedSessionControls>),
             );
     }
+}
+fn worker_states(
+    world: &World,
+    worker: Worker,
+    objects: &[(Id, Id, u64)],
+) -> Result<Vec<Option<ControlState>>> {
+    if let Some(prepared) = world.get_resource::<PreparedSessionControls>() {
+        return prepared.states(worker, objects);
+    }
+    world
+        .get_resource::<SessionDirectory>()
+        .ok_or(Error::Denied)?
+        .for_worker(worker, objects)
+}
+
+/// Run on the simulation thread before acknowledging a new control barrier.
+pub(crate) fn install_control_fence(world: &mut World, binding: ControlBinding) -> Result<()> {
+    let Some(prepared) = world.get_resource::<PreparedSessionControls>() else {
+        return Ok(());
+    };
+    let state = world.resource::<MeshState>();
+    let entity = state.entities.get(&binding.object).copied();
+    if prepared.accepts(binding)? {
+        let e = entity.ok_or(Error::Fenced)?;
+        let group = world.get::<Managed>(e).ok_or(Error::Fenced)?.group;
+        let owner = state.authority(group).ok_or(Error::Fenced)?;
+        if world.get::<Simulated>(e).is_none()
+            || prepared.states(owner.worker, &[(binding.object, group, owner.generation)])?[0]
+                .is_none_or(|s| s.binding != binding)
+        {
+            return Err(Error::Fenced);
+        }
+        world.resource::<SessionIngress>().attach(binding)?;
+    } else if let Some(e) = entity {
+        if world
+            .get::<ControlBinding>(e)
+            .is_some_and(|local| local.epoch <= binding.epoch)
+        {
+            world
+                .entity_mut(e)
+                .remove::<(ControlBinding, ValidatedInput, MeshReady)>();
+        }
+    }
+    Ok(())
 }
 fn apply_control(world: &mut World) {
     if world.resource::<SessionIngress>().pending() == 0
@@ -569,8 +852,7 @@ fn apply_control(world: &mut World) {
         }
     }
     if !controlled.0.is_empty() {
-        let directory = world.resource::<SessionDirectory>().clone();
-        let now = millis(SystemTime::now()).unwrap_or(u64::MAX);
+        let now = control_now().unwrap_or(u64::MAX);
         let mut groups = BTreeMap::<Worker, Vec<_>>::new();
         let state = world.resource::<MeshState>();
         for &id in controlled.0.keys() {
@@ -589,10 +871,19 @@ fn apply_control(world: &mut World) {
         let mut next = BTreeMap::new();
         for (worker, ids) in groups {
             for batch in ids.chunks(MAX_TARGETS) {
-                let states = directory.for_worker(worker, batch);
+                let states = worker_states(world, worker, batch);
                 for (idx, &(id, _, _)) in batch.iter().enumerate() {
                     let (mut p, mut through) = controlled.0.remove(&id).unwrap();
                     let e = world.resource::<MeshState>().entities[&id];
+                    if matches!(states, Err(Error::Busy(_))) {
+                        // Fail closed for this schedule but keep the reservation
+                        // and pending sample for the next bounded refresh.
+                        world
+                            .entity_mut(e)
+                            .remove::<(ControlBinding, ValidatedInput, MeshReady)>();
+                        next.insert(id, (p, through));
+                        continue;
+                    }
                     let current =
                         states.as_ref().ok().and_then(|s| s[idx]).filter(|s| {
                             s.binding == p.binding && world.get::<Simulated>(e).is_some()
@@ -613,25 +904,30 @@ fn apply_control(world: &mut World) {
                         if let Some(i) = p
                             .input
                             .take()
-                            .filter(|i| i.sequence > through && now.saturating_sub(i.at_ms) <= 500)
+                            .filter(|i| i.sequence > through && now < p.input_deadline)
                         {
                             through = i.sequence;
-                            world.entity_mut(e).insert((
-                                ValidatedInput {
-                                    sequence: i.sequence,
-                                    axes: i.axes,
-                                    at_ms: i.at_ms,
-                                },
-                                InputCursor {
+                            let prepared = world.contains_resource::<PreparedSessionControls>();
+                            let mut entity = world.entity_mut(e);
+                            entity.insert(ValidatedInput {
+                                sequence: i.sequence,
+                                axes: i.axes,
+                                at_ms: i.at_ms,
+                                binding: p.binding,
+                                expires_ms: p.input_deadline.min(i.at_ms.saturating_add(200)),
+                            });
+                            if prepared {
+                                entity.entry::<InputCursor>().or_default();
+                            } else {
+                                entity.insert(InputCursor {
                                     binding: Some(p.binding),
                                     through,
-                                },
-                            ));
+                                });
+                            }
                         }
-                        if world
-                            .get::<ValidatedInput>(e)
-                            .is_some_and(|i| now.saturating_sub(i.at_ms) >= 200)
-                        {
+                        if world.get::<ValidatedInput>(e).is_some_and(|i| {
+                            now >= p.input_deadline || now.saturating_sub(i.at_ms) >= 200
+                        }) {
                             world.entity_mut(e).remove::<ValidatedInput>();
                         }
                         next.insert(id, (p, through));

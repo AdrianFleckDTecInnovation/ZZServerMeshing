@@ -20,6 +20,7 @@ enum Backend {
 }
 
 mod checkpoint_writer;
+pub(crate) mod installation;
 struct LocalStore {
     connection: Mutex<Connection>,
     writer: Option<checkpoint_writer::Writer>,
@@ -133,6 +134,22 @@ pub enum Lookup {
     Present(Record),
 }
 
+fn create_group_at(c: &Connection, group: Id, worker: Worker) -> Result<Authority> {
+    live(c, worker)?;
+    accepting(c, worker)?;
+    c.execute(
+        "INSERT INTO units(id,slot,inc,gen) VALUES(?,?,?,1)",
+        params![group, worker.slot, worker.incarnation],
+    )?;
+    // A provisioned empty group has no object checkpoint to announce it.
+    c.execute("UPDATE clock SET mark=mark+1", [])?;
+    c.execute(
+        "INSERT OR REPLACE INTO notices(slot,unit,mark) SELECT ?,?,mark FROM clock",
+        params![worker.slot, group],
+    )?;
+    authority(c, group)
+}
+
 pub(crate) fn authority(c: &Connection, group: Id) -> Result<Authority> {
     Ok(
         c.prepare_cached("SELECT slot,inc,gen FROM units WHERE id=?")?
@@ -161,18 +178,23 @@ pub(crate) fn live(c: &Connection, w: Worker) -> Result<()> {
 }
 pub(crate) fn fence(c: &Connection, g: Id, a: Authority, writing: bool) -> Result<u64> {
     live(c, a.worker)?;
-    let row: Option<(u64, bool)> = c
+    let row: Option<(u64, bool, Option<Id>)> = c
         .prepare_cached(
-            "SELECT rev,frozen IS NOT NULL FROM units WHERE id=? AND slot=? AND inc=? AND gen=?",
+            "SELECT rev,frozen IS NOT NULL,(SELECT token FROM group_installations WHERE unit=units.id) FROM units WHERE id=? AND slot=? AND inc=? AND gen=?",
         )?
         .query_row(
             params![g, a.worker.slot, a.worker.incarnation, a.generation],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     match row {
-        Some((_, true)) if writing => Err(Error::Busy("unit frozen for cutover")),
-        Some((rev, _)) => Ok(rev),
+        Some((_, true, _)) if writing => Err(Error::Busy("unit frozen for cutover")),
+        Some((rev, _, install)) => {
+            if let (true, Some(token)) = (writing, install) {
+                installation::permit_write(c, g, token)?;
+            }
+            Ok(rev)
+        }
         None => Err(Error::Fenced),
     }
 }
@@ -216,8 +238,26 @@ pub(crate) fn snapshot(c: &Connection, g: Id) -> Result<Snapshot> {
 impl Store {
     /// Open a persistent world and atomically upgrade v1 records to checksummed v2 storage.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = Self::open_once(
+                path.as_ref(),
+                until.saturating_duration_since(std::time::Instant::now()),
+            );
+            let retry = matches!(&result,Err(Error::Sql(rusqlite::Error::SqliteFailure(e,_))) if matches!(e.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked));
+            let remaining = until.saturating_duration_since(std::time::Instant::now());
+            if !retry || remaining.is_zero() {
+                return result;
+            }
+            // Concurrent fresh processes can receive BUSY immediately when
+            // changing journal_mode. Reopen from the durable schema version.
+            std::thread::sleep(Duration::from_millis(10).min(remaining));
+        }
+    }
+    fn open_once(path: &Path, timeout: Duration) -> Result<Self> {
         let mut c = Connection::open(path)?;
-        c.busy_timeout(Duration::from_secs(5))?;
+        c.busy_timeout(timeout)?;
         c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
         if store_format(&c)? != STORE_FORMAT {
             let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -263,6 +303,12 @@ impl Store {
         match &self.0 {
             Backend::Network(c) => Some(c),
             Backend::Local(_) => None,
+        }
+    }
+    pub(crate) fn independent_link(&self) -> Self {
+        match self.remote_connection() {
+            Some(remote) => Self(Backend::Network(Arc::new(remote.independent_link()))),
+            None => self.clone(),
         }
     }
     /// Cumulative TLS and payload counters for this worker's authority link, including reconnects.
@@ -444,14 +490,25 @@ impl Store {
         if slot == 0 {
             return Err(invalid("worker slots start at one"));
         }
-        self.write(|c| {
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let result = self.write(|c| {
+            installation::permit_restart(c, slot)?;
             let incarnation=c.query_row("INSERT INTO workers VALUES(?,1) ON CONFLICT(slot) DO UPDATE SET incarnation=incarnation+1 RETURNING incarnation",[slot],|r|r.get(0))?;
             if let Some(cert) = certificate {
                 c.execute("INSERT OR REPLACE INTO credentials VALUES(?,?,?)",
                     params![slot, incarnation, cert.0.as_slice()])?;
             }
             Ok(Worker{slot,incarnation})
-        })
+            });
+            if !matches!(result, Err(Error::Busy(installation::INSTALL_BUSY)))
+                || std::time::Instant::now() >= until
+            {
+                return result;
+            }
+            // Operator/startup path. No transaction is held across this wait.
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     pub fn advertise(&self, w: Worker, addr: std::net::SocketAddr) -> Result<()> {
         if let Some(c) = self.remote_connection() {
@@ -579,25 +636,45 @@ impl Store {
         live(&c, w)?;
         Ok(w)
     }
+    /// Atomically find an existing group, or assign a new game object group
+    /// to an advertised non-draining worker with the fewest owned groups.
+    /// Repeating this after a host crash returns the same current authority.
+    pub fn place_initial_group(&self, g: Id) -> Result<Authority> {
+        if let Some(c) = self.remote_connection() {
+            return c.call(Op::PlaceInitialGroup(g));
+        }
+        self.write(|c| {
+            match authority(c, g) {
+                Ok(owner) => return Ok(owner),
+                Err(Error::Missing(_)) => (),
+                Err(err) => return Err(err),
+            }
+            let worker = c
+                .query_row(
+                    "SELECT w.slot,w.incarnation FROM workers w
+                 JOIN addresses a ON a.slot=w.slot AND a.inc=w.incarnation
+                 LEFT JOIN draining_slots d ON d.slot=w.slot
+                 LEFT JOIN units u ON u.slot=w.slot AND u.inc=w.incarnation
+                 WHERE d.slot IS NULL GROUP BY w.slot,w.incarnation
+                 ORDER BY COUNT(u.id),w.slot LIMIT 1",
+                    [],
+                    |r| {
+                        Ok(Worker {
+                            slot: r.get(0)?,
+                            incarnation: r.get(1)?,
+                        })
+                    },
+                )
+                .optional()?
+                .ok_or(Error::Busy("no accepting mesh worker"))?;
+            create_group_at(c, g, worker)
+        })
+    }
     pub fn create_group(&self, g: Id, w: Worker) -> Result<Authority> {
         if let Some(c) = self.remote_connection() {
             return c.call(Op::Create(g, w));
         }
-        self.write(|c| {
-            live(c, w)?;
-            accepting(c, w)?;
-            c.execute(
-                "INSERT INTO units(id,slot,inc,gen) VALUES(?,?,?,1)",
-                params![g, w.slot, w.incarnation],
-            )?;
-            // A provisioned empty group has no object checkpoint to announce it.
-            c.execute("UPDATE clock SET mark=mark+1", [])?;
-            c.execute(
-                "INSERT OR REPLACE INTO notices(slot,unit,mark) SELECT ?,?,mark FROM clock",
-                params![w.slot, g],
-            )?;
-            authority(c, g)
-        })
+        self.write(|c| create_group_at(c, g, w))
     }
     pub fn owner(&self, g: Id) -> Result<Authority> {
         if let Some(c) = self.remote_connection() {
@@ -620,6 +697,7 @@ impl Store {
             return c.call(Op::Notices(w, since));
         }
         let c = self.lock()?;
+        live(&c, w)?;
         let mut q=c.prepare_cached("SELECT n.mark,u.id,u.slot,u.inc,u.gen,u.rev FROM notices n JOIN units u ON u.id=n.unit WHERE n.slot=? AND n.mark>? ORDER BY n.mark LIMIT 128")?;
         let rows = q.query_map(params![w.slot, since], |r| {
             Ok((
@@ -1130,6 +1208,7 @@ fn put(c: &Connection, mut r: Record, rev: u64) -> Result<()> {
             if r.revision != 0 || r.deleted {
                 return Err(Error::Fenced);
             }
+            installation::check_new_name(c, r.id)?;
             if c.execute(
                 "INSERT OR IGNORE INTO names VALUES(?,?)",
                 params![r.id, r.group],

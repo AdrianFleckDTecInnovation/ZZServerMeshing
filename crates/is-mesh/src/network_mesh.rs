@@ -291,7 +291,12 @@ impl Broker {
     }
 }
 type Connector = Arc<dyn Fn(Worker) -> Result<Client> + Send + Sync>;
-type Task = (Worker, Request);
+#[derive(Clone, Copy)]
+enum Destination {
+    Directory,
+    Worker(Worker),
+}
+type Task = (Destination, Request);
 /// Advance over a continuously changing backlog. An ACK removes only matching
 /// revisions, so a hot prefix can otherwise occupy every single report.
 fn report_page(pending: &BTreeMap<Id, u64>, cursor: &mut Option<Id>) -> Vec<(Id, u64)> {
@@ -310,7 +315,7 @@ fn report_page(pending: &BTreeMap<Id, u64>, cursor: &mut Option<Id>) -> Vec<(Id,
 }
 struct Lane {
     send: SyncSender<Task>,
-    receive: Receiver<(Worker, Result<Response>, Option<Report>)>,
+    receive: Receiver<(Destination, Result<Response>, Option<Report>)>,
 }
 
 #[cfg(test)]
@@ -391,13 +396,17 @@ mod paging_tests {
     }
 }
 impl Lane {
-    fn new(connect: Connector) -> Self {
+    fn new(connect: Connector, directory: Store) -> Self {
         let (tx, rx) = mpsc::sync_channel::<Task>(8);
         let (out, recv) = mpsc::sync_channel(8);
         std::thread::spawn(move || {
             let mut peers = BTreeMap::<Worker, Client>::new();
-            while let Ok((w, msg)) = rx.recv() {
-                let reply = (|| {
+            while let Ok((destination, msg)) = rx.recv() {
+                let target = match destination {
+                    Destination::Directory => directory.worker(1),
+                    Destination::Worker(worker) => Ok(worker),
+                };
+                let reply = target.and_then(|w| {
                     if let Some(client) = peers.get_mut(&w) {
                         match client.call(&msg) {
                             // The listener releases idle sockets. Both lane messages carry
@@ -405,7 +414,11 @@ impl Lane {
                             Err(Error::Io(_)) => {
                                 peers.remove(&w);
                             }
-                            other => return other,
+                            Ok(response) => return Ok(response),
+                            Err(error) => {
+                                peers.remove(&w);
+                                return Err(error);
+                            }
                         }
                     }
                     if peers.len() >= 64 {
@@ -415,17 +428,14 @@ impl Lane {
                     let response = client.call(&msg)?;
                     peers.insert(w, client);
                     Ok(response)
-                })();
-                if reply.is_err() {
-                    peers.remove(&w);
-                }
+                });
                 // The control lane returns its original page for an exact replay on
                 // failure. Data batches can release their payload as soon as TLS returns.
                 let report = match msg {
                     Request::Spatial(report) => Some(report),
                     _ => None,
                 };
-                if out.send((w, reply, report)).is_err() {
+                if out.send((destination, reply, report)).is_err() {
                     break;
                 }
             }
@@ -477,11 +487,12 @@ impl PeerMesh {
         connect: impl Fn(Worker) -> Result<Client> + Send + Sync + 'static,
     ) -> Self {
         let connect: Connector = Arc::new(connect);
+        let directory = db.independent_link();
         Self {
             db,
             here: w,
-            control: Lane::new(connect.clone()),
-            updates: Lane::new(connect),
+            control: Lane::new(connect.clone(), directory.clone()),
+            updates: Lane::new(connect, directory),
             own: Default::default(),
             views: Default::default(),
             publisher: Publisher::new(LINKS),
@@ -607,7 +618,6 @@ impl PeerMesh {
             }
         }
         if self.inflight.is_none() {
-            let broker = self.db.worker(1)?;
             let (report, sent) = self.retry.take().unwrap_or_else(|| {
                 let sent = report_page(&self.pending, &mut self.report_cursor);
                 let changes = sent
@@ -627,7 +637,7 @@ impl PeerMesh {
             match self
                 .control
                 .send
-                .try_send((broker, Request::Spatial(report)))
+                .try_send((Destination::Directory, Request::Spatial(report)))
             {
                 Ok(()) => self.inflight = Some(sent),
                 Err(e) => {
@@ -643,7 +653,7 @@ impl PeerMesh {
                 }
             }
         }
-        while let Ok((to, response, _)) = self.updates.receive.try_recv() {
+        while let Ok((Destination::Worker(to), response, _)) = self.updates.receive.try_recv() {
             match response {
                 Ok(Response::Applied(acks)) => {
                     for (id, epoch, serial) in acks {
@@ -670,7 +680,7 @@ impl PeerMesh {
                     if self
                         .updates
                         .send
-                        .try_send((to, Request::Push(part)))
+                        .try_send((Destination::Worker(to), Request::Push(part)))
                         .is_ok()
                     {
                         self.frames_out += count as u64;
@@ -699,13 +709,22 @@ impl PeerMesh {
         if updates.len() > MAX_TARGETS {
             return Err(Error::Busy("peer update batch"));
         }
-        let mut ack = vec![];
         let ids: Vec<_> = updates
             .iter()
             .filter(|u| self.views.interested(u.object, u.epoch))
             .map(|u| u.object)
             .collect();
         let owners = self.db.authorities(&ids)?;
+        self.receive_prepared(w, from, updates, &owners)
+    }
+    pub(crate) fn receive_prepared(
+        &mut self,
+        w: &mut World,
+        from: Worker,
+        updates: Vec<Update>,
+        owners: &BTreeMap<Id, (Id, Authority)>,
+    ) -> Result<Response> {
+        let mut ack = vec![];
         for u in updates {
             if !self.views.interested(u.object, u.epoch) {
                 continue;

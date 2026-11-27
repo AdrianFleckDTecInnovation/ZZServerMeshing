@@ -37,6 +37,10 @@ mod placement;
 mod pool;
 mod regions;
 mod session;
+mod session_commands;
+pub use session_commands::{
+    register_session_command, CommandStatus, RoutedCommand, MAX_COMMAND_BYTES,
+};
 mod sight;
 pub use session::*;
 mod external;

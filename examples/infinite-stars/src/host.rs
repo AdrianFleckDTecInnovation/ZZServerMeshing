@@ -1,4 +1,5 @@
 use crate::*;
+mod bench;
 use is_mesh::wire::{Identity, Role, Service};
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use std::{
@@ -30,6 +31,7 @@ pub(crate) struct HostLimits {
     cpu_cores: std::num::NonZeroUsize,
     cpu_ids: Option<Vec<usize>>,
     internal_connections: Option<std::num::NonZeroUsize>,
+    internal_jobs: std::num::NonZeroUsize,
     reference_players: bool,
     requests: mesh::remote::RequestBudgets,
     subscriber: SubscriberPolicy,
@@ -45,6 +47,7 @@ impl Default for HostLimits {
             memory_bytes: p.memory_bytes,
             cpu_cores: std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
             internal_connections: None,
+            internal_jobs: 4.try_into().unwrap(),
             reference_players: true,
             requests: Default::default(),
             cpu_ids: None,
@@ -237,12 +240,33 @@ pub fn listen(
     addr: std::net::SocketAddr,
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
+    listen_configured(dir, slot, addr, ready, true, |_| Ok(()))
+}
+
+/// Embed the existing worker host with game-provided systems. Public game
+/// gateways can disable the reference certificate login entirely.
+pub fn listen_configured(
+    dir: PathBuf,
+    slot: u32,
+    addr: std::net::SocketAddr,
+    ready: Option<PathBuf>,
+    reference_players: bool,
+    configure: impl FnOnce(&mut App) -> mesh::Result<()>,
+) -> mesh::Result<()> {
     let settings = SpaceSettings::load(&dir)?;
-    let limits = HostLimits::read(&dir)?;
-    init_tls(&dir)?;
+    let mut limits = HostLimits::read(&dir)?;
+    limits.reference_players &= reference_players;
+    if reference_players {
+        init_tls(&dir)?;
+    } else {
+        // Enable the existing authenticated supervisor for the local
+        // session-only worker. The operator credential stays in this realm.
+        crate::deployment::authority_keys(&dir)?;
+    }
     let db = Store::open(dir.join("world.sqlite"))?;
     let w = db.start_worker(slot)?;
-    let app = resume_node_with_capacity(&db, w, settings, limits.session_capacity)?;
+    let mut app = resume_node_with_capacity(&db, w, settings, limits.session_capacity)?;
+    configure(&mut app)?;
     provision_worker(&dir, &db, w)?;
     let cred = identity(&dir, &worker_name(w))?;
     run_node(dir, db, w, app, cred, addr, ready, limits)
@@ -274,11 +298,12 @@ pub(crate) fn run_node(
         .init_resource::<GroupTimings>();
     let player = digest(&fs::read(dir.join("player.der"))?);
     let distributed = dir.join("enrol.der").exists();
-    let operator = if distributed {
-        Some(digest(&fs::read(dir.join("operator.der"))?))
-    } else {
-        None
-    };
+    let operator =
+        if distributed || (!limits.reference_players && dir.join("operator.der").is_file()) {
+            Some(digest(&fs::read(dir.join("operator.der"))?))
+        } else {
+            None
+        };
     let registry = db.clone();
     let listener = is_mesh::wire::Listener::bind_resolved(
         addr,
@@ -342,7 +367,7 @@ pub(crate) fn run_node(
             outbound.clone(),
         )
     };
-    let (svc, mut event_loop) = mesh::remote::worker_with_budgets(
+    let (mut svc, mut event_loop) = mesh::remote::worker_with_budgets(
         service(&db, w),
         app.world().resource::<BlobCache>().clone(),
         app.world().resource::<SightRanges>().clone(),
@@ -350,6 +375,11 @@ pub(crate) fn run_node(
         limits.requests,
         limits.subscriber,
     );
+    if let Some(controls) = app.world().get_resource::<PreparedSessionControls>() {
+        Arc::get_mut(&mut svc)
+            .ok_or_else(|| invalid("worker endpoint already published"))?
+            .use_prepared_controls(controls.clone());
+    }
     event_loop.observe_transport(listener.traffic.clone());
     event_loop.observe_transport(traffic);
     if let Some(traffic) = db.network_traffic() {
@@ -360,7 +390,16 @@ pub(crate) fn run_node(
     let connections = limits
         .internal_connections
         .map_or(if distributed { 256 } else { 16 }, |n| n.get());
-    let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), connections));
+    let session_worker = app.world().contains_resource::<PreparedSessionControls>();
+    let jobs = limits.internal_jobs.get().min(connections);
+    let thread = std::thread::spawn(move || {
+        if session_worker {
+            listener.serve_shared(svc, Default::default(), connections, jobs)
+        } else {
+            listener.serve(svc, Default::default(), connections)
+        }
+    });
+    let mut tick_log = bench::TickLog::open()?;
     let mut next = std::time::Instant::now();
     while !thread.is_finished() {
         if std::time::Instant::now() >= next {
@@ -383,6 +422,14 @@ pub(crate) fn run_node(
                 tick_start.saturating_duration_since(next),
                 detail,
             );
+            if let Some(log) = &mut tick_log {
+                let elapsed = tick_start.elapsed();
+                let pending = app
+                    .world()
+                    .get_resource::<is_mesh::SessionIngress>()
+                    .map_or(0, is_mesh::SessionIngress::pending);
+                log.record(tick_start, elapsed, ecs, peers, pending)?;
+            }
             next = tick_start + std::time::Duration::from_millis(50);
         }
         event_loop.pump(app.world_mut(), 16, std::time::Duration::from_millis(3));

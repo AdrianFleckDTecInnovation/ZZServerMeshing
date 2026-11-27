@@ -1,6 +1,8 @@
 //! Handoff over separate authenticated control and bulk connections. The caller can
 //! reconnect and resume with the same ticket. SQLite is the decision authority.
+mod runtime;
 use crate::{
+    subscriber::{Publication, ReadAccess},
     wire::{Client, Endpoint, Request, Response, Role, Service},
     *,
 };
@@ -56,7 +58,8 @@ pub enum Answer {
     Done,
 }
 enum Work {
-    Subscriber(StreamPoll, Option<SubscriberPlan>),
+    World(runtime::Job),
+    Subscriber(StreamPoll, Option<SubscriberPlan>, Arc<Publication>),
     Rpc(Request),
     Sight(SightPlan),
 }
@@ -92,6 +95,9 @@ struct Downloads {
 }
 /// Network threads perform bounded blob processing. Only the main thread touches Bevy.
 pub struct WorkerEndpoint {
+    migration_store: Store,
+    replica_store: Store,
+    prepared_controls: Option<PreparedSessionControls>,
     sight: Option<SightAccess>,
     broker: Option<Mutex<crate::network_mesh::Broker>>,
     service: Arc<Service>,
@@ -133,6 +139,7 @@ struct LiveStream {
     view: SubscriberStream,
     plan: SubscriberPlan,
     last: Instant,
+    publication: Option<Arc<Publication>>,
 }
 pub fn worker(service: Arc<Service>, initial: BlobCache) -> (Arc<WorkerEndpoint>, WorkerLoop) {
     make_worker(service, initial, None, RequestBudgets::default())
@@ -193,6 +200,9 @@ fn make_worker(
         .map(Mutex::new);
     (
         Arc::new(WorkerEndpoint {
+            migration_store: service.store.independent_link(),
+            replica_store: service.store.independent_link(),
+            prepared_controls: None,
             sight,
             broker,
             service: service.clone(),
@@ -248,6 +258,10 @@ fn allowed(service: &Service, role: Role, t: Handoff) -> Result<()> {
     service.store.check_worker(service.worker)
 }
 impl WorkerEndpoint {
+    /// Install the same bounded view as the worker simulation before serving.
+    pub fn use_prepared_controls(&mut self, permits: PreparedSessionControls) {
+        self.prepared_controls = Some(permits);
+    }
     fn plan(&self, poll: StreamPoll, source: Worker) -> Result<Response> {
         self.with_viewer(poll.binding.object, |index, rules| {
             let version = (self.service.worker, index.sight_revision);
@@ -385,9 +399,17 @@ impl WorkerEndpoint {
                     | Request::Load { .. }
                     | Request::Control(..)
             )
+        ) || matches!(
+            &work,
+            Work::World(
+                runtime::Job::Handoff(..) | runtime::Job::Health(..) | runtime::Job::Diagnostics
+            )
         ) {
             &self.management
-        } else if matches!(work, Work::Rpc(Request::Push(_))) {
+        } else if matches!(
+            work,
+            Work::Rpc(Request::Push(_)) | Work::World(runtime::Job::Peer { .. })
+        ) {
             &self.peer_requests
         } else {
             &self.requests
@@ -420,12 +442,12 @@ impl WorkerEndpoint {
             return Err(Error::Denied);
         }
         if !matches!(
-            self.service.store.handoff_phase(t)?,
+            self.migration_store.handoff_phase(t)?,
             Phase::Preparing | Phase::Frozen | Phase::Ready
         ) {
             return Err(Error::Fenced);
         }
-        if !self.service.store.requires(t.group, m)? {
+        if !self.migration_store.requires(t.group, m)? {
             return Err(Error::Missing("required dataset version changed".into()));
         }
         let provider = self.service.providers.get(m.key.provider)?;
@@ -458,7 +480,7 @@ impl WorkerEndpoint {
                 if let Some((other, _)) = &d.partial {
                     if *other != t
                         && matches!(
-                            self.service.store.handoff_phase(*other),
+                            self.migration_store.handoff_phase(*other),
                             Ok(Phase::Preparing | Phase::Frozen | Phase::Ready)
                         )
                     {
@@ -566,6 +588,23 @@ impl Endpoint for WorkerEndpoint {
                 if role != Role::Operator {
                     return Err(Error::Denied);
                 }
+                if self.prepared_controls.is_some() {
+                    match request {
+                        Request::Health => {
+                            let (draining, groups) =
+                                self.migration_store.drain_status(self.service.worker)?;
+                            return self.enqueue(
+                                role,
+                                Work::World(runtime::Job::Health(draining, groups)),
+                            );
+                        }
+                        Request::Shutdown => {
+                            self.migration_store.retire(self.service.worker)?;
+                            return Ok(Response::Stopped);
+                        }
+                        _ => (),
+                    }
+                }
             }
             Request::Load { required, .. } => {
                 if role != Role::Operator {
@@ -575,7 +614,56 @@ impl Endpoint for WorkerEndpoint {
                     return Err(Error::Busy("placement probe manifests"));
                 }
             }
-            Request::SessionInputs(inputs) => {
+            Request::SessionMovement(entries) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                if entries.is_empty() || entries.len() > 64 {
+                    return Err(Error::Busy("movement batch"));
+                }
+                self.service.store.check_worker(source)?;
+                let controls = self.prepared_controls.as_ref().ok_or(Error::Denied)?;
+                let bindings: Vec<_> = entries
+                    .iter()
+                    .map(|(sample, _, _)| sample.binding)
+                    .collect();
+                let accepted = controls.observe_independent(
+                    &self.service.store,
+                    self.service.worker,
+                    &bindings,
+                )?;
+                let batch = entries
+                    .iter()
+                    .zip(accepted)
+                    .map(|(&(sample, deadline, submit), valid)| {
+                        (sample, if valid { deadline } else { 0 }, submit)
+                    })
+                    .collect();
+                return self.enqueue(role, Work::Rpc(Request::SessionMovement(batch)));
+            }
+            Request::SessionCommand(command) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+                if !command.valid() {
+                    return Ok(Response::SessionCommand(CommandStatus::Rejected));
+                }
+                let Some(controls) = &self.prepared_controls else {
+                    return Err(Error::Denied);
+                };
+                if command.owner.worker != self.service.worker
+                    || !controls.observe_independent(
+                        &self.service.store,
+                        self.service.worker,
+                        &[command.binding],
+                    )?[0]
+                {
+                    return Ok(Response::SessionCommand(CommandStatus::Stale));
+                }
+                return self.enqueue(role, Work::Rpc(request));
+            }
+            Request::SessionInputs(inputs) | Request::SessionInputsUntil(inputs, _) => {
                 let Role::Worker(source) = role else {
                     return Err(Error::Denied);
                 };
@@ -583,8 +671,75 @@ impl Endpoint for WorkerEndpoint {
                     return Err(Error::Busy("routed input batch"));
                 }
                 self.service.store.check_worker(source)?;
+                // Reject pre-sync or stale samples before they enter the ECS
+                // queue. The simulation independently fences them again.
+                if let Some(controls) = &self.prepared_controls {
+                    let bindings: Vec<_> = inputs.iter().map(|i| i.binding).collect();
+                    controls.observe(&self.service.store, self.service.worker, &bindings, true)?;
+                    return self.enqueue(role, Work::Rpc(request));
+                }
+                let ids: Vec<_> = inputs.iter().map(|i| i.binding.object).collect();
+                let owners = self.service.store.authorities(&ids)?;
+                let triples: Vec<_> = ids
+                    .iter()
+                    .map(|id| {
+                        let (group, a) = owners.get(id).ok_or(Error::Fenced)?;
+                        if a.worker != self.service.worker {
+                            return Err(Error::Fenced);
+                        }
+                        Ok((*id, *group, a.generation))
+                    })
+                    .collect::<Result<_>>()?;
+                let states = self
+                    .service
+                    .store
+                    .worker_controls(self.service.worker, &triples)?;
+                if inputs
+                    .iter()
+                    .zip(states)
+                    .any(|(i, s)| s.is_none_or(|s| s.binding != i.binding))
+                {
+                    return Err(Error::Denied);
+                }
             }
-            Request::SessionProgress(_) => {
+            Request::SessionFence(binding) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+                if let Some(controls) = &self.prepared_controls {
+                    controls.observe(
+                        &self.service.store,
+                        self.service.worker,
+                        &[*binding],
+                        false,
+                    )?;
+                } else {
+                    // The compatibility world reads the authority directly on every tick.
+                    let current = self.service.store.control_states(&[binding.object])?;
+                    if current[0].is_none_or(|s| s.binding != *binding) {
+                        return Err(Error::Fenced);
+                    }
+                }
+                // Receipt is emitted on the simulation thread after any
+                // gameplay tick which had already observed the previous grant.
+                return self.enqueue(role, Work::Rpc(request));
+            }
+            Request::SessionProgress(binding) => {
+                let Role::Worker(source) = role else {
+                    return Err(Error::Denied);
+                };
+                self.service.store.check_worker(source)?;
+                if let Some(controls) = &self.prepared_controls {
+                    controls.observe(
+                        &self.service.store,
+                        self.service.worker,
+                        &[*binding],
+                        true,
+                    )?;
+                }
+            }
+            Request::SubscriberBaseline(..) => {
                 let Role::Worker(source) = role else {
                     return Err(Error::Denied);
                 };
@@ -650,19 +805,44 @@ impl Endpoint for WorkerEndpoint {
                 let Response::SubscriberPlan(plan) = response else {
                     return Err(invalid("subscriber directory unavailable"));
                 };
-                return self.enqueue(role, Work::Subscriber(*poll, plan));
+                let publication = Arc::new(Publication::new(*poll));
+                let result = self
+                    .enqueue(role, Work::Subscriber(*poll, plan, publication.clone()))
+                    .and_then(|r| {
+                        if matches!(&r, Response::Subscriber(reply) if reply.frame.is_some()) {
+                            publication.validate(&self.service.store, self.service.worker)?;
+                        }
+                        Ok(r)
+                    });
+                let _ = publication.sent.set(result.is_ok());
+                return result;
             }
             Request::Control(t, c) => {
                 allowed(&self.service, role, *t)?;
                 if let Some(a) = self.bulk(*t, c)? {
                     return Ok(Response::Control(a));
                 }
+                if self.prepared_controls.is_some() {
+                    return runtime::handoff(self, role, *t, c.clone()).map(Response::Control);
+                }
             }
-            Request::Push(_) => {
+            Request::Push(updates) => {
                 let Role::Worker(source) = role else {
                     return Err(Error::Denied);
                 };
                 self.service.store.check_worker(source)?;
+                if self.prepared_controls.is_some() {
+                    return runtime::peer(self, role, source, updates.clone());
+                }
+            }
+            Request::Diagnostics if self.prepared_controls.is_some() => {
+                let caller = match role {
+                    Role::Worker(w) => w,
+                    Role::Operator => self.service.worker,
+                    _ => return Err(Error::Denied),
+                };
+                self.migration_store.check_worker(caller)?;
+                return self.enqueue(role, Work::World(runtime::Job::Diagnostics));
             }
             Request::Sync { .. }
             | Request::Diagnostics
@@ -818,25 +998,29 @@ impl WorkerLoop {
             self.streams
                 .retain(|_, s| s.last.elapsed() < Duration::from_secs(60));
             self.next_decision_check = Instant::now() + Duration::from_millis(100);
-            self.paused.retain(
-                |group, ticket| match self.service.store.handoff_phase(*ticket) {
-                    Ok(Phase::Aborted) => {
-                        crate::bevy_runtime::pause_group(w, *group, false);
-                        false
+            if w.contains_resource::<PreparedAuthority>() {
+                runtime::decisions(self, w);
+            } else {
+                self.paused.retain(|group, ticket| {
+                    match self.service.store.handoff_phase(*ticket) {
+                        Ok(Phase::Aborted) => {
+                            crate::bevy_runtime::pause_group(w, *group, false);
+                            false
+                        }
+                        Ok(Phase::Switched) => {
+                            crate::bevy_runtime::demote(w, *group);
+                            false
+                        }
+                        _ => true,
                     }
-                    Ok(Phase::Switched) => {
-                        crate::bevy_runtime::demote(w, *group);
-                        false
+                });
+                if let Some((t, _)) = &self.staged {
+                    if matches!(self.service.store.handoff_phase(*t), Ok(Phase::Aborted)) {
+                        w.resource_mut::<MeshState>()
+                            .external_staging
+                            .remove(&t.group);
+                        self.staged.take().unwrap().1.discard(w);
                     }
-                    _ => true,
-                },
-            );
-            if let Some((t, _)) = &self.staged {
-                if matches!(self.service.store.handoff_phase(*t), Ok(Phase::Aborted)) {
-                    w.resource_mut::<MeshState>()
-                        .external_staging
-                        .remove(&t.group);
-                    self.staged.take().unwrap().1.discard(w);
                 }
             }
         }
@@ -850,16 +1034,25 @@ impl WorkerLoop {
                     a.first().map(|i| i.key.session).unwrap_or(Id::numbered(0))
                 }
                 Work::Rpc(Request::Input(i)) => i.session,
-                Work::Rpc(Request::SessionInputs(batch)) => batch
+                Work::Rpc(
+                    Request::SessionInputs(batch) | Request::SessionInputsUntil(batch, _),
+                ) => batch
                     .first()
                     .map_or(Id::numbered(0), |i| i.binding.session.0),
-                Work::Rpc(Request::SessionProgress(binding)) => binding.session.0,
+                Work::Rpc(Request::SessionProgress(binding) | Request::SessionFence(binding)) => {
+                    binding.session.0
+                }
+                Work::Rpc(Request::SessionCommand(c)) => c.binding.session.0,
+                Work::Rpc(Request::SessionMovement(batch)) => batch
+                    .first()
+                    .map_or(Id::numbered(0), |e| e.0.binding.session.0),
+                Work::Rpc(Request::SubscriberBaseline(binding, ..)) => binding.session.0,
                 Work::Rpc(Request::Sync { session, .. }) => *session,
                 Work::Sight(_) => match job.0 {
                     Role::Player(id) => id,
                     _ => Id::numbered(0),
                 },
-                Work::Subscriber(poll, _) => poll.binding.session.0,
+                Work::Subscriber(poll, ..) => poll.binding.session.0,
                 _ => Id::numbered(0),
             };
             let queue = self.sessions.entry(session).or_default();
@@ -900,11 +1093,16 @@ impl WorkerLoop {
                 - 1;
             self.queue_wait = self.queue_wait.max(enqueued.elapsed());
             let req = match req {
+                Work::World(job) => {
+                    flush_inputs(w, &mut samples, &mut replies);
+                    let _ = reply.send(runtime::consume(self, w, job));
+                    continue;
+                }
                 Work::Rpc(r) => r,
-                Work::Subscriber(poll, plan) => {
+                Work::Subscriber(poll, plan, publication) => {
                     flush_inputs(w, &mut samples, &mut replies);
                     let start = Instant::now();
-                    let result = self.stream(w, poll, plan);
+                    let result = self.stream(w, poll, plan, publication);
                     if let Some(mut t) = w.get_resource_mut::<WorkerTimings>() {
                         t.subscriber_us += start.elapsed().as_micros() as u64;
                     }
@@ -939,6 +1137,10 @@ impl WorkerLoop {
             }
             flush_inputs(w, &mut samples, &mut replies);
             let start_request = Instant::now();
+            let input_deadline = match &req {
+                Request::SessionInputsUntil(_, expires) => *expires,
+                _ => u64::MAX,
+            };
             let action = matches!(req, Request::Actions(_));
             let migration = matches!(req, Request::Control(..));
             let result = match req {
@@ -979,10 +1181,49 @@ impl WorkerLoop {
                     .store
                     .retire(self.service.worker)
                     .map(|_| Response::Stopped),
+                Request::SessionCommand(command) => Ok(Response::SessionCommand(
+                    crate::session_commands::execute(w, command),
+                )),
+                Request::SessionMovement(batch) => {
+                    let ingress = w.get_resource::<SessionIngress>();
+                    let results = batch
+                        .into_iter()
+                        .map(|(sample, deadline, submit)| {
+                            if deadline == 0 {
+                                return None;
+                            }
+                            let binding = sample.binding;
+                            let entity =
+                                *w.resource::<MeshState>().entities.get(&binding.object)?;
+                            w.get::<Simulated>(entity)?;
+                            if submit {
+                                ingress?.submit_until(sample, deadline).ok()?;
+                            }
+                            confirmed_session_input(w, binding).ok()
+                        })
+                        .collect();
+                    Ok(Response::SessionMovement(results))
+                }
                 Request::SessionProgress(binding) => {
                     confirmed_session_input(w, binding).map(Response::Input)
                 }
-                Request::SessionInputs(inputs) => (|| {
+                Request::SessionFence(binding) => {
+                    crate::session::install_control_fence(w, binding).map(|_| Response::Approved)
+                }
+                Request::SubscriberBaseline(binding, subscriber, stream, sequence) => {
+                    if self.streams.get(&subscriber).is_some_and(|s| {
+                        s.id == stream
+                            && s.publication
+                                .as_ref()
+                                .is_some_and(|p| p.sent.get() == Some(&true))
+                            && s.view.offered_baseline(binding, sequence)
+                    }) {
+                        Ok(Response::Approved)
+                    } else {
+                        Err(Error::Fenced)
+                    }
+                }
+                Request::SessionInputs(inputs) | Request::SessionInputsUntil(inputs, _) => (|| {
                     let ingress = w
                         .get_resource::<SessionIngress>()
                         .ok_or_else(|| invalid("external session ingress missing"))?;
@@ -995,10 +1236,11 @@ impl WorkerLoop {
                         if !authoritative {
                             return Err(Error::Fenced);
                         }
-                        ingress.submit(input)?;
+                        ingress.submit_until(input, input_deadline)?;
                     }
                     Ok(Response::Approved)
-                })(),
+                })(
+                ),
                 Request::Load { group, required } => {
                     let cache = w.resource::<BlobCache>();
                     let policy = w
@@ -1106,13 +1348,20 @@ impl WorkerLoop {
         w: &mut World,
         poll: StreamPoll,
         plan: Option<SubscriberPlan>,
+        publication: Arc<Publication>,
     ) -> Result<Response> {
-        let directory = w
-            .get_resource::<SessionDirectory>()
-            .ok_or_else(|| invalid("external session plugin missing"))?
-            .clone();
-        if !directory.authorized_subscriber(poll.binding, poll.subscriber)? {
-            return Err(Error::Denied);
+        if !w.contains_resource::<SessionIngress>() {
+            return Err(invalid("external session plugin missing"));
+        }
+        let access = ReadAccess::Network(&publication);
+        if let Some(live) = self.streams.get_mut(&poll.subscriber) {
+            if let Some(previous) = &live.publication {
+                match previous.sent.get() {
+                    None => return Err(Error::Busy("subscriber publication in progress")),
+                    Some(false) => live.view.clear(),
+                    Some(true) => (),
+                }
+            }
         }
         w.init_resource::<SubscriberSource>();
         let existing = self.streams.get(&poll.subscriber);
@@ -1126,8 +1375,8 @@ impl WorkerLoop {
             }
             let live = LiveStream {
                 id: Id::new(),
-                view: SubscriberStream::open(
-                    &directory,
+                view: SubscriberStream::open_with(
+                    access,
                     poll.binding,
                     poll.subscriber,
                     w.get_resource::<SubscriberPolicy>()
@@ -1136,6 +1385,7 @@ impl WorkerLoop {
                 )?,
                 plan,
                 last: Instant::now(),
+                publication: None,
             };
             self.streams.insert(poll.subscriber, live);
         } else {
@@ -1145,11 +1395,16 @@ impl WorkerLoop {
             } else if Some(live.plan.version) != poll.known {
                 return Ok(Response::RefreshPlan);
             }
-            live.view.poll_binding(&directory, poll)?;
+            live.view.poll_binding(access, poll)?;
         }
         let live = self.streams.get_mut(&poll.subscriber).unwrap();
         live.last = Instant::now();
-        let frame = live.view.next_worker(w, &live.plan, &mut self.encoder)?;
+        let frame = live
+            .view
+            .next_worker(w, &live.plan, &mut self.encoder, access)?;
+        if frame.is_some() {
+            live.publication = Some(publication);
+        }
         Ok(Response::Subscriber(StreamReply {
             stream: live.id,
             source: self.service.worker,

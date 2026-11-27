@@ -85,7 +85,7 @@ fn registry(dir: &Path) -> mesh::Result<Connection> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS enrolments(slot INTEGER PRIMARY KEY, fingerprint BLOB UNIQUE NOT NULL)")?;
     Ok(c)
 }
-fn authority_keys(dir: &Path) -> mesh::Result<()> {
+pub(crate) fn authority_keys(dir: &Path) -> mesh::Result<()> {
     init_tls(dir)?;
     let mut c = registry(dir)?;
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
