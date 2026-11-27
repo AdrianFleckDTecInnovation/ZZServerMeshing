@@ -1,4 +1,10 @@
-# Working on ZZServerMeshing
+# Working on InfiniteStars Server Meshing
+
+The binding module-release requirements are in [.codex/mesh-v1-auftrag.md](.codex/mesh-v1-auftrag.md). Track M01–M23 in the [acceptance ledger](docs/mesh-v1-abnahme.md). Record the public entry point, executed check, Git revision, measured outcome and limitation before marking a criterion BESTANDEN. is-session owns public connections and account verification. Game and domain crates own their rules and durable business records.
+
+Run `npm run test:abnahme` to verify the release ledger, measured source fingerprint and acceptance budgets. After a module change, run the functional suite and external game, commit the measured source, then run `npm run bench:v1 -- --report docs/benchmarks/mesh-v1.json`. The runner retains individual measurements under `target/` and publishes the report only after the gates pass.
+
+The Windows evidence uses `docs/benchmarks/mesh-v1.json`. Run the same profile on Linux with `--report docs/benchmarks/mesh-v1-debian.json`. CI checks both records against the module source. Keep the VM topology and physical-host identity with each capacity result.
 
 Run commands from the repository root. The local mesh runs natively on Windows and Linux. Use Rust stable, the platform C linker and Node.js 22.16 or newer with npm. On Windows use the MSVC Rust toolchain, Visual Studio C++ Build Tools and the Windows SDK.
 
@@ -6,17 +12,24 @@ Run commands from the repository root. The local mesh runs natively on Windows a
 | --- | --- |
 | Install client and scenario dependencies from their lockfiles | `npm run setup` |
 | Start the coordinator, three sim-servers and Vite in the foreground | `npm start` |
+| Watch a live Bevy test with real octree islands and per-client receive rates | `npm run observe` |
 | Run Rust tests, TypeScript checks and the client production build | `npm test` |
 | Exercise input acknowledgements and peer replication on a fresh mesh | `npm run smoke` |
 | Measure release binaries with three clients and 3,000 NPCs | `npm run bench -- --servers 3 --npcs 3000 --seconds 15` |
+| Profile spatial layouts, cluster transitions and actual WebSocket input latency in a short release run | `npm run bench:quick` |
+| Compare one and three sim-servers with the same 300 moving clients and 300 NPCs | `npm run bench:servers` |
 | Compare the original browser demo with the working tree | `npm run bench:compare` |
 | Exercise player density, moving clusters and directed TLS traffic | `npm run bench:clusters` and `npm run bench:cluster-wire` |
+| Measure simulation thread counts against a fixed 10,000-player workload | `npm run bench:cores` |
+| Profile 10,000 session-bound Bevy players and test actual socket delivery | `npm run bench:profile -- --partitions 16 --ticks 40` and `npm run bench:sockets` |
+| Measure OS workers with separate credential directories and an mTLS authority service | `npm run bench:distributed` |
+| Measure complete personal views of 10,000 isolated and grouped players | `npm run bench:sight -- 10000 target/sight.json` |
 
 Stop the foreground launcher with Ctrl+C or `npm stop` from another terminal before using the same ports for another run. Each launch prints its own log directory under `target/`. See [the quick start](docs/quickstart.md) for endpoints, controls and individual commands.
 
 ## Infinite Stars
 
-`crates/zz-mesh` exposes the Bevy 0.15 library. `examples/infinite-stars` consumes its public API. Start the persistent example with `cargo run --locked -p infinite-stars`. Run `cargo test --locked -p zz-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [game integration guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
+`crates/is-mesh` exposes the Bevy 0.15 library. Start with the [game integration guide](crates/is-mesh/README.md) for a standalone consumer. `examples/infinite-stars` is the multiplayer reference game. Run `cargo run --locked -p infinite-stars` for its persistent demo and `cargo test --locked -p is-mesh -p infinite-stars` for the library contracts and real-process checks. The release workload is `cargo run --release --locked -p infinite-stars --bin mesh-bench`. The [operations guide](docs/infinite-stars.md) describes the storage boundary, peer transport, wire format and extension example.
 
 ## Where to look
 

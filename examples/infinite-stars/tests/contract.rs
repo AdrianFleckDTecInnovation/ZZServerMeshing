@@ -1,6 +1,114 @@
 use bevy::prelude::{Component, With};
 use infinite_stars::{data::*, prediction::*, *};
-use zz_mesh::*;
+use is_mesh::*;
+
+#[test]
+fn concurrent_durable_checkpoints_isolate_rejections_and_are_visible_after_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checkpoints.sqlite");
+    let db = Store::open(&path).unwrap();
+    let w = db.start_worker(1).unwrap();
+    let groups: Vec<_> = (0..12)
+        .map(|i| {
+            let id = Id::numbered(100 + i);
+            (id, db.create_group(id, w).unwrap())
+        })
+        .collect();
+    let start = std::sync::Barrier::new(groups.len());
+    std::thread::scope(|scope| {
+        for (i, &(group, owner)) in groups.iter().enumerate() {
+            let (db, start) = (&db, &start);
+            scope.spawn(move || {
+                start.wait();
+                let valid = Record::new(group, group);
+                if i % 2 == 0 {
+                    assert!(db
+                        .checkpoint(group, owner, 0, vec![valid.clone(), valid])
+                        .is_err());
+                } else {
+                    assert_eq!(db.checkpoint(group, owner, 0, vec![valid]).unwrap(), 1);
+                    assert!(matches!(db.lookup(group).unwrap(), Lookup::Present(_)));
+                }
+            });
+        }
+    });
+    drop(db);
+    let restored = Store::open(path).unwrap();
+    for (i, (group, _)) in groups.into_iter().enumerate() {
+        let snapshot = restored.snapshot(group).unwrap();
+        assert_eq!(snapshot.revision, (i % 2) as u64);
+        assert_eq!(snapshot.records.len(), i % 2);
+    }
+}
+
+#[test]
+fn input_batch_checks_each_sample_and_fences_a_cached_session_after_restart() {
+    let (db, a, _, mut app, _) = setup();
+    let i = Input {
+        session: Id::new(),
+        sequence: 1,
+        at_ms: 1000,
+        axes: [100, 0, 0],
+    };
+    let stale = Input {
+        at_ms: 0,
+        ..i.clone()
+    };
+    let wrong = Input {
+        session: Id::new(),
+        ..i.clone()
+    };
+    db.session(wrong.session, Id::new()).unwrap();
+    let batch = [(ACTOR, i.clone()), (ACTOR, stale), (ACTOR, wrong)];
+    let replies = apply_inputs(app.world_mut(), &batch, 1000).unwrap();
+    assert!(matches!(
+        replies.as_slice(),
+        [
+            Ok(InputAck { sequence: 1, .. }),
+            Err(Error::Invalid(_)),
+            Err(Error::Denied)
+        ]
+    ));
+    db.start_worker(a.slot).unwrap();
+    assert!(matches!(
+        apply_inputs(app.world_mut(), &[(ACTOR, i.clone())], 1000),
+        Err(Error::Fenced)
+    ));
+    assert!(matches!(
+        apply_input(app.world_mut(), ACTOR, &i, 1000),
+        Err(Error::Fenced)
+    ));
+}
+#[test]
+fn first_boot_resumes_an_empty_group_and_never_reseeds_a_retired_player() {
+    let db = Store::open(":memory:").unwrap();
+    let interrupted = db.start_worker(1).unwrap();
+    db.create_group(GROUP, interrupted).unwrap();
+    let (_, mut app) = host::start_node(&db, 1).unwrap();
+    assert_eq!(db.snapshot(GROUP).unwrap().records.len(), 4);
+    let assembly = app.world().resource::<MeshState>().entities[&PLANET_ID.child(88)];
+    assert_eq!(
+        app.world()
+            .get::<Assembly>(assembly)
+            .unwrap()
+            .local_pieces
+            .len(),
+        1
+    );
+
+    let player = app.world().resource::<MeshState>().entities[&ACTOR];
+    app.world_mut().despawn(player);
+    app.update();
+    drop(app);
+    let (_, restarted) = host::start_node(&db, 1).unwrap();
+    assert_eq!(db.lookup(ACTOR).unwrap(), Lookup::Deleted);
+    assert!(!restarted
+        .world()
+        .resource::<MeshState>()
+        .entities
+        .contains_key(&ACTOR));
+}
+
 fn setup() -> (Store, Worker, Worker, bevy::prelude::App, Id) {
     let db = Store::open(":memory:").unwrap();
     let a = db.start_worker(1).unwrap();
@@ -704,6 +812,33 @@ fn directed_worlds_retry_lost_ack_and_unload_on_split() {
         pool.step().unwrap();
     }
     assert!(pool.messages.is_empty());
+    // A broken delta must not advance the acknowledged view. Retry the same
+    // serial after the failed installation has removed the partial replica.
+    let src = pool.app_mut(a).unwrap().world_mut();
+    let actor = src.resource::<MeshState>().entities[&ACTOR];
+    src.get_mut::<Position>(actor).unwrap().mm[0] += 10;
+    pool.step().unwrap();
+    let delta = pool
+        .messages
+        .iter()
+        .find(|m| m.to == Recipient::Worker(b) && m.update.object == ACTOR)
+        .unwrap()
+        .clone();
+    assert!(delta.update.base.is_some());
+    let mut broken = delta.clone();
+    broken
+        .update
+        .fields
+        .get_mut(&POSITION)
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .bytes
+        .clear();
+    assert!(pool.deliver(broken).is_err());
+    assert!(pool.deliver(delta.clone()).unwrap());
+    assert!(!pool.deliver(delta).unwrap());
+    pool.deliver_all().unwrap();
     let dst = pool.app_mut(b).unwrap().world_mut();
     let e = dst.resource::<MeshState>().entities[&neighbor];
     dst.get_mut::<Position>(e).unwrap().mm[2] = 1000000;
@@ -730,6 +865,122 @@ fn directed_worlds_retry_lost_ack_and_unload_on_split() {
     assert!(dst.get::<Inventory>(replica).is_none());
     assert_eq!(pool.directory.islands().len(), 1);
     assert_eq!(db.owner(GROUP).unwrap(), owner);
+}
+#[test]
+fn worker_fanout_encodes_once_per_detail_and_keeps_private_client_views_separate() {
+    let (_, owner, _, mut app, _) = setup();
+    let bounds = Box3::new(PLANET_ID, [0; 3], [5000; 3]).unwrap();
+    let mut d = Directory::default();
+    d.upsert(Presence {
+        id: ACTOR,
+        owner,
+        principal: ACTOR,
+        bounds,
+        velocity: [0; 3],
+        ahead: 0,
+    })
+    .unwrap();
+    let worker = |slot| Worker {
+        slot,
+        incarnation: 1,
+    };
+    let outsider = Id::new();
+    let subscribers = [
+        (Recipient::Worker(worker(2)), Detail::Exact),
+        (Recipient::Worker(worker(3)), Detail::Exact),
+        (Recipient::Worker(worker(4)), Detail::Coarse),
+        (Recipient::Client(ACTOR), Detail::Exact),
+        (Recipient::Client(outsider), Detail::Exact),
+    ];
+    for (to, detail) in subscribers {
+        let demand = Demand { detail, period: 1 };
+        d.register_area(Area {
+            id: Id::new(),
+            worker: owner,
+            to,
+            bounds,
+            velocity: [0; 3],
+            ahead: 0,
+            hysteresis: 0,
+            activity: true,
+            components: [(POSITION, demand), (INVENTORY, demand)].into(),
+        })
+        .unwrap();
+    }
+    let mut publisher = Publisher::new(20);
+    for route in d.changes() {
+        publisher.route(&route).unwrap();
+    }
+    let frames = publisher.flush(app.world(), &d, 1, |_| 1).unwrap();
+    assert_eq!(frames.len(), 5);
+    assert_eq!(publisher.encodes, 8);
+    for (to, detail) in subscribers {
+        let view = match to {
+            Recipient::Worker(_) => View::Worker { detail },
+            Recipient::Client(principal) => View::Client {
+                principal,
+                owner: ACTOR,
+                detail,
+            },
+        };
+        let update = &frames[&to][0];
+        for schema in [POSITION, INVENTORY] {
+            assert_eq!(
+                update.fields[&schema],
+                project_component(app.world(), ACTOR, schema, view).unwrap()
+            );
+        }
+        assert_eq!(
+            update.fields[&INVENTORY].is_some(),
+            to == Recipient::Client(ACTOR)
+        );
+    }
+
+    // The first edge's codec fails after its other fields were sampled. Once
+    // registered, it and all the unvisited edges must be delivered on retry.
+    const EXTRA: u32 = 999;
+    let first = subscribers[0].0;
+    d.register_area(Area {
+        id: Id::new(),
+        worker: owner,
+        to: first,
+        bounds,
+        velocity: [0; 3],
+        ahead: 0,
+        hysteresis: 0,
+        activity: true,
+        components: [(
+            EXTRA,
+            Demand {
+                detail: Detail::Exact,
+                period: 1,
+            },
+        )]
+        .into(),
+    })
+    .unwrap();
+    for route in d.changes() {
+        publisher.route(&route).unwrap();
+    }
+    publisher.changed(&d, ACTOR, 2);
+    assert!(publisher.flush(app.world(), &d, 2, |_| 1).is_err());
+    #[derive(Component, serde::Serialize, serde::Deserialize)]
+    struct Extra;
+    app.mesh_component::<Extra>(
+        EXTRA,
+        1,
+        Rules {
+            visibility: Visibility::Public,
+            migrate: false,
+            persist: false,
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let retry = publisher.flush(app.world(), &d, 3, |_| 1).unwrap();
+    assert_eq!(retry.len(), subscribers.len());
+    assert!(retry[&first][0].fields.contains_key(&POSITION));
+    assert!(retry[&first][0].base.is_none());
 }
 #[test]
 fn old_ready_and_lost_decision_cannot_resume_a_stale_source() {

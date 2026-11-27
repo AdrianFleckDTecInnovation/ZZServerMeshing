@@ -62,6 +62,48 @@ pub async fn run_websocket_server(
     auth_players: Arc<SharedAuthPlayers>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) {
+    run_websocket_server_at(
+        port,
+        inbound,
+        auth_players,
+        tls_acceptor,
+        SpawnPoints::default(),
+    )
+    .await
+}
+#[derive(Clone)]
+pub struct SpawnPoints(Arc<[[f32; 3]]>);
+impl Default for SpawnPoints {
+    fn default() -> Self {
+        Self(Arc::from([[0.; 3]]))
+    }
+}
+impl SpawnPoints {
+    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        let points: Vec<[f32; 3]> = serde_json::from_reader(std::fs::File::open(path)?)?;
+        if points.is_empty()
+            || points.len() > 65536
+            || points.iter().any(|p| {
+                !p.iter().all(|v| v.is_finite())
+                    || p[0].abs() > crate::resources::world_half_extent()
+                    || p[2].abs() > crate::resources::world_half_extent()
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid server spawn points",
+            ));
+        }
+        Ok(Self(points.into()))
+    }
+}
+pub async fn run_websocket_server_at(
+    port: u16,
+    inbound: Arc<SharedInbound>,
+    auth_players: Arc<SharedAuthPlayers>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    spawns: SpawnPoints,
+) {
     let listener = TcpListener::bind(shared::listen_addr(port))
         .await
         .expect("Failed to bind WebSocket port");
@@ -79,8 +121,12 @@ pub async fn run_websocket_server(
             }
         };
 
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            tracing::debug!("Could not set TCP_NODELAY for {addr}: {e}");
+        }
         let inbound = Arc::clone(&inbound);
         let auth_players = Arc::clone(&auth_players);
+        let spawns = spawns.clone();
 
         if let Some(ref acceptor) = tls_acceptor {
             let acceptor = acceptor.clone();
@@ -92,7 +138,12 @@ pub async fn run_websocket_server(
                         return;
                     }
                 };
-                let ws_stream = match tokio_tungstenite::accept_async(tls_stream).await {
+                let ws_stream = match tokio_tungstenite::accept_async_with_config(
+                    tls_stream,
+                    Some(socket_config()),
+                )
+                .await
+                {
                     Ok(ws) => ws,
                     Err(e) => {
                         tracing::error!("WebSocket handshake error (TLS) from {addr}: {e}");
@@ -100,11 +151,16 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr} (TLS)");
-                handle_client(ws_stream, addr, inbound, auth_players).await;
+                handle_client(ws_stream, addr, inbound, auth_players, spawns).await;
             });
         } else {
             tokio::spawn(async move {
-                let ws_stream = match tokio_tungstenite::accept_async(tcp_stream).await {
+                let ws_stream = match tokio_tungstenite::accept_async_with_config(
+                    tcp_stream,
+                    Some(socket_config()),
+                )
+                .await
+                {
                     Ok(ws) => ws,
                     Err(e) => {
                         tracing::error!("WebSocket handshake error from {addr}: {e}");
@@ -112,7 +168,7 @@ pub async fn run_websocket_server(
                     }
                 };
                 tracing::info!("Client connected from {addr}");
-                handle_client(ws_stream, addr, inbound, auth_players).await;
+                handle_client(ws_stream, addr, inbound, auth_players, spawns).await;
             });
         }
     }
@@ -124,6 +180,12 @@ pub async fn run_websocket_server(
 /// generous. Fresh clients that never press WASD will incur this delay
 /// before their entity appears — acceptable given the UX.
 const CLAIM_WAIT_MS: u64 = 500;
+
+pub fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(8192)
+        .write_buffer_size(8192)
+}
 
 /// How long to wait for a claimed player entity to arrive via
 /// AuthorityTransfer before the client can retry the claim.
@@ -148,6 +210,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     addr: std::net::SocketAddr,
     inbound: Arc<SharedInbound>,
     auth_players: Arc<SharedAuthPlayers>,
+    spawns: SpawnPoints,
 ) {
     let (mut ws_sink, mut ws_stream): (
         SplitSink<WebSocketStream<S>, Message>,
@@ -266,7 +329,7 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                 client_id,
                 ClientMessage::SpawnPlayer {
                     player_id,
-                    position: [0.0, 0.0, 0.0],
+                    position: spawns.0[((client_id - 1) % spawns.0.len() as u64) as usize],
                 },
             ));
         }
@@ -462,10 +525,19 @@ mod tests {
         let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
         let inbound = Arc::new(super::SharedInbound::default());
         let task = tokio::spawn(super::handle_client(
-            server, "127.0.0.1:1".parse().unwrap(), inbound.clone(), Arc::default(),
+            server,
+            "127.0.0.1:1".parse().unwrap(),
+            inbound.clone(),
+            Arc::default(),
+            Default::default(),
         ));
-        let claim = shared::protocol::ClientMessage::ClaimPlayer { player_id: EntityId::new() };
-        client.send(Message::Text(serde_json::to_string(&claim).unwrap().into())).await.unwrap();
+        let claim = shared::protocol::ClientMessage::ClaimPlayer {
+            player_id: EntityId::new(),
+        };
+        client
+            .send(Message::Text(serde_json::to_string(&claim).unwrap().into()))
+            .await
+            .unwrap();
         assert!(matches!(client.next().await, Some(Ok(Message::Close(_)))));
         task.await.unwrap();
         let queue = inbound.lock().unwrap();

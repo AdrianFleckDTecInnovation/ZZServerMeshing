@@ -1,0 +1,19 @@
+{
+  "source_os": "Windows",
+  "target_os": "Debian 12",
+  "physical_hosts": 1,
+  "network": "SSH loopback port forwarding into WHPX guest, application mTLS on all hops",
+  "windows_worker": 1,
+  "linux_worker": 2,
+  "migrations": [
+    "Group 02020202-0202-0202-0202-020202020202 on worker 2, generation 2. 4112 bulk bytes, preparation 56.0751ms, pause 43.1076ms.",
+    "Group 02020202-0202-0202-0202-020202020202 on worker 1, generation 3. 0 bulk bytes, preparation 28.4688ms, pause 21.7027ms.",
+    "Group 02020202-0202-0202-0202-020202020202 on worker 2, generation 4. 0 bulk bytes, preparation 34.6699ms, pause 38.6101ms."
+  ],
+  "first_action": "Confirmed sequence 1. Inventory Inventory({1: 9, 2: 10})",
+  "resumed_action": "Confirmed sequence 2. Inventory Inventory({1: 8, 2: 10})",
+  "final_status": "Group owner Authority { worker: Worker { slot: 2, incarnation: 1 }, generation: 4 }. 0 subscribed views, 0 frames sent, 0 applied.",
+  "drain": "Group 02020202-0202-0202-0202-020202020202 on worker 1, generation 5. 0 bulk bytes, preparation 53.2055ms, pause 33.4223ms.\nSlot 2 drained",
+  "post_drain_status": "Group owner Authority { worker: Worker { slot: 1, incarnation: 1 }, generation: 5 }. 0 subscribed views, 0 frames sent, 0 applied.",
+  "worker_world_files": []
+}

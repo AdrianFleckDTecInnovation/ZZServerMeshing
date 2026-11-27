@@ -383,6 +383,38 @@ pub async fn run_udp_receiver(
         };
 
         match msg {
+            PeerMessage::Interest {
+                server_id,
+                session_id,
+                tick,
+                cells,
+            } => {
+                if !active_peers
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&server_id.0)
+                    || session_of_peer
+                        .get(&server_id.0)
+                        .is_some_and(|current| *current != session_id)
+                {
+                    continue;
+                }
+                let mut q = inbound.lock().unwrap_or_else(|e| e.into_inner());
+                if q.peer_interests
+                    .get(&server_id.0)
+                    .is_none_or(|old| old.session != session_id || tick > old.tick)
+                {
+                    q.peer_interests.insert(
+                        server_id.0,
+                        crate::peer_interest::Advert {
+                            source: addr,
+                            session: session_id,
+                            tick,
+                            cells,
+                        },
+                    );
+                }
+            }
             PeerMessage::EntityStateUpdate {
                 tick,
                 server_id,

@@ -1,5 +1,6 @@
 //! Versioned, deterministic workloads for release builds on Windows and Linux.
 use infinite_stars::{host::*, *};
+use is_mesh::{wire::*, *};
 use serde_json::{json, Value};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -13,7 +14,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use zz_mesh::{wire::*, *};
 
 struct CountAlloc;
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
@@ -440,7 +440,7 @@ fn network_migration(dir: &Path) -> Result<Value> {
         let id = identity(&dir, &worker_name(source.worker))?;
         let mut origin = Client::connect(from, "localhost", &ca, &id)?;
         let mut dest = Client::connect(to, "localhost", &ca, &id)?;
-        let cost = zz_mesh::remote::migrate(&mut origin, &mut dest, t, 16384)?;
+        let cost = is_mesh::remote::migrate(&mut origin, &mut dest, t, 16384)?;
         let tx = origin.traffic.sent.load(Relaxed) + dest.traffic.sent.load(Relaxed);
         let rx = origin.traffic.received.load(Relaxed) + dest.traffic.received.load(Relaxed);
         rows.push(json!({"target":slot,"bulk_payload":cost.payload,"prepare_ns":cost.prepare.as_nanos(),"pause_ns":cost.pause.as_nanos(),"socket_tx":tx,"socket_rx":rx}));

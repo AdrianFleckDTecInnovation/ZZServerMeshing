@@ -31,11 +31,12 @@ function readRun(marker) {
   catch (error) { if (error.code !== 'ENOENT') throw error; return ''; }
 }
 
-function build(release) {
+function build(release, sockets) {
   // Cargo reports the actual paths, including custom target directories and .exe suffixes.
   const args = ['build', '--locked', '-p', 'coordinator', '-p', 'sim-server',
     '--message-format=json-render-diagnostics'];
   if (release) args.push('--release');
+  if (sockets) args.push('--bins', '--examples');
   const result = spawnSync('cargo', args, { cwd: root, encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 16 * 1024 * 1024 });
   if (result.error) throw result.error;
@@ -66,11 +67,20 @@ async function main() {
   const [mode = 'start', ...args] = process.argv.slice(2);
   const { values } = parseArgs({ args, options: {
     servers: { type: 'string' }, npcs: { type: 'string' },
-    ...(mode === 'bench' ? { seconds: { type: 'string' }, 'bin-dir': { type: 'string' } } : {}),
+    ...(mode === 'bench' ? {
+      seconds: { type: 'string' }, 'bin-dir': { type: 'string' }, 'client-ramp': { type: 'boolean' },
+      players: { type: 'string' }, 'socket-players': { type: 'string' }, 'socket-drivers': { type: 'string' },
+      'snapshot-ticks': { type: 'string' }, 'input-hz': { type: 'string' },
+      'require-budget': { type: 'boolean' }, islands: { type: 'string' },
+    } : {}),
     help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) {
-    console.log('node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL] [bench: --seconds N --bin-dir RELEASE_DIR]');
+    console.log([
+      'node scripts/local-mesh.mjs start|stop|smoke|bench [--servers N] [--npcs TOTAL]',
+      'bench [--seconds N] [--bin-dir RELEASE_DIR] [--client-ramp | --players N]',
+      'bench --socket-players N [--socket-drivers N] [--islands N] [--snapshot-ticks 1..4] [--input-hz 1..10] [--require-budget]',
+    ].join('\n'));
     return;
   }
   const client = integer('CLIENT_PORT', setting('CLIENT_PORT'), 1, 65535);
@@ -90,8 +100,21 @@ async function main() {
   }
   if (!['start', 'smoke', 'bench'].includes(mode)) throw new Error(`Unknown command: ${mode}`);
   const count = integer('--servers', values.servers ?? setting('DEFAULT_NUM_SERVERS'), mode === 'smoke' ? 2 : 1, 65535);
-  const total = integer('--npcs', values.npcs ?? setting('DEFAULT_TOTAL_NPCS'), 0, 0xffffffff);
-  const seconds = integer('--seconds', values.seconds ?? '15', 10, 3600);
+  const sockets = values['socket-players'] === undefined ? 0 : integer('--socket-players', values['socket-players'], count, 20000);
+  if (sockets && (count < 2 || count % 2 || count > 32 || values.players || values['client-ramp'] || values['bin-dir'])) {
+    throw new Error('--socket-players requires an even count of 2..32 current workers');
+  }
+  const total = integer('--npcs', values.npcs ?? (sockets ? '0' : setting('DEFAULT_TOTAL_NPCS')), 0, 0xffffffff);
+  const players = values.players === undefined ? undefined : integer('--players', values.players, 1, 65535);
+  const cadence = integer('--snapshot-ticks', values['snapshot-ticks'] ?? '1', 1, 4);
+  const inputHz = integer('--input-hz', values['input-hz'] ?? '5', 1, 10);
+  const sites = sockets ? integer('--islands', values.islands ?? String(Math.min(256, Math.floor(sockets / 2))),
+    count / 2, Math.floor(sockets / 2)) : 0;
+  const side = Math.ceil(Math.sqrt(sites));
+  const spacing = sites > 256 ? 1000 : 620;
+  const extent = Math.max(5000, side * spacing / 2);
+  if (players && values['client-ramp']) throw new Error('Choose a fixed --players count or --client-ramp');
+  const seconds = integer('--seconds', values.seconds ?? (sockets ? '4' : '15'), sockets ? 2 : 10, sockets ? 60 : 3600);
   const port = key => integer(key, setting(key), 1, 65535);
   const ws = port('COORD_WS_PORT'), http = port('COORD_HTTP_PORT');
   const coord = `http://${host}:${http}`;
@@ -109,7 +132,7 @@ async function main() {
   const suffix = process.platform === 'win32' ? '.exe' : '';
   const bins = values['bin-dir']
     ? Object.fromEntries(['coordinator', 'sim-server'].map(name => [name, resolve(values['bin-dir'], name + suffix)]))
-    : build(mode === 'bench');
+    : build(mode === 'bench', sockets);
   mkdirSync(join(root, 'target'), { recursive: true });
   const logs = mkdtempSync(join(root, 'target', 'mesh-run-'));
   console.error(`Service logs: ${logs}`);
@@ -165,21 +188,38 @@ async function main() {
     // Windows locks a running .exe. Stage each executable once so cargo test
     // and subsequent builds can replace their own artifacts during development.
     if (process.platform === 'win32') {
-      for (const [name, binary] of Object.entries(bins)) {
+      for (const [name, binary] of Object.entries(bins).filter(([n]) => ['coordinator', 'sim-server', 'player-sockets'].includes(n))) {
         const copy = join(logs, basename(binary));
         copyFileSync(binary, copy);
         staged.push(copy);
         bins[name] = copy;
       }
     }
-    const localOnly = { env: { MESH_LOOPBACK_ONLY: '1' } };
+    const localOnly = { env: {
+      MESH_LOOPBACK_ONLY: '1',
+      ...(sockets ? {
+        TOKIO_WORKER_THREADS: '2', MESH_IDLE_SNAPSHOT_TICKS: '10',
+        MESH_SNAPSHOT_TICKS: String(cadence), MESH_WORLD_EXTENT: String(extent),
+      } : {}),
+    } };
     launch('coordinator', bins.coordinator, ['--port', ws, '--http-port', http], localOnly);
     await waitFor('coordinator', async () => Array.isArray((await getJson(`${coord}/servers`)).servers));
     for (const s of servers) {
       const npcs = Math.floor(total / count) + (s.id <= total % count ? 1 : 0);
+      const spawnArgs = [];
+      if (sockets) {
+        const pair = Math.floor((s.id - 1) / 2);
+        const points = [];
+        for (let j = Math.floor(pair * sites / (count / 2)); j < Math.floor((pair + 1) * sites / (count / 2)); j++) {
+          points.push([(Math.floor(j / side) - (side - 1) / 2) * spacing, 0, (j % side - (side - 1) / 2) * spacing]);
+        }
+        const file = join(logs, `spawns-${s.id}.json`);
+        writeFileSync(file, JSON.stringify(points));
+        spawnArgs.push('--spawn-points', file);
+      }
       launch(`sim-${s.id}`, bins['sim-server'], ['--server-id', s.id, '--port', s.ws, '--udp-port', s.udp,
         '--metrics-port', s.metrics, '--coordinator', `${host}:${ws}`, '--advertise-host', host,
-        '--initial-npcs', npcs, '--cold-start'], localOnly);
+        '--initial-npcs', npcs, '--cold-start', ...spawnArgs], localOnly);
     }
     await waitFor('all mesh peers', async () => {
       const rows = await metrics();
@@ -199,8 +239,16 @@ async function main() {
       });
       console.error(`Client ${url}   Dashboard ${coord}/dashboard   (Ctrl+C to stop)`);
     }
-    if (mode === 'bench') {
-      console.log(JSON.stringify(await benchmark({ servers, host, total, seconds, metrics, signal }), null, 2));
+    if (sockets) {
+      const { socketClients } = await import('./socket-clients.mjs');
+      const drivers = integer('--socket-drivers', values['socket-drivers'] ?? String(Math.min(4, Math.ceil(sockets / 2000))), 1, Math.min(sockets, 32));
+      const result = await socketClients({ binary: bins['player-sockets'], servers, players: sockets,
+        seconds, drivers, inputHz, cadence, sites, spacing, extent, logs, launch, metrics, signal });
+      console.log(JSON.stringify(result, null, 2));
+      if (values['require-budget'] && !result.met_interactive_budget) throw new Error('Socket workload exceeded the requested delivery budget');
+    } else if (mode === 'bench') {
+      const measure = (players || values['client-ramp']) ? (await import('./bench-player-clients.mjs')).benchmarkPlayers : benchmark;
+      console.log(JSON.stringify(await measure({ servers, host, total, seconds, players, metrics, signal }), null, 2));
     } else if (mode === 'smoke') {
       const task = launch('smoke scenarios', process.execPath, ['--experimental-strip-types', 'test-suite/runner.ts', `ws://${host}:${servers[0].ws}`,
         servers[0].metrics, count, 'peer-replication,input-seq-echo', '--no-color'], {

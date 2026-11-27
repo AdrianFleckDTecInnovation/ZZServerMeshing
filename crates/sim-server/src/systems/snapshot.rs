@@ -4,7 +4,6 @@ use crate::delta::{build_baseline, select_delta, update_baseline, FULL_SNAPSHOT_
 use crate::encoding::{encode_binary_delta, encode_binary_snapshot};
 use crate::resources::*;
 use bevy_ecs::prelude::*;
-use glam::Vec3;
 use shared::entity::{EntityId, EntityState, ServerId};
 use shared::spatial::in_aoi;
 
@@ -46,16 +45,26 @@ pub fn prepare_client_snapshot(
     >,
 ) {
     if registry.clients.is_empty() {
+        registry.snapshot_time = std::time::Duration::ZERO;
         return;
     }
+    let start = std::time::Instant::now();
     let mut entities = Vec::with_capacity(
         auth_query.iter().count() + shadow_query.iter().count() + transfer_query.iter().count(),
     );
 
     // Authoritative entities first (take precedence)
-    let mut seen_ids = std::collections::HashSet::with_capacity(entities.capacity());
+    let mut origins = std::collections::HashMap::with_capacity(entities.capacity());
+    let mut remember = |id, position, seq: Option<&LastInputSeq>| {
+        if let std::collections::hash_map::Entry::Vacant(entry) = origins.entry(id) {
+            entry.insert((position, seq.map_or(0, |s| s.0)));
+            true
+        } else {
+            false
+        }
+    };
     for (nid, pos, vel, kind, auth, seq) in auth_query.iter() {
-        if !seen_ids.insert(nid.0) {
+        if !remember(nid.0, pos.0, seq) {
             continue;
         }
         entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
@@ -66,7 +75,7 @@ pub fn prepare_client_snapshot(
     // source's client view before the target starts broadcasting it as a shadow.
     // Clients see the entity continuously -- it just changes authority color.
     for (nid, pos, vel, kind, outbound, seq) in transfer_query.iter() {
-        if !seen_ids.insert(nid.0) {
+        if !remember(nid.0, pos.0, seq) {
             continue;
         }
         let state = to_entity_state(
@@ -82,144 +91,137 @@ pub fn prepare_client_snapshot(
 
     // Shadow entities (skip if already seen as authoritative or transfer-outbound)
     for (nid, pos, vel, kind, auth, seq) in shadow_query.iter() {
-        if seen_ids.insert(nid.0) {
+        if remember(nid.0, pos.0, seq) {
             entities.push(to_entity_state(nid, pos, vel, kind, auth, seq));
         }
     }
 
-    // Build player -> position map from the entity list.
-    // Only need positions for connected clients' player entities.
-    let mut player_positions: std::collections::HashMap<EntityId, Vec3> =
-        std::collections::HashMap::new();
-    for (_client_id, handle) in registry.clients.iter() {
-        if let Some(pid) = handle.player_id {
-            let mut found = false;
-            for e in &entities {
-                if e.id == pid {
-                    player_positions.insert(pid, e.position);
-                    found = true;
-                    break;
+    let index = (registry.clients.len() >= 8)
+        .then(|| super::snapshot_index::SnapshotIndex::build(&mut entities));
+    let mut scratch = Vec::new();
+    let mut prepared = std::collections::HashMap::new();
+    let idle_ticks = u64::from(registry.idle_snapshot_ticks);
+    let cadence = registry.snapshot_every_ticks.max(1);
+    let mut full_queues = 0;
+    for (&client, handle) in &mut registry.clients {
+        let origin = handle
+            .player_id
+            .and_then(|id| origins.get(&id).map(|&(p, seq)| (id, p, seq)));
+        if cadence > 1 && tick.0 % u64::from(cadence) != client % u64::from(cadence) {
+            if let Some(base) = &handle.baseline {
+                // Echo the player's own newly applied input at the next simulation tick.
+                // Other motion continues to use this client's configured update interval.
+                let new_input = origin.is_some_and(|(id, _, seq)| {
+                    seq != 0 && base.get(&id).is_none_or(|e| e.last_input_seq != seq)
+                });
+                if !new_input {
+                    continue;
                 }
             }
-            if !found {
-                tracing::debug!(
-                    client_id = _client_id,
-                    player_id = %pid,
-                    entity_count = entities.len(),
-                    "AoI: player entity not found in entities vec, sending unfiltered"
-                );
-            }
         }
-    }
-
-    // Send per-client frames (delta or full).
-    // NOTE: The pre-loop force_full probe (audit #049) was removed because with
-    // per-client AoI filtering, each client has a different entity set and baseline.
-    // A global probe comparing full entities against an AoI-filtered baseline would
-    // always fire (entities outside AoI counted as "new"). The per-client change_ratio
-    // check in the delta path below handles the fallback correctly.
-    // IMPORTANT: Baseline is updated ONLY after try_send succeeds (fix for audit #018).
-    // If the channel is full and the frame is dropped, the baseline is NOT advanced,
-    // so the next tick re-diffs against the last state the client actually received.
-    // On drop, we also force the next frame to be a full snapshot (clear baseline).
-    for (_client_id, handle) in registry.clients.iter_mut() {
-        // AoI filter: determine which entities this client should see.
-        // If the client has a player entity, only include entities within AOI_RADIUS.
-        // The player's own entity is always included regardless of distance.
-        // If the client has no player or the player position is unknown, send everything.
-        let client_entities: Vec<EntityState> = if let Some(pid) = handle.player_id {
-            if let Some(&player_pos) = player_positions.get(&pid) {
-                entities
-                    .iter()
-                    .filter(|e| e.id == pid || in_aoi(player_pos, e.position))
-                    .cloned()
-                    .collect()
-            } else {
-                // Player position not found (entity not spawned yet) -- send everything
-                entities.clone()
+        // Reserve before filtering the view or building a frame. Slow receivers can
+        // rejoin with a complete baseline once their ordered channel has space.
+        let slot = match handle.tx.try_reserve() {
+            Ok(slot) => slot,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                handle.baseline = None;
+                handle.ticks_since_full = 0;
+                full_queues += 1;
+                continue;
             }
-        } else {
-            // No player assigned yet -- send everything
-            entities.clone()
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => continue,
         };
-
-        // Stale-ACK detection: if the client has not ACK'd recent frames for 2 seconds,
-        // force a full snapshot to resync (audit #021).
-        // Clamp to current server tick to prevent malicious clients from sending
-        // future ticks and bypassing stale-ACK detection (audit #025).
+        let (cell, visible) = match (origin, &index) {
+            (Some((id, p, _)), Some(index)) => index.visible(p, id, &entities, &mut scratch),
+            (Some((id, p, _)), None) => {
+                scratch.clear();
+                scratch.extend(
+                    entities
+                        .iter()
+                        .filter(|e| e.id == id || in_aoi(p, e.position))
+                        .cloned(),
+                );
+                (None, scratch.as_slice())
+            }
+            (None, _) => (None, entities.as_slice()),
+        };
         let acked = handle
             .acked_tick
             .load(std::sync::atomic::Ordering::Relaxed)
             .min(tick.0);
-        let stale_ack = handle.last_sent_tick > 0
-            && handle.baseline.is_some()
-            && handle.last_sent_tick.saturating_sub(acked) > ACK_STALE_TICKS;
-
-        let send_full = handle.baseline.is_none()
-            || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL
-            || stale_ack;
-
-        let delta = if send_full {
-            None
+        let stale = handle.last_sent_tick.saturating_sub(acked) > ACK_STALE_TICKS;
+        let mut previous = handle.baseline.take();
+        if stale || handle.ticks_since_full >= FULL_SNAPSHOT_INTERVAL {
+            previous = None;
+        }
+        let (frame, baseline, full) = if let Some(key) = cell {
+            // Keep the old Arc alive while its identity is a cache key. Diverged ACKs
+            // and dropped frames can give two neighbors different baselines.
+            let entry = prepared
+                .entry((key, previous.is_some()))
+                .or_insert_with(|| {
+                    (
+                        previous.clone(),
+                        prepare_frame(tick.0, visible, previous.clone()),
+                    )
+                });
+            if !same_baseline(&entry.0, &previous) {
+                *entry = (previous.clone(), prepare_frame(tick.0, visible, previous));
+            }
+            let (frame, baseline, full) = &entry.1;
+            (frame.clone(), baseline.clone(), *full)
         } else {
-            // Send a full snapshot when more than four fifths of the visible IDs changed.
-            let limit = client_entities.len() - client_entities.len().div_ceil(5);
-            select_delta(&client_entities, handle.baseline.as_ref().unwrap(), limit)
+            prepare_frame(tick.0, visible, previous)
         };
-        if let Some(delta) = delta {
-            let frame = encode_binary_delta(tick.0, &delta.updates, &delta.removals);
-
-            match handle.tx.try_send(ClientFrame::Binary(frame)) {
-                Ok(()) => {
-                    // Success: advance baseline to match the delta we just sent
-                    update_baseline(handle.baseline.as_mut().unwrap(), &delta);
-                    handle.ticks_since_full += 1;
-                    handle.last_sent_tick = tick.0;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Frame dropped: baseline NOT advanced. Clear it entirely to
-                    // force a full snapshot on the next tick, guaranteeing convergence.
-                    tracing::warn!(client_id = _client_id, "Client frame channel full, dropping delta -- forcing full snapshot next tick");
-                    handle.baseline = None;
-                    handle.ticks_since_full = 0;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Client disconnected; will be cleaned up by unregister event
-                }
-            }
+        if !full
+            && frame.len() == crate::encoding::DELTA_HEADER_SIZE
+            && tick.0.saturating_sub(handle.last_sent_tick) < idle_ticks
+        {
+            handle.baseline = Some(baseline);
+            handle.ticks_since_full += u32::from(cadence);
+            continue;
+        }
+        slot.send(ClientFrame::Binary(frame));
+        handle.baseline = Some(baseline);
+        handle.ticks_since_full = if full {
+            1
         } else {
-            if stale_ack {
-                tracing::info!(
-                    client_id = _client_id,
-                    acked_tick = acked,
-                    sent_tick = handle.last_sent_tick,
-                    "ACK stale, forcing full snapshot for client"
-                );
+            handle.ticks_since_full + u32::from(cadence)
+        };
+        handle.last_sent_tick = tick.0;
+    }
+    registry.snapshot_queue_full += full_queues;
+    registry.snapshot_time = start.elapsed();
+}
+
+type Baseline = std::sync::Arc<std::collections::HashMap<EntityId, EntityState>>;
+fn same_baseline(a: &Option<Baseline>, b: &Option<Baseline>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+fn prepare_frame(
+    tick: u64,
+    visible: &[EntityState],
+    previous: Option<Baseline>,
+) -> (tokio_tungstenite::tungstenite::Bytes, Baseline, bool) {
+    if let Some(mut baseline) = previous {
+        let limit = visible.len() - visible.len().div_ceil(5);
+        if let Some(delta) = select_delta(visible, &baseline, limit) {
+            let frame = encode_binary_delta(tick, &delta.updates, &delta.removals);
+            if !delta.updates.is_empty() || !delta.removals.is_empty() {
+                update_baseline(std::sync::Arc::make_mut(&mut baseline), &delta);
             }
-            // Full snapshot path: per-client AoI-filtered encoding.
-            let frame = encode_binary_snapshot(tick.0, &client_entities);
-            match handle.tx.try_send(ClientFrame::Binary(frame)) {
-                Ok(()) => {
-                    // Success: update baseline to match what we just sent
-                    handle.baseline = Some(build_baseline(&client_entities));
-                    handle.ticks_since_full = 1;
-                    handle.last_sent_tick = tick.0;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Frame dropped: clear baseline so next tick forces a full snapshot
-                    tracing::warn!(
-                        client_id = _client_id,
-                        "Client frame channel full, dropping full snapshot"
-                    );
-                    handle.baseline = None;
-                    // ticks_since_full not incremented -- will try full again next tick
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Client disconnected; will be cleaned up by unregister event
-                }
-            }
+            return (frame.into(), baseline, false);
         }
     }
+    (
+        encode_binary_snapshot(tick, visible).into(),
+        std::sync::Arc::new(build_baseline(visible)),
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -228,6 +230,7 @@ mod tests {
     use crate::conversion::spawn_from_entity_state_direct;
     use bevy_ecs::schedule::Schedule;
     use bevy_ecs::world::World;
+    use glam::Vec3;
     use shared::entity::EntityType;
     use shared::protocol::PeerMessage;
     use std::sync::atomic::AtomicU64;
@@ -340,6 +343,64 @@ mod tests {
             handle.player_id = Some(player_eid);
         }
         rx
+    }
+
+    #[test]
+    fn shared_frames_keep_separate_backpressure_and_send_changed_views_before_idle_heartbeat() {
+        let mut world = setup_world(1);
+        let (entity, id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        let mut receivers: Vec<_> = (0..8)
+            .map(|c| register_test_client_with_player(&mut world, c, id))
+            .collect();
+        world.resource_mut::<ClientRegistry>().idle_snapshot_ticks = 8;
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 1;
+        schedule.run(&mut world);
+        let a = receivers[0].try_recv().unwrap();
+        let b = receivers[1].try_recv().unwrap();
+        assert_eq!(a.as_binary().as_ptr(), b.as_binary().as_ptr());
+        world.resource_mut::<TickCounter>().0 = 2;
+        schedule.run(&mut world);
+        assert!(receivers[0].try_recv().is_err());
+        world.get_mut::<Position>(entity).unwrap().0.x = 3.;
+        world.resource_mut::<TickCounter>().0 = 3;
+        schedule.run(&mut world);
+        assert!(receivers[0].try_recv().is_ok());
+        assert!(receivers[1].try_recv().is_ok());
+        // A stalled recipient fills its queue while a healthy one keeps receiving.
+        for tick in 4..26 {
+            world.get_mut::<Position>(entity).unwrap().0.x = tick as f32;
+            world.resource_mut::<TickCounter>().0 = tick;
+            schedule.run(&mut world);
+            receivers[0].try_recv().unwrap();
+        }
+        let registry = world.resource::<ClientRegistry>();
+        assert!(registry.clients[&0].baseline.is_some());
+        assert!(registry.clients[&1].baseline.is_none());
+        assert!(registry.snapshot_queue_full > 0);
+    }
+
+    #[test]
+    fn own_input_is_echoed_once_between_regular_snapshots() {
+        let mut world = setup_world(1);
+        let (entity, id) = spawn_auth_player(&mut world, Vec3::ZERO, 1);
+        let mut frames = register_test_client_with_player(&mut world, 0, id);
+        world.resource_mut::<ClientRegistry>().snapshot_every_ticks = 4;
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_client_snapshot);
+        world.resource_mut::<TickCounter>().0 = 4;
+        schedule.run(&mut world);
+        frames.try_recv().unwrap();
+        world.entity_mut(entity).insert(LastInputSeq(7));
+        world.resource_mut::<TickCounter>().0 = 5;
+        schedule.run(&mut world);
+        let frame = frames.try_recv().unwrap();
+        let bytes = frame.as_binary();
+        assert_eq!(&bytes[bytes.len() - 4..], &7u32.to_le_bytes());
+        world.resource_mut::<TickCounter>().0 = 6;
+        schedule.run(&mut world);
+        assert!(frames.try_recv().is_err());
     }
 
     fn delta_counts_from_frame(frame: &[u8]) -> (u32, u32) {

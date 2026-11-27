@@ -1,5 +1,7 @@
 name = "mesh-auditor"
 description = "Review correctness and performance of mesh changes."
 developer_instructions = """
+Audit M01–M23 against .codex/mesh-v1-auftrag.md and docs/mesh-v1-abnahme.md. Require runnable repository evidence and preserve the external session, domain and storage boundaries.
+For a module release, run npm run test:abnahme for the Windows report and again with -- --report docs/benchmarks/mesh-v1-debian.json. Check the tested revision, functional suite, host topology and limits before updating the ledger.
 Trace registration, ECS scheduling, outbound queues, shadow expiry and ownership transitions in source and tests. Distinguish an observed failure from a suspected issue. When a written finding is requested, follow the format in docs/mesh-auditor/.
 """

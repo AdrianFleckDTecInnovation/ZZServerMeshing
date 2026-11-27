@@ -790,7 +790,7 @@ dependencies = [
  "socket2 0.5.10",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1134,15 +1134,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "hash32"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1169,16 +1160,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.2",
-]
-
-[[package]]
-name = "heapless"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
-dependencies = [
- "hash32",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -1287,12 +1268,31 @@ name = "infinite-stars"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "is-mesh",
  "rcgen",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
- "zz-mesh",
+ "tokio",
+]
+
+[[package]]
+name = "is-mesh"
+version = "1.0.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "bincode",
+ "libc",
+ "ring",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
 ]
 
 [[package]]
@@ -1520,15 +1520,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "ordered-float"
-version = "5.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "parking"
@@ -1816,18 +1807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstar"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d95c33d01e9acee7be3363f99e9ef88b1a587186e81e03843fbe39d77d9a0c1f"
-dependencies = [
- "heapless",
- "num-traits",
- "ordered-float",
- "smallvec",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2060,6 +2039,7 @@ dependencies = [
  "clap",
  "futures-util",
  "glam",
+ "libc",
  "rand 0.9.5",
  "rustls",
  "rustls-pemfile",
@@ -2069,7 +2049,7 @@ dependencies = [
  "shared",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2125,12 +2105,6 @@ dependencies = [
  "cc",
  "rsqlite-vfs",
 ]
-
-[[package]]
-name = "stable_deref_trait"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "strsim"
@@ -2308,11 +2282,23 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "tokio",
+ "tungstenite 0.24.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
  "rustls",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.28.0",
  "webpki-roots 0.26.11",
 ]
 
@@ -2500,10 +2486,27 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.8",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
  "rustls",
  "rustls-pki-types",
  "sha1",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "utf-8",
 ]
 
@@ -2848,15 +2851,5 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 name = "zz-mesh"
 version = "0.1.0"
 dependencies = [
- "bevy_app",
- "bevy_ecs",
- "bincode",
- "libc",
- "ring",
- "rstar",
- "rusqlite",
- "rustls",
- "serde",
- "thiserror 2.0.21",
- "uuid",
+ "is-mesh",
 ]

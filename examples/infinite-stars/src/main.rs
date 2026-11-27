@@ -1,4 +1,8 @@
 use infinite_stars::{host::*, prediction::*, *};
+use is_mesh::{
+    wire::{Client, Request, Response},
+    *,
+};
 use rusqlite::{Connection, OptionalExtension};
 use std::{
     fs,
@@ -7,13 +11,10 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use zz_mesh::{
-    wire::{Client, Request, Response},
-    *,
-};
+mod supervisor;
 
 const LOCAL: &str = "127.0.0.1:8642";
-const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | client DIR ADDRESS | migrate DIR SOURCE TARGET SLOT | abort DIR SLOT | status DIR ADDRESS";
+const USAGE:&str="infinite-stars demo [DIR] | serve DIR SLOT ADDRESS | authority DIR ADDRESS | provision DIR SLOT NEW_DIR | provision-client DIR NEW_DIR [ACTOR_UUID] | worker DIR AUTHORITY_ADDRESS LISTEN_ADDRESS | client DIR ADDRESS | sight DIR WORKER_ADDRESS | migrate DIR SOURCE TARGET SLOT | balance DIR [--once] | drain DIR SLOT | resume DIR SLOT | abort DIR SLOT | status DIR ADDRESS | health DIR ADDRESS | metrics DIR ADDRESS | shutdown DIR ADDRESS";
 
 fn main() {
     if let Err(e) = run() {
@@ -36,6 +37,63 @@ fn run() -> Result<()> {
     fs::create_dir_all(&dir)?;
     match mode.as_str() {
         "demo" => demo(&dir),
+        "balance" => {
+            let once = match args.next().as_deref() {
+                None => false,
+                Some("--once") => true,
+                _ => return Err(invalid("balance accepts --once")),
+            };
+            supervisor::balance(&dir, once)
+        }
+        "drain" => supervisor::drain(&dir, argument(args.next(), "worker slot")?),
+        "resume" => {
+            let db = Store::open(dir.join("world.sqlite"))?;
+            db.set_draining(db.worker(argument(args.next(), "worker slot")?)?, false)
+        }
+        "authority" => deployment::serve(
+            &dir,
+            argument(args.next(), "authority listen address")?,
+            args.next().map(PathBuf::from),
+        ),
+        "provision" => {
+            let slot = argument(args.next(), "worker slot")?;
+            let dest: PathBuf = argument(args.next(), "new credential directory")?;
+            deployment::provision(&dir, &dest, Some(slot))
+        }
+        "provision-client" => {
+            let dest: PathBuf = argument(args.next(), "new credential directory")?;
+            if let Some(id) = args.next() {
+                deployment::provision_player(&dir, &dest, argument(Some(id), "actor UUID")?)
+            } else {
+                deployment::provision(&dir, &dest, None)
+            }
+        }
+        "sight" => {
+            let addr: SocketAddr = argument(
+                args.next().or_else(|| Some(LOCAL.into())),
+                "bootstrap worker address",
+            )?;
+            let mut bootstrap = connect(&dir, addr, "player")?;
+            let mut sight = PlayerSightClient::default();
+            sight.refresh(&mut bootstrap, |_, source| connect(&dir, source, "player"))?;
+            for (&id, r) in sight.records() {
+                let pos: Position = r.get(POSITION, 1)?;
+                let kind = if r.fields.contains_key(&PLAYER) {
+                    "player"
+                } else {
+                    "ship"
+                };
+                println!("{id} {kind} {} {:?} mm", pos.frame, pos.mm);
+            }
+            println!("{} visible", sight.records().len());
+            Ok(())
+        }
+        "worker" => deployment::worker(
+            dir,
+            argument(args.next(), "authority address")?,
+            argument(args.next(), "worker listen address")?,
+            args.next().map(PathBuf::from),
+        ),
         "serve" => {
             let slot = argument(args.next().or_else(|| Some("1".into())), "worker slot")?;
             let addr = argument(args.next().or_else(|| Some(LOCAL.into())), "listen address")?;
@@ -52,6 +110,38 @@ fn run() -> Result<()> {
             argument(args.next(), "target slot")?,
         ),
         "abort" => abort(&dir, argument(args.next(), "target slot")?),
+        "health" | "metrics" | "shutdown" => {
+            let addr = argument(args.next(), "worker address")?;
+            let request = match mode.as_str() {
+                "health" => Request::Health,
+                "metrics" => Request::Telemetry,
+                _ => Request::Shutdown,
+            };
+            match connect(&dir, addr, "operator")?.call(&request)? {
+                Response::Telemetry(report) => {
+                    println!("{}", serde_json::json!(report));
+                    Ok(())
+                }
+                Response::Stopped => {
+                    println!("Worker stopped");
+                    Ok(())
+                }
+                Response::Health {
+                    worker,
+                    ready,
+                    groups,
+                    load,
+                } => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"worker":worker,"ready":ready,"groups":groups,"load":load})
+                    );
+                    Ok(())
+                }
+                Response::Error(e) => Err(invalid(e)),
+                _ => Err(invalid("unexpected operator response")),
+            }
+        }
         "status" => status(
             &dir,
             argument(args.next().or_else(|| Some(LOCAL.into())), "worker address")?,
@@ -80,8 +170,11 @@ fn demo(dir: &Path) -> Result<()> {
     Ok(())
 }
 fn print_cost(cost: MigrationCost) {
+    print_group_cost(GROUP, cost);
+}
+fn print_group_cost(group: Id, cost: MigrationCost) {
     println!(
-        "Group {GROUP} on worker {}, generation {}. {} bulk bytes, preparation {:?}, pause {:?}.",
+        "Group {group} on worker {}, generation {}. {} bulk bytes, preparation {:?}, pause {:?}.",
         cost.authority.worker.slot,
         cost.authority.generation,
         cost.payload,
@@ -90,9 +183,19 @@ fn print_cost(cost: MigrationCost) {
     );
 }
 fn connect(dir: &Path, addr: SocketAddr, credential: &str) -> Result<Client> {
+    let name = match fs::read_to_string(dir.join("server-name")) {
+        Ok(name) => name,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => if credential == "operator" {
+            deployment::GAME_DNS
+        } else {
+            "localhost"
+        }
+        .to_owned(),
+        Err(e) => return Err(e.into()),
+    };
     Client::connect(
         addr,
-        "localhost",
+        name.trim(),
         &fs::read(dir.join("ca.der"))?,
         &identity(dir, credential)?,
     )
@@ -100,7 +203,7 @@ fn connect(dir: &Path, addr: SocketAddr, credential: &str) -> Result<Client> {
 fn control(dir: &Path) -> Result<Connection> {
     let c = Connection::open(dir.join("controller.sqlite"))?;
     c.busy_timeout(Duration::from_secs(5))?;
-    c.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS pending(slot INTEGER PRIMARY KEY, ticket BLOB NOT NULL)")?;
+    c.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS pending(slot INTEGER PRIMARY KEY, ticket BLOB NOT NULL); CREATE TABLE IF NOT EXISTS last_moves(unit BLOB PRIMARY KEY, tick INTEGER NOT NULL)")?;
     Ok(c)
 }
 fn forget(c: &Connection, t: Handoff) -> Result<()> {
@@ -112,13 +215,24 @@ fn forget(c: &Connection, t: Handoff) -> Result<()> {
 }
 fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Result<()> {
     let db = Store::open(dir.join("world.sqlite"))?;
-    let control = control(dir)?;
     let proposal = Handoff {
         id: Id::new(),
         group: GROUP,
         source: db.owner(GROUP)?,
         target: db.worker(slot)?,
     };
+    transfer(dir, &db, proposal, source, target, 16 << 20)
+}
+fn transfer(
+    dir: &Path,
+    db: &Store,
+    proposal: Handoff,
+    source: SocketAddr,
+    target: SocketAddr,
+    budget: usize,
+) -> Result<()> {
+    let mut control = control(dir)?;
+    let slot = proposal.target.slot;
     control.execute(
         "INSERT OR IGNORE INTO pending VALUES(?,?)",
         rusqlite::params![slot, encode(&proposal)?],
@@ -128,20 +242,30 @@ fn migrate(dir: &Path, source: SocketAddr, target: SocketAddr, slot: u32) -> Res
             row.get(0)
         })?;
     let t: Handoff = decode(&bytes)?;
-    if matches!(db.handoff_phase(t), Ok(Phase::Switched)) && db.owner(GROUP)?.worker != t.target {
+    if t.group != proposal.group {
+        return Err(Error::Busy("another transfer uses the target slot"));
+    }
+    if matches!(db.handoff_phase(t), Ok(Phase::Switched)) && db.owner(t.group)?.worker != t.target {
         println!(
             "Transfer already committed. Current authority {:?}",
-            db.owner(GROUP)?
+            db.owner(t.group)?
         );
         forget(&control, t)?;
         return Ok(());
     }
-    let key = worker_name(t.source.worker);
+    let key = controller_credential(dir, t);
     let mut from = connect(dir, source, &key)?;
     let mut to = connect(dir, target, &key)?;
-    let cost = zz_mesh::remote::migrate(&mut from, &mut to, t, 16 << 20)?;
-    print_cost(cost);
-    forget(&control, t)
+    let cost = is_mesh::remote::migrate(&mut from, &mut to, t, budget)?;
+    print_group_cost(t.group, cost);
+    let tx = control.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO last_moves VALUES(?,?)",
+        rusqlite::params![t.group, supervisor::tick()?],
+    )?;
+    forget(&tx, t)?;
+    tx.commit()?;
+    Ok(())
 }
 fn abort(dir: &Path, slot: u32) -> Result<()> {
     let control = control(dir)?;
@@ -162,16 +286,28 @@ fn abort(dir: &Path, slot: u32) -> Result<()> {
     );
     for worker in [t.source.worker, t.target] {
         if let Ok(addr) = db.address(worker) {
-            if let Ok(mut peer) = connect(dir, addr, &worker_name(t.source.worker)) {
-                let _ = peer.call(&Request::Control(t, zz_mesh::remote::Command::Abort));
+            if let Ok(mut peer) = connect(dir, addr, &controller_credential(dir, t)) {
+                let _ = peer.call(&Request::Control(t, is_mesh::remote::Command::Abort));
             }
         }
     }
     forget(&control, t)
 }
+fn controller_credential(dir: &Path, t: Handoff) -> String {
+    if dir.join("operator.key").is_file() {
+        "operator".into()
+    } else {
+        worker_name(t.source.worker)
+    }
+}
 fn status(dir: &Path, addr: SocketAddr) -> Result<()> {
     let db = Store::open(dir.join("world.sqlite"))?;
-    let mut worker = connect(dir, addr, &worker_name(db.worker(1)?))?;
+    let credential = if dir.join("operator.key").is_file() {
+        "operator".into()
+    } else {
+        worker_name(db.worker(1)?)
+    };
+    let mut worker = connect(dir, addr, &credential)?;
     let Response::Diagnostics {
         views,
         sent,

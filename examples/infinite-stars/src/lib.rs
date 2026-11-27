@@ -1,12 +1,15 @@
 //! Game-owned schemas and rules. This crate is also an external API consumer.
 use bevy::prelude::*;
+use is_mesh::{self as mesh, *};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use zz_mesh::{self as mesh, *};
 pub mod data;
+pub mod deployment;
 pub mod host;
 pub mod movement;
 pub mod prediction;
+pub mod space;
+pub use space::SpaceSettings;
 
 pub const PLAYER: u32 = 1;
 pub const POSITION: u32 = 2;
@@ -17,10 +20,13 @@ pub const CHUNK: u32 = 6;
 pub const ASSEMBLY: u32 = 7;
 pub const ITEM: u32 = 8;
 pub const ORDER: u32 = 9;
+pub const SHIP: u32 = 11;
 pub const STONE: u16 = 1;
 pub const COIN: u16 = 2;
 #[derive(Component, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Player;
+#[derive(Component, Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Ship;
 #[derive(Component, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
     pub frame: Id,
@@ -352,6 +358,8 @@ impl Plugin for WorldPlugin {
         app.add_plugins((InventoryPlugin, movement::MovementPlugin));
         app.mesh_component::<Player>(PLAYER, 1, rules(Visibility::Public), Default::default())
             .unwrap()
+            .mesh_component::<Ship>(SHIP, 1, rules(Visibility::Public), Default::default())
+            .unwrap()
             .mesh_component::<Position>(
                 POSITION,
                 1,
@@ -425,55 +433,22 @@ impl Plugin for WorldPlugin {
         if let Some(db) = app.world().get_resource::<Store>().cloned() {
             app.mesh_provider(data::VoxelProvider::new(db)).unwrap();
         }
-        app.insert_resource(SpatialRule(|w, e| {
-            let p = w.get::<Position>(e)?;
-            let id = w.get::<Managed>(e)?.id;
-            let player = w.get::<Player>(e).is_some();
-            let extent = if player {
-                5000
-            } else if w.get::<Chunk>(e).is_some() {
-                16000
-            } else {
-                500
-            };
-            Some(SpatialProfile {
-                bounds: Box3::new(
-                    p.frame,
-                    p.mm.map(|v| v.saturating_sub(extent)),
-                    p.mm.map(|v| v.saturating_add(extent)),
-                )
-                .ok()?,
-                velocity: w
-                    .get::<movement::Drive>(e)
-                    .map_or([0; 3], |d| d.axes.map(|v| i64::from(v) * 250 / 32767)),
-                ahead: 5,
-                retention: 1000,
-                principal: id,
-                active: player,
-                needs: BTreeMap::from([
-                    (
-                        POSITION,
-                        Demand {
-                            detail: Detail::Exact,
-                            period: 1,
-                        },
-                    ),
-                    (
-                        CHUNK,
-                        Demand {
-                            detail: Detail::Exact,
-                            period: 4,
-                        },
-                    ),
-                ]),
-            })
-        }));
+        let settings = app
+            .world()
+            .get_resource::<SpaceSettings>()
+            .copied()
+            .unwrap_or_default();
+        settings.install(app);
     }
 }
 pub fn world(db: &Store, worker: Worker) -> App {
+    world_with_settings(db, worker, SpaceSettings::default())
+}
+pub fn world_with_settings(db: &Store, worker: Worker, settings: SpaceSettings) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .insert_resource(db.clone())
+        .insert_resource(settings)
         .add_plugins((MeshPlugin::persistent(db.clone(), worker), WorldPlugin));
     app
 }

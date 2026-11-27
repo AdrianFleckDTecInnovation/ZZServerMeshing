@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use glam::Vec3;
 use rand::Rng;
 use shared::entity::EntityType;
-use shared::spatial::clamp_to_world;
+use shared::spatial::clamp_to_extent;
 use shared::tick::TICK_RATE;
 
 /// NPC direction change interval in ticks.
@@ -52,8 +52,12 @@ pub fn physics_integration(
 pub fn clamp_positions(
     mut query: Query<&mut Position, (With<Authoritative>, Without<TransferOutbound>)>,
 ) {
+    let extent = world_half_extent();
     for mut pos in query.iter_mut() {
-        pos.0 = clamp_to_world(pos.0);
+        let bounded = clamp_to_extent(pos.0, extent);
+        if bounded != pos.0 {
+            pos.0 = bounded;
+        }
     }
 }
 

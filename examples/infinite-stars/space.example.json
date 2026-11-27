@@ -1,0 +1,10 @@
+{
+  "player_sight_m": 100,
+  "ship_sight_m": 500,
+  "player_half_extent_m": 5,
+  "ship_half_extent_m": 0.5,
+  "chunk_half_extent_m": 16,
+  "object_half_extent_m": 0.5,
+  "contact_buffer_m": 1,
+  "forecast_ticks": 5
+}

@@ -29,7 +29,7 @@ Auf sechs Warmlaufschritte folgen 160 gemessene Schritte. Es gibt 256 Objekte je
 | Debian 12 | 4 | 4 | 1024 | 0.186 | 0.635 | 3.431 | 19 |
 | Debian 12 | 16 | 16 | 4096 | 0.812 | 2.920 | 10.934 | 72 |
 
-Der Beobachter auf Insel 1 erhielt in allen fünf Szenen je System genau **697 Frames mit 17.101 Byte Komponentendaten**. Der Benchmark prüft diese Gleichheit für die unabhängigen Inseln. Die ACK-Störung ist an Objekt und Schritt gekoppelt. Wiederholungen sind mitgezählt. Der direkte Pfad belegt dafür null Netzwerkbytes. Ein Zufallstest vergleicht den Index zusätzlich mit einer vollständigen 3D-Suche. Ein Drei-Prozess-Test misst null empfangene und null gesendete Entity-Frames beim entfernten Worker. [Räumliche Tests](../crates/zz-mesh/tests/spatial.rs) · [Mehrprozesstests](../examples/infinite-stars/tests/process.rs)
+Der Beobachter auf Insel 1 erhielt in allen fünf Szenen je System genau **697 Frames mit 17.101 Byte Komponentendaten**. Der Benchmark prüft diese Gleichheit für die unabhängigen Inseln. Die ACK-Störung ist an Objekt und Schritt gekoppelt. Wiederholungen sind mitgezählt. Der direkte Pfad belegt dafür null Netzwerkbytes. Ein Zufallstest vergleicht den Index zusätzlich mit einer vollständigen 3D-Suche. Ein Drei-Prozess-Test misst null empfangene und null gesendete Entity-Frames beim entfernten Worker. [Räumliche Tests](../crates/is-mesh/tests/spatial.rs) · [Mehrprozesstests](../examples/infinite-stars/tests/process.rs)
 
 | System | Worker | Abos | gerichtete Paare | räumliche Kandidaten | Wiederholungen | Allokationen | allokierte Byte | zusätzliche Heap-Spitze, Byte |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |

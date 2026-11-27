@@ -19,7 +19,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum ClientFrame {
     /// Binary snapshot or delta. The every-tick hot path.
-    Binary(Vec<u8>),
+    Binary(tokio_tungstenite::tungstenite::Bytes),
     /// JSON text frame. Used for mid-session server→client control messages
     /// like `ServerMessage::Reconnect { url }`.
     Text(String),
@@ -31,11 +31,10 @@ impl ClientFrame {
     #[cfg(test)]
     pub fn as_binary(&self) -> &[u8] {
         match self {
-            ClientFrame::Binary(b) => b.as_slice(),
-            ClientFrame::Text(s) => panic!(
-                "expected ClientFrame::Binary, got ClientFrame::Text({})",
-                s
-            ),
+            ClientFrame::Binary(b) => b.as_ref(),
+            ClientFrame::Text(s) => {
+                panic!("expected ClientFrame::Binary, got ClientFrame::Text({})", s)
+            }
         }
     }
 
@@ -43,11 +42,10 @@ impl ClientFrame {
     #[cfg(test)]
     pub fn into_binary(self) -> Vec<u8> {
         match self {
-            ClientFrame::Binary(b) => b,
-            ClientFrame::Text(s) => panic!(
-                "expected ClientFrame::Binary, got ClientFrame::Text({})",
-                s
-            ),
+            ClientFrame::Binary(b) => b.to_vec(),
+            ClientFrame::Text(s) => {
+                panic!("expected ClientFrame::Binary, got ClientFrame::Text({})", s)
+            }
         }
     }
 }
@@ -68,6 +66,19 @@ impl std::ops::Deref for ClientFrame {
 #[derive(Resource)]
 pub struct ServerConfig {
     pub server_id: ServerId,
+}
+/// All workers in a demo world use the same XZ bounds.
+pub fn world_half_extent() -> f32 {
+    static EXTENT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *EXTENT.get_or_init(|| match std::env::var("MESH_WORLD_EXTENT") {
+        Ok(value) => value
+            .parse::<f32>()
+            .ok()
+            .filter(|n| (1.0..=1_000_000.0).contains(n))
+            .expect("MESH_WORLD_EXTENT must be a finite half-width in 1..1000000"),
+        Err(std::env::VarError::NotPresent) => shared::spatial::WORLD_EXTENT,
+        Err(_) => panic!("invalid MESH_WORLD_EXTENT"),
+    })
 }
 
 /// Unique per-process session identifier. Generated at sim-server boot from
@@ -116,6 +127,7 @@ pub struct EntityLookup(pub HashMap<EntityId, bevy_ecs::entity::Entity>);
 /// Drained at the start of each tick.
 #[derive(Resource, Default)]
 pub struct InboundQueue {
+    pub(crate) peer_interests: HashMap<u16, crate::peer_interest::Advert>,
     pub peer_updates: Vec<PeerUpdate>,
     pub authority_transfers: Vec<InboundTransfer>,
     pub forwarded_inputs: Vec<ForwardedInput>,
@@ -186,6 +198,7 @@ pub struct CoordEventQueue {
 /// `full_snapshot` is populated and `per_peer` is empty.
 #[derive(Resource, Default)]
 pub struct OutboundReplication {
+    pub(crate) discovery: crate::peer_interest::Discovery,
     /// Per-peer filtered entity lists. Key is peer server_id (u16).
     /// On hot-only ticks, contains only hot-tier entities.
     /// On cold ticks (tick % 4 == 0), contains hot + cold (all entities).
@@ -265,6 +278,14 @@ pub const ACK_STALE_TICKS: u64 = 40;
 #[derive(Resource, Default)]
 pub struct ClientRegistry {
     pub clients: HashMap<u64, ClientHandle>,
+    /// Heartbeat interval for an unchanged view. Zero or one sends every tick.
+    pub idle_snapshot_ticks: u8,
+    /// Per-client output interval. Rotation spreads recipients over simulation ticks.
+    pub snapshot_every_ticks: u8,
+    /// Cumulative snapshot opportunities skipped because a recipient's channel was full.
+    pub snapshot_queue_full: u64,
+    /// Elapsed time collecting, encoding and enqueueing client snapshots on this tick.
+    pub snapshot_time: std::time::Duration,
 }
 
 impl ClientRegistry {
@@ -332,7 +353,7 @@ pub struct ClientHandle {
     /// Used by prepare_client_snapshot for stale-ACK detection (audit #021).
     pub acked_tick: Arc<AtomicU64>,
     /// Baseline entity state for delta computation. None until first full snapshot sent.
-    pub baseline: Option<HashMap<EntityId, EntityState>>,
+    pub baseline: Option<Arc<HashMap<EntityId, EntityState>>>,
     /// Ticks since last forced full snapshot.
     pub ticks_since_full: u32,
     /// Tick of the most recently sent frame. Used with acked_tick for stale-ACK detection.

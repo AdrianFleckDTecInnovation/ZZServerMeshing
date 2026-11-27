@@ -52,15 +52,20 @@ jobs:
           node-version: 22
       - run: rustup default stable
       - run: npm run setup
-      - run: cargo fmt -p zz-mesh -p infinite-stars --check
+      - run: npm run test:abnahme
+      - run: npm run test:abnahme -- --report docs/benchmarks/mesh-v1-debian.json
+      - run: cargo fmt -p is-mesh -p infinite-stars --check
       - run: npm test
+      - name: Import the committed library from a separate game and restart it
+        run: npm run test:game
       - run: cargo run --locked -p infinite-stars --example survey_probe
       - run: cargo run --locked -p infinite-stars -- demo target/ci-stars
       - run: npm run smoke
       - run: npm run bench -- --servers 3 --npcs 300 --seconds 10
       - run: cargo run --locked --release -p infinite-stars --bin mesh-bench -- target/stars-benchmark.json
-      - run: cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json
+      - run: cargo run --locked --release -p infinite-stars --bin cluster-bench -- target/cluster-players.json --quick
       - run: cargo run --locked --release -p infinite-stars --bin cluster-wire -- target/cluster-wire.json
+      - run: npm run bench:distributed
       - uses: actions/upload-artifact@v4
         with:
           name: stars-benchmark-${{ matrix.os }}
@@ -68,5 +73,6 @@ jobs:
             target/stars-benchmark.json
             target/cluster-players.json
             target/cluster-wire.json
+            target/distributed-wire.json
       - run: npm --prefix mcp-oracle ci
       - run: npm --prefix mcp-oracle run build

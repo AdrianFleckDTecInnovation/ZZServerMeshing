@@ -1,0 +1,1958 @@
+{
+  "schema": 1,
+  "revision": "244b429c7316a39cd6aeb99d0e085522f085c2c4",
+  "source_sha256": "9ac1013babe6b77080221ce784980979144133ecc28e3d38b8d750537a7f6240",
+  "utc": "2026-11-27T11:32:07.765Z",
+  "cpu": "QEMU Virtual CPU version 2.5+",
+  "logical_cpus": 8,
+  "os": "linux 6.1.0-56-cloud-amd64",
+  "rust": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "node": "v22.16.0",
+  "build": "cargo build --locked --release -p infinite-stars --bins",
+  "warmup_ticks": 4,
+  "rustflags": "",
+  "raw_directory": "mesh-v1-run-fiC0zS",
+  "topology": [
+    {
+      "field": "Architecture:",
+      "data": "x86_64"
+    },
+    {
+      "field": "CPU op-mode(s):",
+      "data": "32-bit, 64-bit"
+    },
+    {
+      "field": "Address sizes:",
+      "data": "40 bits physical, 48 bits virtual"
+    },
+    {
+      "field": "Byte Order:",
+      "data": "Little Endian"
+    },
+    {
+      "field": "CPU(s):",
+      "data": "8"
+    },
+    {
+      "field": "On-line CPU(s) list:",
+      "data": "0-7"
+    },
+    {
+      "field": "Vendor ID:",
+      "data": "GenuineIntel"
+    },
+    {
+      "field": "Model name:",
+      "data": "QEMU Virtual CPU version 2.5+"
+    },
+    {
+      "field": "CPU family:",
+      "data": "15"
+    },
+    {
+      "field": "Model:",
+      "data": "107"
+    },
+    {
+      "field": "Thread(s) per core:",
+      "data": "1"
+    },
+    {
+      "field": "Core(s) per socket:",
+      "data": "8"
+    },
+    {
+      "field": "Socket(s):",
+      "data": "1"
+    },
+    {
+      "field": "Stepping:",
+      "data": "1"
+    },
+    {
+      "field": "BogoMIPS:",
+      "data": "4608.00"
+    },
+    {
+      "field": "Flags:",
+      "data": "fpu de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx lm constant_tsc nopl xtopology cpuid tsc_known_freq pni cx16 x2apic hypervisor lahf_lm pti ibt"
+    },
+    {
+      "field": "Hypervisor vendor:",
+      "data": "Microsoft"
+    },
+    {
+      "field": "Virtualization type:",
+      "data": "full"
+    },
+    {
+      "field": "L1d cache:",
+      "data": "384 KiB (8 instances)"
+    },
+    {
+      "field": "L1i cache:",
+      "data": "256 KiB (8 instances)"
+    },
+    {
+      "field": "L2 cache:",
+      "data": "16 MiB (8 instances)"
+    },
+    {
+      "field": "L3 cache:",
+      "data": "240 MiB (8 instances)"
+    },
+    {
+      "field": "NUMA node(s):",
+      "data": "1"
+    },
+    {
+      "field": "NUMA node0 CPU(s):",
+      "data": "0-7"
+    },
+    {
+      "field": "Vulnerability Gather data sampling:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Indirect target selection:",
+      "data": "Mitigation; Aligned branch/return thunks"
+    },
+    {
+      "field": "Vulnerability Itlb multihit:",
+      "data": "KVM: Mitigation: VMX unsupported"
+    },
+    {
+      "field": "Vulnerability L1tf:",
+      "data": "Mitigation; PTE Inversion"
+    },
+    {
+      "field": "Vulnerability Mds:",
+      "data": "Vulnerable: Clear CPU buffers attempted, no microcode; SMT Host state unknown"
+    },
+    {
+      "field": "Vulnerability Meltdown:",
+      "data": "Mitigation; PTI"
+    },
+    {
+      "field": "Vulnerability Mmio stale data:",
+      "data": "Unknown: No mitigations"
+    },
+    {
+      "field": "Vulnerability Reg file data sampling:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Retbleed:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Spec rstack overflow:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Spec store bypass:",
+      "data": "Vulnerable"
+    },
+    {
+      "field": "Vulnerability Spectre v1:",
+      "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+    },
+    {
+      "field": "Vulnerability Spectre v2:",
+      "data": "Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Retpoline"
+    },
+    {
+      "field": "Vulnerability Srbds:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Tsa:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Tsx async abort:",
+      "data": "Not affected"
+    },
+    {
+      "field": "Vulnerability Vmscape:",
+      "data": "Not affected"
+    }
+  ],
+  "short": [
+    {
+      "active_percent": 100,
+      "barrier_and_checks_ms": {
+        "max": 0.39649799999999935,
+        "p50": 0.1383000000000001,
+        "p95": 0.29889900000000047,
+        "p99": 0.39649799999999935
+      },
+      "component_projections": 163840,
+      "cpu_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "cross_island_subscriptions": 0,
+      "effect_checks": 0,
+      "effect_interval": 1,
+      "equivalent_hz": 200.58264343643523,
+      "gameplay_player_updates": 0,
+      "inputs_acked": 40960,
+      "island_size": 16,
+      "islands": 128,
+      "local_effects": false,
+      "moving_players": 2048,
+      "paced_20hz": false,
+      "partitions": 4,
+      "peak_resident_bytes": 32550912,
+      "peer_updates_applied": 163840,
+      "players": 2048,
+      "process_cpu_seconds": 1.3120524,
+      "resident_bytes": 28893184,
+      "rust_allocated_bytes_per_tick": 2500394.6,
+      "rust_allocations_per_tick": 8961.699999999999,
+      "schema": 1,
+      "status_effects": 0,
+      "store": "shared memory SQLite",
+      "sum_gameplay_system_ms_per_tick": 0,
+      "target_os": "linux",
+      "tick_ms": {
+        "max": 6.695586,
+        "p50": 4.796189999999999,
+        "p95": 6.170788,
+        "p99": 6.695586
+      },
+      "ticks": 80,
+      "ticks_over_50ms": 0,
+      "wall_seconds_with_setup": 0.635848424,
+      "workers": 16
+    },
+    {
+      "active_percent": 100,
+      "barrier_and_checks_ms": {
+        "max": 0.3672999999999993,
+        "p50": 0.12319999999999887,
+        "p95": 0.2840999999999996,
+        "p99": 0.3672999999999993
+      },
+      "component_projections": 163840,
+      "cpu_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "cross_island_subscriptions": 0,
+      "effect_checks": 0,
+      "effect_interval": 1,
+      "equivalent_hz": 182.58582366189347,
+      "gameplay_player_updates": 0,
+      "inputs_acked": 40960,
+      "island_size": 16,
+      "islands": 128,
+      "local_effects": false,
+      "moving_players": 2048,
+      "paced_20hz": false,
+      "partitions": 4,
+      "peak_resident_bytes": 30744576,
+      "peer_updates_applied": 163840,
+      "players": 2048,
+      "process_cpu_seconds": 1.3741516,
+      "resident_bytes": 25374720,
+      "rust_allocated_bytes_per_tick": 2500394.6,
+      "rust_allocations_per_tick": 8961.699999999999,
+      "schema": 1,
+      "status_effects": 0,
+      "store": "shared memory SQLite",
+      "sum_gameplay_system_ms_per_tick": 0,
+      "target_os": "linux",
+      "tick_ms": {
+        "max": 7.419085,
+        "p50": 5.425889,
+        "p95": 6.773987,
+        "p99": 7.419085
+      },
+      "ticks": 80,
+      "ticks_over_50ms": 0,
+      "wall_seconds_with_setup": 0.635390421,
+      "workers": 16
+    },
+    {
+      "active_percent": 100,
+      "barrier_and_checks_ms": {
+        "max": 0.4583000000000004,
+        "p50": 0.14719999999999978,
+        "p95": 0.3503980000000002,
+        "p99": 0.4583000000000004
+      },
+      "component_projections": 163840,
+      "cpu_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "cross_island_subscriptions": 0,
+      "effect_checks": 0,
+      "effect_interval": 1,
+      "equivalent_hz": 165.37155861631481,
+      "gameplay_player_updates": 0,
+      "inputs_acked": 40960,
+      "island_size": 16,
+      "islands": 128,
+      "local_effects": false,
+      "moving_players": 2048,
+      "paced_20hz": false,
+      "partitions": 4,
+      "peak_resident_bytes": 30367744,
+      "peer_updates_applied": 163840,
+      "players": 2048,
+      "process_cpu_seconds": 1.5198883,
+      "resident_bytes": 27774976,
+      "rust_allocated_bytes_per_tick": 2500394.6,
+      "rust_allocations_per_tick": 8961.699999999999,
+      "schema": 1,
+      "status_effects": 0,
+      "store": "shared memory SQLite",
+      "sum_gameplay_system_ms_per_tick": 0,
+      "target_os": "linux",
+      "tick_ms": {
+        "max": 8.535083,
+        "p50": 5.957188,
+        "p95": 7.559884,
+        "p99": 8.535083
+      },
+      "ticks": 80,
+      "ticks_over_50ms": 0,
+      "wall_seconds_with_setup": 0.72155414,
+      "workers": 16
+    }
+  ],
+  "stability": {
+    "active_percent": 100,
+    "barrier_and_checks_ms": {
+      "max": 6.912484000000001,
+      "p50": 0.30879999999999974,
+      "p95": 1.564496,
+      "p99": 3.568090999999999
+    },
+    "component_projections": 2457600,
+    "cpu_ids": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "cross_island_subscriptions": 0,
+    "effect_checks": 0,
+    "effect_interval": 1,
+    "equivalent_hz": 112.31669519077525,
+    "gameplay_player_updates": 0,
+    "inputs_acked": 614400,
+    "island_size": 16,
+    "islands": 128,
+    "local_effects": false,
+    "moving_players": 2048,
+    "paced_20hz": true,
+    "partitions": 4,
+    "peak_resident_bytes": 32030720,
+    "peer_updates_applied": 2457600,
+    "players": 2048,
+    "process_cpu_seconds": 24.4500181,
+    "resident_bytes": 29110272,
+    "rust_allocated_bytes_per_tick": 2496723.213333333,
+    "rust_allocations_per_tick": 8950.18,
+    "schema": 1,
+    "status_effects": 0,
+    "store": "shared memory SQLite",
+    "sum_gameplay_system_ms_per_tick": 0,
+    "target_os": "linux",
+    "tick_ms": {
+      "max": 49.10077999999999,
+      "p50": 7.3795839999999995,
+      "p95": 15.643462,
+      "p99": 19.796153
+    },
+    "ticks": 1200,
+    "ticks_over_50ms": 0,
+    "wall_seconds_with_setup": 61.416279083,
+    "workers": 16
+  },
+  "private_updates": {
+    "active_percent": 0,
+    "barrier_and_checks_ms": {
+      "max": 2.6955930000000023,
+      "p50": 0.3650989999999972,
+      "p95": 1.645696000000001,
+      "p99": 2.6955930000000023
+    },
+    "component_projections": 0,
+    "cpu_ids": null,
+    "cross_island_subscriptions": 0,
+    "effect_checks": 51200000,
+    "effect_interval": 1,
+    "equivalent_hz": 46.28748758382986,
+    "gameplay_player_updates": 400000,
+    "inputs_acked": 0,
+    "island_size": 16,
+    "islands": 625,
+    "local_effects": false,
+    "moving_players": 0,
+    "paced_20hz": false,
+    "partitions": 4,
+    "peak_resident_bytes": 113348608,
+    "peer_updates_applied": 0,
+    "players": 10000,
+    "process_cpu_seconds": 3.6332431,
+    "resident_bytes": 84226048,
+    "rust_allocated_bytes_per_tick": 813952.1000000001,
+    "rust_allocations_per_tick": 7604,
+    "schema": 1,
+    "status_effects": 128,
+    "store": "shared memory SQLite",
+    "sum_gameplay_system_ms_per_tick": 18.300056174999998,
+    "target_os": "linux",
+    "tick_ms": {
+      "max": 26.937132,
+      "p50": 21.575046,
+      "p95": 25.857335,
+      "p99": 26.937132
+    },
+    "ticks": 40,
+    "ticks_over_50ms": 0,
+    "wall_seconds_with_setup": 2.333939327,
+    "workers": 32
+  },
+  "hot_group": {
+    "active_percent": 100,
+    "active_workers": 2,
+    "component_projections": 5120,
+    "cpu_ids": [
+      0
+    ],
+    "cross_island_subscriptions": 0,
+    "effect_checks": 5201920,
+    "effect_interval": 1,
+    "equivalent_hz": 277.4314951066945,
+    "expensive_group_players": 127,
+    "gameplay_player_updates": 5080,
+    "inputs_acked": 1280,
+    "island_size": 128,
+    "islands": 1,
+    "local_effects": false,
+    "moving_players": 128,
+    "octree_candidates": 0,
+    "paced_20hz": false,
+    "peak_resident_bytes": 12664832,
+    "peer_updates_applied": 5120,
+    "players": 128,
+    "process_cpu_seconds": 0.193406,
+    "resident_bytes": 12664832,
+    "schema": 1,
+    "status_effects": 1024,
+    "store": "memory",
+    "sum_gameplay_system_ms_per_tick": 2.266711775,
+    "target_os": "linux",
+    "tick_ms": {
+      "max": 17.713056,
+      "p50": 2.122794,
+      "p95": 8.297479,
+      "p99": 17.713056
+    },
+    "ticks": 40,
+    "ticks_over_50ms": 0,
+    "wall_seconds_with_setup": 0.193555512,
+    "warmup_ticks": 4,
+    "worker_cpu_ms_per_tick": 3.6058525,
+    "worker_cycles_per_tick": null,
+    "workers": 2,
+    "workload": "session inputs, Bevy movement, worker replication, checkpoints, physical islands"
+  },
+  "durable": {
+    "active_percent": 100,
+    "active_workers": 2,
+    "component_projections": 10240,
+    "cpu_ids": [
+      0,
+      1
+    ],
+    "cross_island_subscriptions": 0,
+    "effect_checks": 0,
+    "effect_interval": 1,
+    "equivalent_hz": 124.4104167025513,
+    "expensive_group_players": null,
+    "gameplay_player_updates": 0,
+    "inputs_acked": 2560,
+    "island_size": 16,
+    "islands": 16,
+    "local_effects": false,
+    "moving_players": 256,
+    "octree_candidates": 0,
+    "paced_20hz": false,
+    "peak_resident_bytes": 12144640,
+    "peer_updates_applied": 10240,
+    "players": 256,
+    "process_cpu_seconds": 0.3998155,
+    "resident_bytes": 12042240,
+    "schema": 1,
+    "status_effects": 0,
+    "store": "file",
+    "sum_gameplay_system_ms_per_tick": 0,
+    "target_os": "linux",
+    "tick_ms": {
+      "max": 33.679215,
+      "p50": 6.162584,
+      "p95": 18.289654,
+      "p99": 33.679215
+    },
+    "ticks": 40,
+    "ticks_over_50ms": 0,
+    "wall_seconds_with_setup": 2.137818598,
+    "warmup_ticks": 4,
+    "worker_cpu_ms_per_tick": 1.7432725,
+    "worker_cycles_per_tick": null,
+    "workers": 2,
+    "workload": "session inputs, Bevy movement, worker replication, checkpoints, physical islands"
+  },
+  "subscribers": {
+    "os": "linux",
+    "profiles": [
+      {
+        "adapter_threads": 1,
+        "confirmed_inputs": 1024,
+        "enter_records": 1024,
+        "idle_ms": [
+          5.893885,
+          6.457784,
+          5.517986,
+          12.431869,
+          3.003992
+        ],
+        "initial_budgeted_bytes": 172028,
+        "initial_ms": 46.821581,
+        "initial_poll_us": {
+          "p50": 18.1,
+          "p95": 30.6,
+          "p99": 75.2
+        },
+        "input_and_tick_ms": 8.955077000000001,
+        "players_per_island": 1,
+        "resident_bytes": 26296320,
+        "rss_growth_per_subscriber": 4020,
+        "subscribers": 1024,
+        "transport": "Tokio current-thread logical adapter; two Bevy workers"
+      },
+      {
+        "adapter_threads": 1,
+        "confirmed_inputs": 1024,
+        "enter_records": 17408,
+        "idle_ms": [
+          6.751283,
+          6.503183,
+          6.303584,
+          6.400484,
+          6.860183
+        ],
+        "initial_budgeted_bytes": 2151424,
+        "initial_ms": 55.671759,
+        "initial_poll_us": {
+          "p50": 31.1,
+          "p95": 71.3,
+          "p99": 231.299
+        },
+        "input_and_tick_ms": 8.611178,
+        "players_per_island": 16,
+        "resident_bytes": 25997312,
+        "rss_growth_per_subscriber": 848,
+        "subscribers": 1024,
+        "transport": "Tokio current-thread logical adapter; two Bevy workers"
+      }
+    ],
+    "push": true
+  },
+  "scaling": {
+    "strong": {
+      "workers": 16,
+      "summary": [
+        {
+          "threads": 1,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 33.952112,
+          "p95_ms": 59.282849999999996,
+          "p99_ms": 68.053827,
+          "worst_run_p95_ms": 69.646919,
+          "max_ms": 79.32339400000001,
+          "over_50ms": 8,
+          "cpu_ms_per_tick": 37.513815625,
+          "barrier_and_validation_p95_ms": 0,
+          "player_ticks_per_second": 120640.50684092936,
+          "speedup": 1,
+          "efficiency": 1
+        },
+        {
+          "threads": 2,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 24.019437,
+          "p95_ms": 36.781403999999995,
+          "p99_ms": 41.038693,
+          "worst_run_p95_ms": 41.034893000000004,
+          "max_ms": 46.146481,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 43.2915,
+          "barrier_and_validation_p95_ms": 1.6846960000000024,
+          "player_ticks_per_second": 170528.55984925875,
+          "speedup": 1.4135265535158048,
+          "efficiency": 0.7067632767579024
+        },
+        {
+          "threads": 4,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 20.286748,
+          "p95_ms": 24.369537,
+          "p99_ms": 25.158434,
+          "worst_run_p95_ms": 26.148332,
+          "max_ms": 31.330219,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 58.0149,
+          "barrier_and_validation_p95_ms": 0.4507990000000035,
+          "player_ticks_per_second": 201905.2043235318,
+          "speedup": 1.6736103785584562,
+          "efficiency": 0.41840259463961404
+        },
+        {
+          "threads": 8,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 21.305745,
+          "p95_ms": 31.029621,
+          "p99_ms": 33.054616,
+          "worst_run_p95_ms": 35.459108,
+          "max_ms": 35.477809,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 68.650834375,
+          "barrier_and_validation_p95_ms": 1.0675979999999967,
+          "player_ticks_per_second": 192248.61651164977,
+          "speedup": 1.5935660546017048,
+          "efficiency": 0.1991957568252131
+        }
+      ],
+      "samples": [
+        {
+          "run": 1,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 1.8569653,
+          "resident_bytes": 43548672,
+          "peak_resident_bytes": 46784512,
+          "wall_seconds_with_setup": 1.8572681819999999,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 33.399115,
+          "p95_ms": 59.282849999999996,
+          "p99_ms": 68.053827,
+          "max_ms": 68.053827,
+          "over_50ms": 2,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 37.513815625,
+          "allocations_per_tick": 17607.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 1.9131596,
+          "resident_bytes": 43548672,
+          "peak_resident_bytes": 46456832,
+          "wall_seconds_with_setup": 1.302453383,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 19.79955,
+          "p95_ms": 24.594937,
+          "p99_ms": 27.15233,
+          "max_ms": 27.15233,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.6846960000000024,
+          "cpu_ms_per_tick": 34.245771875,
+          "allocations_per_tick": 17617.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 3.216958,
+          "resident_bytes": 41140224,
+          "peak_resident_bytes": 46743552,
+          "wall_seconds_with_setup": 1.578370271,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 20.286748,
+          "p95_ms": 24.369537,
+          "p99_ms": 24.798837,
+          "max_ms": 24.798837,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.4381990000000009,
+          "cpu_ms_per_tick": 58.0149,
+          "allocations_per_tick": 17635.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 4.3081901,
+          "resident_bytes": 37093376,
+          "peak_resident_bytes": 47300608,
+          "wall_seconds_with_setup": 2.122638666,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 21.776244,
+          "p95_ms": 31.029621,
+          "p99_ms": 33.054616,
+          "max_ms": 33.054616,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.0248970000000028,
+          "cpu_ms_per_tick": 68.650834375,
+          "allocations_per_tick": 17671.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 5.0104006,
+          "resident_bytes": 37429248,
+          "peak_resident_bytes": 49184768,
+          "wall_seconds_with_setup": 2.505819763,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 21.305745,
+          "p95_ms": 35.459108,
+          "p99_ms": 35.477809,
+          "max_ms": 35.477809,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.0675979999999967,
+          "cpu_ms_per_tick": 77.19850625000001,
+          "allocations_per_tick": 17671.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 4.1910587,
+          "resident_bytes": 44507136,
+          "peak_resident_bytes": 46686208,
+          "wall_seconds_with_setup": 2.307131153,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 21.966943999999998,
+          "p95_ms": 26.148332,
+          "p99_ms": 31.330219,
+          "max_ms": 31.330219,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.4507990000000035,
+          "cpu_ms_per_tick": 61.92547499999999,
+          "allocations_per_tick": 17635.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 3.8487625,
+          "resident_bytes": 42401792,
+          "peak_resident_bytes": 46395392,
+          "wall_seconds_with_setup": 2.576684635,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 31.352818999999997,
+          "p95_ms": 41.034893000000004,
+          "p99_ms": 46.146481,
+          "max_ms": 46.146481,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.5223980000000026,
+          "cpu_ms_per_tick": 58.410890625,
+          "allocations_per_tick": 17617.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 1.9886638,
+          "resident_bytes": 43466752,
+          "peak_resident_bytes": 46723072,
+          "wall_seconds_with_setup": 1.989058439,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 45.140383,
+          "p95_ms": 69.646919,
+          "p99_ms": 79.32339400000001,
+          "max_ms": 79.32339400000001,
+          "over_50ms": 6,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 45.41424375,
+          "allocations_per_tick": 17607.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 1.803701,
+          "resident_bytes": 43393024,
+          "peak_resident_bytes": 46649344,
+          "wall_seconds_with_setup": 1.8039963079999999,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 33.952112,
+          "p95_ms": 46.783478,
+          "p99_ms": 47.996675,
+          "max_ms": 47.996675,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 35.871015625,
+          "allocations_per_tick": 17607.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 2.2415163,
+          "resident_bytes": 43692032,
+          "peak_resident_bytes": 46526464,
+          "wall_seconds_with_setup": 1.5004179899999999,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 24.019437,
+          "p95_ms": 36.781403999999995,
+          "p99_ms": 41.038693,
+          "max_ms": 41.038693,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 2.4163940000000004,
+          "cpu_ms_per_tick": 43.2915,
+          "allocations_per_tick": 17617.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 2.8270481,
+          "resident_bytes": 43884544,
+          "peak_resident_bytes": 46731264,
+          "wall_seconds_with_setup": 1.626830452,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 17.626054,
+          "p95_ms": 22.366541,
+          "p99_ms": 25.158434,
+          "max_ms": 25.158434,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.6825989999999997,
+          "cpu_ms_per_tick": 41.303559375,
+          "allocations_per_tick": 17635.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 2.2832164,
+          "resident_bytes": 35753984,
+          "peak_resident_bytes": 47296512,
+          "wall_seconds_with_setup": 1.23092238,
+          "players": 4096,
+          "workers": 16,
+          "p50_ms": 15.803259,
+          "p95_ms": 22.557741,
+          "p99_ms": 24.133737,
+          "max_ms": 24.133737,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.5521960000000021,
+          "cpu_ms_per_tick": 38.617084375,
+          "allocations_per_tick": 17671.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        }
+      ]
+    },
+    "weak": {
+      "workers": 16,
+      "summary": [
+        {
+          "threads": 1,
+          "players": 256,
+          "workers": 2,
+          "p50_ms": 1.309596,
+          "p95_ms": 3.69979,
+          "p99_ms": 4.193189,
+          "worst_run_p95_ms": 4.851087,
+          "max_ms": 5.372586,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 1.73655625,
+          "barrier_and_validation_p95_ms": 0,
+          "player_ticks_per_second": 195480.13280431522,
+          "speedup": 1,
+          "efficiency": 1
+        },
+        {
+          "threads": 2,
+          "players": 512,
+          "workers": 4,
+          "p50_ms": 3.3219909999999997,
+          "p95_ms": 6.088884,
+          "p99_ms": 6.442983,
+          "worst_run_p95_ms": 7.115582,
+          "max_ms": 8.878176999999999,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 4.4738875,
+          "barrier_and_validation_p95_ms": 1.9127949999999991,
+          "player_ticks_per_second": 154124.4392293658,
+          "speedup": 0.7884404262383614,
+          "efficiency": 0.3942202131191807
+        },
+        {
+          "threads": 4,
+          "players": 1024,
+          "workers": 8,
+          "p50_ms": 5.1670869999999995,
+          "p95_ms": 7.928380000000001,
+          "p99_ms": 9.938274,
+          "worst_run_p95_ms": 9.539174,
+          "max_ms": 13.090065999999998,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 8.179443749999999,
+          "barrier_and_validation_p95_ms": 1.7221949999999997,
+          "player_ticks_per_second": 198177.42569459352,
+          "speedup": 1.0137982967966286,
+          "efficiency": 0.25344957419915715
+        },
+        {
+          "threads": 8,
+          "players": 2048,
+          "workers": 16,
+          "p50_ms": 10.129572999999999,
+          "p95_ms": 14.620462,
+          "p99_ms": 16.739055999999998,
+          "worst_run_p95_ms": 16.125357,
+          "max_ms": 19.937648,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 20.614340625,
+          "barrier_and_validation_p95_ms": 1.7852959999999998,
+          "player_ticks_per_second": 202180.28933697406,
+          "speedup": 1.034275383572437,
+          "efficiency": 0.12928442294655462
+        }
+      ],
+      "samples": [
+        {
+          "run": 1,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 0.1185168,
+          "resident_bytes": 12259328,
+          "peak_resident_bytes": 12259328,
+          "wall_seconds_with_setup": 0.11857209,
+          "players": 256,
+          "workers": 2,
+          "p50_ms": 1.307997,
+          "p95_ms": 4.851087,
+          "p99_ms": 5.372586,
+          "max_ms": 5.372586,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 1.73655625,
+          "allocations_per_tick": 1117.625,
+          "inputs_acked": 2048,
+          "peer_updates": 8192,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 0.1982413,
+          "resident_bytes": 14725120,
+          "peak_resident_bytes": 14733312,
+          "wall_seconds_with_setup": 0.184664216,
+          "players": 512,
+          "workers": 4,
+          "p50_ms": 2.602693,
+          "p95_ms": 5.405786,
+          "p99_ms": 6.325484,
+          "max_ms": 6.325484,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 2.303694,
+          "cpu_ms_per_tick": 3.1665156249999997,
+          "allocations_per_tick": 2235.125,
+          "inputs_acked": 4096,
+          "peer_updates": 16384,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 0.4347677,
+          "resident_bytes": 19562496,
+          "peak_resident_bytes": 20512768,
+          "wall_seconds_with_setup": 0.319415463,
+          "players": 1024,
+          "workers": 8,
+          "p50_ms": 5.1670869999999995,
+          "p95_ms": 7.928380000000001,
+          "p99_ms": 9.286175,
+          "max_ms": 9.286175,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 2.734492,
+          "cpu_ms_per_tick": 7.6226125,
+          "allocations_per_tick": 4477.375,
+          "inputs_acked": 8192,
+          "peer_updates": 32768,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 1.2135932,
+          "resident_bytes": 27996160,
+          "peak_resident_bytes": 32587776,
+          "wall_seconds_with_setup": 0.760683606,
+          "players": 2048,
+          "workers": 16,
+          "p50_ms": 10.129572999999999,
+          "p95_ms": 16.125357,
+          "p99_ms": 19.937648,
+          "max_ms": 19.937648,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 4.572087999999999,
+          "cpu_ms_per_tick": 20.614340625,
+          "allocations_per_tick": 8975.875,
+          "inputs_acked": 16384,
+          "peer_updates": 65536,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 1.282704,
+          "resident_bytes": 24477696,
+          "peak_resident_bytes": 31465472,
+          "wall_seconds_with_setup": 0.749807933,
+          "players": 2048,
+          "workers": 16,
+          "p50_ms": 8.800177,
+          "p95_ms": 12.619467,
+          "p99_ms": 16.739055999999998,
+          "max_ms": 16.739055999999998,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.7852959999999998,
+          "cpu_ms_per_tick": 18.877381250000003,
+          "allocations_per_tick": 8975.875,
+          "inputs_acked": 16384,
+          "peer_updates": 65536,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 0.5282982,
+          "resident_bytes": 19931136,
+          "peak_resident_bytes": 20434944,
+          "wall_seconds_with_setup": 0.359902055,
+          "players": 1024,
+          "workers": 8,
+          "p50_ms": 4.5055879999999995,
+          "p95_ms": 7.638780000000001,
+          "p99_ms": 13.090065999999998,
+          "max_ms": 13.090065999999998,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.7221949999999997,
+          "cpu_ms_per_tick": 8.179443749999999,
+          "allocations_per_tick": 4477.375,
+          "inputs_acked": 8192,
+          "peer_updates": 32768,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 0.2785391,
+          "resident_bytes": 14622720,
+          "peak_resident_bytes": 14962688,
+          "wall_seconds_with_setup": 0.223719012,
+          "players": 512,
+          "workers": 4,
+          "p50_ms": 3.3219909999999997,
+          "p95_ms": 7.115582,
+          "p99_ms": 8.878176999999999,
+          "max_ms": 8.878176999999999,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.5404969999999998,
+          "cpu_ms_per_tick": 4.4738875,
+          "allocations_per_tick": 2235.125,
+          "inputs_acked": 4096,
+          "peer_updates": 16384,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 0.1206792,
+          "resident_bytes": 12115968,
+          "peak_resident_bytes": 12115968,
+          "wall_seconds_with_setup": 0.120748683,
+          "players": 256,
+          "workers": 2,
+          "p50_ms": 1.309596,
+          "p95_ms": 3.69979,
+          "p99_ms": 4.193189,
+          "max_ms": 4.193189,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 1.704659375,
+          "allocations_per_tick": 1117.625,
+          "inputs_acked": 2048,
+          "peer_updates": 8192,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 0.1086527,
+          "resident_bytes": 11915264,
+          "peak_resident_bytes": 11915264,
+          "wall_seconds_with_setup": 0.108739015,
+          "players": 256,
+          "workers": 2,
+          "p50_ms": 2.047695,
+          "p95_ms": 3.414091,
+          "p99_ms": 3.97019,
+          "max_ms": 3.97019,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 2.197234375,
+          "allocations_per_tick": 1117.625,
+          "inputs_acked": 2048,
+          "peer_updates": 8192,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 0.2997869,
+          "resident_bytes": 14569472,
+          "peak_resident_bytes": 14577664,
+          "wall_seconds_with_setup": 0.222665115,
+          "players": 512,
+          "workers": 4,
+          "p50_ms": 3.81739,
+          "p95_ms": 6.088884,
+          "p99_ms": 6.442983,
+          "max_ms": 6.442983,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.9127949999999991,
+          "cpu_ms_per_tick": 5.5729218750000005,
+          "allocations_per_tick": 2235.125,
+          "inputs_acked": 4096,
+          "peer_updates": 16384,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 1.0404972,
+          "resident_bytes": 19554304,
+          "peak_resident_bytes": 20557824,
+          "wall_seconds_with_setup": 0.597746929,
+          "players": 1024,
+          "workers": 8,
+          "p50_ms": 6.689383,
+          "p95_ms": 9.539174,
+          "p99_ms": 9.938274,
+          "max_ms": 9.938274,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.8412980000000001,
+          "cpu_ms_per_tick": 15.439818749999999,
+          "allocations_per_tick": 4477.375,
+          "inputs_acked": 8192,
+          "peer_updates": 32768,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 1.9135439,
+          "resident_bytes": 27643904,
+          "peak_resident_bytes": 33112064,
+          "wall_seconds_with_setup": 0.953304692,
+          "players": 2048,
+          "workers": 16,
+          "p50_ms": 12.325067,
+          "p95_ms": 14.620462,
+          "p99_ms": 16.093458000000002,
+          "max_ms": 16.093458000000002,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.8624980000000004,
+          "cpu_ms_per_tick": 33.839159375,
+          "allocations_per_tick": 8975.875,
+          "inputs_acked": 16384,
+          "peer_updates": 65536,
+          "cross_island_subscriptions": 0
+        }
+      ]
+    },
+    "topology": {
+      "workers": 32,
+      "summary": [
+        {
+          "threads": 1,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 36.106203,
+          "p95_ms": 59.601241,
+          "p99_ms": 69.18161500000001,
+          "worst_run_p95_ms": 71.71051100000001,
+          "max_ms": 71.915511,
+          "over_50ms": 22,
+          "cpu_ms_per_tick": 38.6850875,
+          "barrier_and_validation_p95_ms": 0,
+          "player_ticks_per_second": 113443.11114630358,
+          "speedup": 1,
+          "efficiency": 1
+        },
+        {
+          "threads": 2,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 24.870832999999998,
+          "p95_ms": 33.624309999999994,
+          "p99_ms": 36.644002,
+          "worst_run_p95_ms": 37.698401,
+          "max_ms": 44.356683000000004,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 43.57070625,
+          "barrier_and_validation_p95_ms": 1.0821970000000007,
+          "player_ticks_per_second": 164690.90520611033,
+          "speedup": 1.4517488417054631,
+          "efficiency": 0.7258744208527316
+        },
+        {
+          "threads": 4,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 20.992244,
+          "p95_ms": 29.168723,
+          "p99_ms": 32.120514,
+          "worst_run_p95_ms": 31.042817,
+          "max_ms": 34.08451,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 41.748999999999995,
+          "barrier_and_validation_p95_ms": 1.0147970000000015,
+          "player_ticks_per_second": 195119.68325063295,
+          "speedup": 1.7199782452985972,
+          "efficiency": 0.4299945613246493
+        },
+        {
+          "threads": 8,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 19.620348,
+          "p95_ms": 25.451499,
+          "p99_ms": 28.858423000000002,
+          "worst_run_p95_ms": 26.468829999999997,
+          "max_ms": 29.832554000000002,
+          "over_50ms": 0,
+          "cpu_ms_per_tick": 43.51968125,
+          "barrier_and_validation_p95_ms": 1.414150000000003,
+          "player_ticks_per_second": 208762.8619023475,
+          "speedup": 1.8402427418718568,
+          "efficiency": 0.2300303427339821
+        }
+      ],
+      "samples": [
+        {
+          "run": 1,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 2.475238,
+          "resident_bytes": 46747648,
+          "peak_resident_bytes": 49963008,
+          "wall_seconds_with_setup": 2.475793371,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 48.014673,
+          "p95_ms": 71.71051100000001,
+          "p99_ms": 71.915511,
+          "max_ms": 71.915511,
+          "over_50ms": 14,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 48.41404375,
+          "allocations_per_tick": 17811.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 2.6289117,
+          "resident_bytes": 47013888,
+          "peak_resident_bytes": 49995776,
+          "wall_seconds_with_setup": 1.7899307690000001,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 24.527435,
+          "p95_ms": 37.698401,
+          "p99_ms": 44.356683000000004,
+          "max_ms": 44.356683000000004,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.6722979999999978,
+          "cpu_ms_per_tick": 43.57070625,
+          "allocations_per_tick": 17821.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 2.241841,
+          "resident_bytes": 43126784,
+          "peak_resident_bytes": 50065408,
+          "wall_seconds_with_setup": 1.337105261,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 21.941042,
+          "p95_ms": 29.168723,
+          "p99_ms": 34.08451,
+          "max_ms": 34.08451,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.0147970000000015,
+          "cpu_ms_per_tick": 43.269115625,
+          "allocations_per_tick": 17839.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 1,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 2.4670293,
+          "resident_bytes": 41127936,
+          "peak_resident_bytes": 52199424,
+          "wall_seconds_with_setup": 1.354914709,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 19.504548,
+          "p95_ms": 26.468829999999997,
+          "p99_ms": 26.945028,
+          "max_ms": 26.945028,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.6106960000000008,
+          "cpu_ms_per_tick": 44.704346875000006,
+          "allocations_per_tick": 17871.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 2.3659059,
+          "resident_bytes": 43941888,
+          "peak_resident_bytes": 49963008,
+          "wall_seconds_with_setup": 1.3101866229999999,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 19.620348,
+          "p95_ms": 24.137235,
+          "p99_ms": 28.858423000000002,
+          "max_ms": 28.858423000000002,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.0895960000000002,
+          "cpu_ms_per_tick": 43.51968125,
+          "allocations_per_tick": 17871.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 2.1062646,
+          "resident_bytes": 46100480,
+          "peak_resident_bytes": 51986432,
+          "wall_seconds_with_setup": 1.264138142,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 18.492551,
+          "p95_ms": 24.516435,
+          "p99_ms": 24.859033999999998,
+          "max_ms": 24.859033999999998,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 0.8605979999999995,
+          "cpu_ms_per_tick": 38.94655625,
+          "allocations_per_tick": 17839.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 2.2112369,
+          "resident_bytes": 46960640,
+          "peak_resident_bytes": 49905664,
+          "wall_seconds_with_setup": 1.509083186,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 26.832728,
+          "p95_ms": 32.296114,
+          "p99_ms": 36.644002,
+          "max_ms": 36.644002,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.0821970000000007,
+          "cpu_ms_per_tick": 43.91643125,
+          "allocations_per_tick": 17821.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 2,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 2.010507,
+          "resident_bytes": 46927872,
+          "peak_resident_bytes": 50155520,
+          "wall_seconds_with_setup": 2.010708343,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 35.777205,
+          "p95_ms": 54.439355,
+          "p99_ms": 69.18161500000001,
+          "max_ms": 69.18161500000001,
+          "over_50ms": 3,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 38.6850875,
+          "allocations_per_tick": 17811.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 1,
+          "cpu_ids": [
+            0
+          ],
+          "process_cpu_seconds": 2.0255656,
+          "resident_bytes": 46993408,
+          "peak_resident_bytes": 50229248,
+          "wall_seconds_with_setup": 2.025761494,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 36.106203,
+          "p95_ms": 59.601241,
+          "p99_ms": 65.05472599999999,
+          "max_ms": 65.05472599999999,
+          "over_50ms": 5,
+          "barrier_and_validation_p95_ms": 0,
+          "cpu_ms_per_tick": 38.57295,
+          "allocations_per_tick": 17811.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 2,
+          "cpu_ids": [
+            0,
+            1
+          ],
+          "process_cpu_seconds": 2.176517,
+          "resident_bytes": 45637632,
+          "peak_resident_bytes": 49876992,
+          "wall_seconds_with_setup": 1.5121260589999999,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 24.870832999999998,
+          "p95_ms": 33.624309999999994,
+          "p99_ms": 34.189808,
+          "max_ms": 34.189808,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 2.0860939999999992,
+          "cpu_ms_per_tick": 40.833903125000006,
+          "allocations_per_tick": 17821.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 4,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "process_cpu_seconds": 2.4887579,
+          "resident_bytes": 41897984,
+          "peak_resident_bytes": 50192384,
+          "wall_seconds_with_setup": 1.555906782,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 20.992244,
+          "p95_ms": 31.042817,
+          "p99_ms": 32.120514,
+          "max_ms": 32.120514,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.3209959999999974,
+          "cpu_ms_per_tick": 41.748999999999995,
+          "allocations_per_tick": 17839.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        },
+        {
+          "run": 3,
+          "threads": 8,
+          "cpu_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "process_cpu_seconds": 2.3111212,
+          "resident_bytes": 41254912,
+          "peak_resident_bytes": 50229248,
+          "wall_seconds_with_setup": 1.3016584500000001,
+          "players": 4096,
+          "workers": 32,
+          "p50_ms": 20.298118,
+          "p95_ms": 25.451499,
+          "p99_ms": 29.832554000000002,
+          "max_ms": 29.832554000000002,
+          "over_50ms": 0,
+          "barrier_and_validation_p95_ms": 1.414150000000003,
+          "cpu_ms_per_tick": 42.393740625,
+          "allocations_per_tick": 17871.03125,
+          "inputs_acked": 32768,
+          "peer_updates": 131072,
+          "cross_island_subscriptions": 0
+        }
+      ]
+    }
+  },
+  "density": {
+    "matched_layouts": [
+      {
+        "dense": {
+          "component_projections": 8192,
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 1792,
+          "field_bytes": 1247232,
+          "first_worker_frames": 7168,
+          "foreign_home_frames": 49152,
+          "frames": 57344,
+          "new_baselines": 0,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "dense",
+          "phase_mean_ms": {
+            "delivery_ack": 2.6091851875,
+            "simulate_publish": 3.5328145,
+            "topology": 0.014385
+          },
+          "players": 256,
+          "players_per_origin": 64,
+          "queue_peak": 1792,
+          "spatial_candidates": 0,
+          "spatial_ms": {
+            "max": 1.137141,
+            "p50": 0.287611,
+            "p95": 0.532318,
+            "p99": 1.137141
+          },
+          "step_ms": {
+            "max": 9.10382,
+            "p50": 5.650398,
+            "p95": 9.052018,
+            "p99": 9.10382
+          },
+          "step_with_topology_ms": {
+            "max": 9.10752,
+            "p50": 5.671999,
+            "p95": 9.078319,
+            "p99": 9.10752
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.056102,
+            "p50": 0.0132,
+            "p95": 0.026301,
+            "p99": 0.056102
+          },
+          "workers": 8
+        },
+        "merge_step": {
+          "component_projections": 512,
+          "end_islands": 1,
+          "end_pairs": 56,
+          "end_subscriptions": 1792,
+          "field_bytes": 38976,
+          "first_worker_frames": 224,
+          "foreign_home_frames": 1536,
+          "frames": 1792,
+          "new_baselines": 1536,
+          "peak_islands": 1,
+          "peak_pairs": 56,
+          "phase": "merge",
+          "phase_mean_ms": {
+            "delivery_ack": 4.813569,
+            "simulate_publish": 40.640725,
+            "topology": 0.184607
+          },
+          "players": 256,
+          "players_per_origin": 64,
+          "queue_peak": 1792,
+          "spatial_candidates": 57344,
+          "spatial_ms": {
+            "max": 32.269229,
+            "p50": 32.269229,
+            "p95": 32.269229,
+            "p99": 32.269229
+          },
+          "step_ms": {
+            "max": 45.454294,
+            "p50": 45.454294,
+            "p95": 45.454294,
+            "p99": 45.454294
+          },
+          "step_with_topology_ms": {
+            "max": 45.638901,
+            "p50": 45.638901,
+            "p95": 45.638901,
+            "p99": 45.638901
+          },
+          "ticks": 1,
+          "topology_query_ms": {
+            "max": 0.184607,
+            "p50": 0.184607,
+            "p95": 0.184607,
+            "p99": 0.184607
+          },
+          "workers": 8
+        },
+        "players": 256,
+        "separate": {
+          "component_projections": 8192,
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 256,
+          "field_bytes": 197120,
+          "first_worker_frames": 1024,
+          "foreign_home_frames": 0,
+          "frames": 8192,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "separated",
+          "phase_mean_ms": {
+            "delivery_ack": 0.40495796875,
+            "simulate_publish": 1.2607098125,
+            "topology": 0.000572
+          },
+          "players": 256,
+          "players_per_origin": 64,
+          "queue_peak": 256,
+          "spatial_candidates": 0,
+          "spatial_ms": {
+            "max": 0.446616,
+            "p50": 0.238808,
+            "p95": 0.368511,
+            "p99": 0.446616
+          },
+          "step_ms": {
+            "max": 3.468221,
+            "p50": 1.592856,
+            "p95": 2.732195,
+            "p99": 3.468221
+          },
+          "step_with_topology_ms": {
+            "max": 3.468821,
+            "p50": 1.593356,
+            "p95": 2.733195,
+            "p99": 3.468821
+          },
+          "ticks": 32,
+          "topology_query_ms": {
+            "max": 0.001601,
+            "p50": 0.0004,
+            "p95": 0.0015,
+            "p99": 0.001601
+          },
+          "workers": 8
+        },
+        "split_step": {
+          "component_projections": 256,
+          "end_islands": 4,
+          "end_pairs": 8,
+          "end_subscriptions": 256,
+          "field_bytes": 6160,
+          "first_worker_frames": 32,
+          "foreign_home_frames": 0,
+          "frames": 256,
+          "new_baselines": 0,
+          "peak_islands": 4,
+          "peak_pairs": 8,
+          "phase": "split",
+          "phase_mean_ms": {
+            "delivery_ack": 0.550619,
+            "simulate_publish": 17.994831,
+            "topology": 0.177406
+          },
+          "players": 256,
+          "players_per_origin": 64,
+          "queue_peak": 256,
+          "spatial_candidates": 8192,
+          "spatial_ms": {
+            "max": 12.855049,
+            "p50": 12.855049,
+            "p95": 12.855049,
+            "p99": 12.855049
+          },
+          "step_ms": {
+            "max": 18.54545,
+            "p50": 18.54545,
+            "p95": 18.54545,
+            "p99": 18.54545
+          },
+          "step_with_topology_ms": {
+            "max": 18.722856,
+            "p50": 18.722856,
+            "p95": 18.722856,
+            "p99": 18.722856
+          },
+          "ticks": 1,
+          "topology_query_ms": {
+            "max": 0.177406,
+            "p50": 0.177406,
+            "p95": 0.177406,
+            "p99": 0.177406
+          },
+          "workers": 8
+        }
+      }
+    ],
+    "os": "linux",
+    "version": 2
+  }
+}

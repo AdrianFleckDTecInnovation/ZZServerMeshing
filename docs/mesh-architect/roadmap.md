@@ -1,8 +1,10 @@
 # Mesh Architect Roadmap
 
-Last updated: 2026-04-17
+Last updated: 2026-11-25
 
 ## Active
+
+For the persistent Bevy runtime, the next capacity milestones cover asynchronous mTLS sessions, spatially isolated regions and dense merges across physical hosts. [10,000-player capacity plan](../kapazitaetsplan.md)
 
 ### 012: Codebase Simplification
 **Status:** Complete (all 34 work items implemented)

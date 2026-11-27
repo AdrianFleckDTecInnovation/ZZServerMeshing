@@ -1,27 +1,91 @@
 use crate::*;
+mod bench;
+use is_mesh::wire::{Identity, Role, Service};
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zz_mesh::wire::{Identity, Role, Service};
 
-fn keyfile(path: &Path, data: &[u8]) -> mesh::Result<()> {
-    let mut opts = fs::OpenOptions::new();
-    opts.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
+pub(crate) fn write_new_credential(path: &Path, data: &[u8]) -> mesh::Result<()> {
     use std::io::Write;
-    let mut f = opts.open(path)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut f = tempfile::NamedTempFile::new_in(parent)?;
     f.write_all(data)?;
-    f.sync_all()?;
+    f.as_file().sync_all()?;
+    f.persist_noclobber(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
-fn issuer_params() -> mesh::Result<CertificateParams> {
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct HostLimits {
+    tick_budget_us: u64,
+    memory_bytes: u64,
+    cpu_cores: std::num::NonZeroUsize,
+    cpu_ids: Option<Vec<usize>>,
+    internal_connections: Option<std::num::NonZeroUsize>,
+    internal_jobs: std::num::NonZeroUsize,
+    reference_players: bool,
+    requests: mesh::remote::RequestBudgets,
+    subscriber: SubscriberPolicy,
+    checkpoint_groups: usize,
+    checkpoint_bytes: std::num::NonZeroUsize,
+    pub(crate) session_capacity: std::num::NonZeroUsize,
+}
+impl Default for HostLimits {
+    fn default() -> Self {
+        let p = BalancePolicy::default();
+        Self {
+            tick_budget_us: p.tick_budget_us,
+            memory_bytes: p.memory_bytes,
+            cpu_cores: std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
+            internal_connections: None,
+            internal_jobs: 4.try_into().unwrap(),
+            reference_players: true,
+            requests: Default::default(),
+            cpu_ids: None,
+            subscriber: Default::default(),
+            checkpoint_groups: 0,
+            checkpoint_bytes: (8 * 1024 * 1024).try_into().unwrap(),
+            session_capacity: 4096.try_into().unwrap(),
+        }
+    }
+}
+impl HostLimits {
+    pub(crate) fn read(dir: &Path) -> mesh::Result<Self> {
+        let limits: Self = match fs::read(dir.join("capacity.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| invalid(format!("capacity.json: {e}")))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.into()),
+        };
+        if limits.tick_budget_us == 0 || limits.memory_bytes == 0 {
+            return Err(invalid("capacity budgets must be positive"));
+        }
+        limits.subscriber.validate()?;
+        let available = std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN);
+        if limits.cpu_cores > available {
+            return Err(invalid(format!(
+                "cpu_cores exceeds {available} available processors"
+            )));
+        }
+        if limits.cpu_cores != available || limits.cpu_ids.is_some() {
+            apply_cpu_budget(limits.cpu_cores, limits.cpu_ids.as_deref())?;
+        }
+        // Bevy 0.15 initializes its process-wide pools once, before the first World.
+        bevy::core::TaskPoolOptions::with_num_threads(limits.cpu_cores.get())
+            .create_default_pools();
+        Ok(limits)
+    }
+}
+pub(crate) fn issuer_params() -> mesh::Result<CertificateParams> {
     let mut p = CertificateParams::new(vec![]).map_err(|e| invalid(e.to_string()))?;
     p.distinguished_name
         .push(rcgen::DnType::CommonName, "Infinite Stars development CA");
@@ -40,29 +104,31 @@ fn issue(
     ca: &rcgen::Certificate,
     issuer: &KeyPair,
 ) -> mesh::Result<()> {
-    let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
-    let mut p = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
-        .map_err(|e| invalid(e.to_string()))?;
-    p.distinguished_name.push(rcgen::DnType::CommonName, name);
-    p.extended_key_usages = vec![usage];
-    let cert = p
-        .signed_by(&key, ca, issuer)
-        .map_err(|e| invalid(e.to_string()))?;
-    keyfile(&dir.join(format!("{name}.key")), &key.serialize_der())?;
-    fs::write(dir.join(format!("{name}.der")), cert.der())?;
-    Ok(())
+    let mut names = vec!["localhost".into(), "127.0.0.1".into()];
+    if name == "server" {
+        names.push(crate::deployment::GAME_DNS.into());
+    }
+    crate::deployment::credential(dir, name, names, usage, ca, issuer).map(|_| ())
 }
 pub fn init_tls(dir: &Path) -> mesh::Result<()> {
     fs::create_dir_all(dir)?;
     let mut guard = rusqlite::Connection::open(dir.join("provision.sqlite"))?;
     guard.busy_timeout(std::time::Duration::from_secs(5))?;
     let lock = guard.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !dir.join("ca.der").exists() {
-        let issuer = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
+    if !dir.join("ca.der").try_exists()? {
+        let key_path = dir.join("issuer.pem");
+        let issuer = match fs::read_to_string(&key_path) {
+            Ok(pem) => KeyPair::from_pem(&pem).map_err(|e| invalid(e.to_string()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = KeyPair::generate().map_err(|e| invalid(e.to_string()))?;
+                write_new_credential(&key_path, key.serialize_pem().as_bytes())?;
+                key
+            }
+            Err(e) => return Err(e.into()),
+        };
         let ca = issuer_params()?
             .self_signed(&issuer)
             .map_err(|e| invalid(e.to_string()))?;
-        keyfile(&dir.join("issuer.pem"), issuer.serialize_pem().as_bytes())?;
         issue(
             dir,
             "server",
@@ -77,7 +143,7 @@ pub fn init_tls(dir: &Path) -> mesh::Result<()> {
             &ca,
             &issuer,
         )?;
-        fs::write(dir.join("ca.der"), ca.der())?;
+        write_new_credential(&dir.join("ca.der"), ca.der())?;
     }
     lock.commit()?;
     Ok(())
@@ -120,30 +186,53 @@ pub fn service(db: &Store, w: Worker) -> Arc<Service> {
 }
 pub fn start_node(db: &Store, slot: u32) -> mesh::Result<(Worker, App)> {
     let worker = db.start_worker(slot)?;
-    let mut app = world(db, worker);
-    if slot == 1 && matches!(db.owner(GROUP), Err(mesh::Error::Missing(_))) {
-        seed(&mut app)?;
-    }
+    Ok((worker, resume_node(db, worker, SpaceSettings::default())?))
+}
+pub(crate) fn resume_node(
+    db: &Store,
+    worker: Worker,
+    settings: SpaceSettings,
+) -> mesh::Result<App> {
+    resume_node_with_capacity(db, worker, settings, 4096.try_into().unwrap())
+}
+pub(crate) fn resume_node_with_capacity(
+    db: &Store,
+    worker: Worker,
+    settings: SpaceSettings,
+    capacity: std::num::NonZeroUsize,
+) -> mesh::Result<App> {
+    let slot = worker.slot;
+    let mut app = world_with_settings(db, worker, settings);
+    app.add_plugins(MeshSessionPlugin { capacity });
     for group in db.owned(slot)? {
-        db.recover(group, worker)?;
-        load_group(&mut app, db, group, worker)?;
+        mesh::restore_group(app.world_mut(), group)?;
     }
-    Ok((worker, app))
+    if slot == 1 && db.group_of(ACTOR)?.is_none() {
+        let empty = match db.owner(GROUP) {
+            Ok(owner) => owner.worker == worker && db.snapshot(GROUP)?.records.is_empty(),
+            Err(mesh::Error::Missing(_)) => true,
+            Err(err) => return Err(err),
+        };
+        if empty {
+            seed(&mut app)?;
+            checkpoint_group(app.world_mut(), GROUP)?;
+            if !matches!(db.lookup(ACTOR)?, Lookup::Present(_)) {
+                return Err(invalid("initial player checkpoint missing"));
+            }
+            // Resolve local Entity references and install the verified blueprint on first boot.
+            load_group(&mut app, db, GROUP, worker)?;
+        }
+    }
+    Ok(app)
 }
 pub fn load_group(app: &mut App, db: &Store, group: Id, w: Worker) -> mesh::Result<()> {
-    let snap = db.snapshot(group)?;
-    for m in &snap.required {
-        let p = app.world().resource::<Providers>().get(m.key.provider)?;
-        app.world_mut()
-            .resource_mut::<BlobCache>()
-            .fetch(m, p.as_ref())?;
-    }
-    let p = prepare_world(app.world_mut(), &snap)?;
     let owner = db.owner(group)?;
     if owner.worker != w {
         return Err(mesh::Error::Fenced);
     }
-    p.activate(app.world_mut(), db, owner)
+    db.snapshot(group)?
+        .prepare_with_data(app.world_mut())?
+        .activate(app.world_mut(), db, owner)
 }
 pub fn listen(
     dir: PathBuf,
@@ -151,26 +240,108 @@ pub fn listen(
     addr: std::net::SocketAddr,
     ready: Option<PathBuf>,
 ) -> mesh::Result<()> {
-    init_tls(&dir)?;
+    listen_configured(dir, slot, addr, ready, true, |_| Ok(()))
+}
+
+/// Embed the existing worker host with game-provided systems. Public game
+/// gateways can disable the reference certificate login entirely.
+pub fn listen_configured(
+    dir: PathBuf,
+    slot: u32,
+    addr: std::net::SocketAddr,
+    ready: Option<PathBuf>,
+    reference_players: bool,
+    configure: impl FnOnce(&mut App) -> mesh::Result<()>,
+) -> mesh::Result<()> {
+    let settings = SpaceSettings::load(&dir)?;
+    let mut limits = HostLimits::read(&dir)?;
+    limits.reference_players &= reference_players;
+    if reference_players {
+        init_tls(&dir)?;
+    } else {
+        // Enable the existing authenticated supervisor for the local
+        // session-only worker. The operator credential stays in this realm.
+        crate::deployment::authority_keys(&dir)?;
+    }
     let db = Store::open(dir.join("world.sqlite"))?;
-    let (w, mut app) = start_node(&db, slot)?;
+    let w = db.start_worker(slot)?;
+    let mut app = resume_node_with_capacity(&db, w, settings, limits.session_capacity)?;
+    configure(&mut app)?;
     provision_worker(&dir, &db, w)?;
+    let cred = identity(&dir, &worker_name(w))?;
+    run_node(dir, db, w, app, cred, addr, ready, limits)
+}
+pub(crate) fn run_node(
+    dir: PathBuf,
+    db: Store,
+    w: Worker,
+    mut app: App,
+    cred: Identity,
+    addr: std::net::SocketAddr,
+    ready: Option<PathBuf>,
+    limits: HostLimits,
+) -> mesh::Result<()> {
+    if let Some(groups) = std::num::NonZeroUsize::new(limits.checkpoint_groups) {
+        app.insert_resource(AsyncCheckpoints::new(
+            BulkExecutor::new(groups.get()),
+            groups,
+            limits.checkpoint_bytes,
+        ));
+    }
+    app.insert_resource(limits.subscriber);
+    app.insert_resource(BalancePolicy {
+        tick_budget_us: limits.tick_budget_us,
+        memory_bytes: limits.memory_bytes,
+        ..Default::default()
+    });
+    app.init_resource::<WorkerTimings>()
+        .init_resource::<GroupTimings>();
     let player = digest(&fs::read(dir.join("player.der"))?);
+    let distributed = dir.join("enrol.der").exists();
+    let operator =
+        if distributed || (!limits.reference_players && dir.join("operator.der").is_file()) {
+            Some(digest(&fs::read(dir.join("operator.der"))?))
+        } else {
+            None
+        };
     let registry = db.clone();
-    let listener = zz_mesh::wire::Listener::bind_resolved(
+    let listener = is_mesh::wire::Listener::bind_resolved(
         addr,
         &fs::read(dir.join("ca.der"))?,
         &identity(&dir, "server")?,
         move |fingerprint| {
             if fingerprint == player {
-                Ok(Role::Player(ACTOR))
+                if limits.reference_players {
+                    Ok(Role::Player(ACTOR))
+                } else {
+                    Err(mesh::Error::Denied)
+                }
+            } else if Some(fingerprint) == operator {
+                Ok(Role::Operator)
+            } else if let Some(actor) = registry.authenticated_player(fingerprint)? {
+                if limits.reference_players {
+                    Ok(Role::Player(actor))
+                } else {
+                    Err(mesh::Error::Denied)
+                }
             } else {
                 registry.authenticated_worker(fingerprint).map(Role::Worker)
             }
         },
     )?;
     let address = listener.address()?;
-    db.advertise(w, address)?;
+    let advertised = match fs::read_to_string(dir.join("advertise.txt")) {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .map_err(|_| invalid("invalid advertised socket address"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => address,
+        Err(e) => return Err(e.into()),
+    };
+    if distributed && (advertised.ip().is_unspecified() || advertised.port() == 0) {
+        return Err(invalid("set advertise.txt to the reachable IP and port"));
+    }
+    db.advertise(w, advertised)?;
     if let Some(path) = ready {
         fs::write(path, address.to_string())?;
     }
@@ -178,23 +349,64 @@ pub fn listen(
         "worker {} incarnation {} listening on {}",
         w.slot, w.incarnation, address
     );
-    let (svc, mut event_loop) =
-        mesh::remote::worker(service(&db, w), app.world().resource::<BlobCache>().clone());
     let ca = fs::read(dir.join("ca.der"))?;
-    let cred = identity(&dir, &worker_name(w))?;
     let registry = db.clone();
-    event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(
-        db.clone(),
-        w,
-        move |target| {
-            mesh::wire::Client::connect(registry.address(target)?, "localhost", &ca, &cred)
-        },
-    ));
-    let thread = std::thread::spawn(move || listener.serve(svc, Default::default(), 16));
+    let traffic = Arc::<mesh::wire::Traffic>::default();
+    let outbound = traffic.clone();
+    let connect = move |target: Worker| {
+        let name = if distributed {
+            crate::deployment::worker_dns(target.slot)
+        } else {
+            "localhost".into()
+        };
+        mesh::wire::Client::connect_counted(
+            registry.address(target)?,
+            &name,
+            &ca,
+            &cred,
+            outbound.clone(),
+        )
+    };
+    let (mut svc, mut event_loop) = mesh::remote::worker_with_budgets(
+        service(&db, w),
+        app.world().resource::<BlobCache>().clone(),
+        app.world().resource::<SightRanges>().clone(),
+        connect.clone(),
+        limits.requests,
+        limits.subscriber,
+    );
+    if let Some(controls) = app.world().get_resource::<PreparedSessionControls>() {
+        Arc::get_mut(&mut svc)
+            .ok_or_else(|| invalid("worker endpoint already published"))?
+            .use_prepared_controls(controls.clone());
+    }
+    event_loop.observe_transport(listener.traffic.clone());
+    event_loop.observe_transport(traffic);
+    if let Some(traffic) = db.network_traffic() {
+        event_loop.observe_transport(traffic);
+    }
+    event_loop.peers = Some(mesh::network_mesh::PeerMesh::new(db.clone(), w, connect));
+    event_loop.cpu_budget = limits.cpu_cores;
+    let connections = limits
+        .internal_connections
+        .map_or(if distributed { 256 } else { 16 }, |n| n.get());
+    let session_worker = app.world().contains_resource::<PreparedSessionControls>();
+    let jobs = limits.internal_jobs.get().min(connections);
+    let thread = std::thread::spawn(move || {
+        if session_worker {
+            listener.serve_shared(svc, Default::default(), connections, jobs)
+        } else {
+            listener.serve(svc, Default::default(), connections)
+        }
+    });
+    let mut tick_log = bench::TickLog::open()?;
     let mut next = std::time::Instant::now();
     while !thread.is_finished() {
         if std::time::Instant::now() >= next {
+            let tick_start = std::time::Instant::now();
             app.update();
+            let ecs = tick_start.elapsed();
+            let peer_start = std::time::Instant::now();
             if let Some(peers) = event_loop.peers.as_mut() {
                 if let Err(e) = peers.step(app.world_mut()) {
                     app.world_mut()
@@ -202,7 +414,23 @@ pub fn listen(
                         .diagnose(e.to_string());
                 }
             }
-            next = std::time::Instant::now() + std::time::Duration::from_millis(50);
+            let peers = peer_start.elapsed();
+            let detail = std::mem::take(&mut *app.world_mut().resource_mut::<WorkerTimings>());
+            event_loop.record_cycle(
+                ecs,
+                peers,
+                tick_start.saturating_duration_since(next),
+                detail,
+            );
+            if let Some(log) = &mut tick_log {
+                let elapsed = tick_start.elapsed();
+                let pending = app
+                    .world()
+                    .get_resource::<is_mesh::SessionIngress>()
+                    .map_or(0, is_mesh::SessionIngress::pending);
+                log.record(tick_start, elapsed, ecs, peers, pending)?;
+            }
+            next = tick_start + std::time::Duration::from_millis(50);
         }
         event_loop.pump(app.world_mut(), 16, std::time::Duration::from_millis(3));
         std::thread::sleep(std::time::Duration::from_millis(1));

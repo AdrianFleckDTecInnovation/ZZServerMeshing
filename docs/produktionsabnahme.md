@@ -1,0 +1,121 @@
+# Infinite Stars betreiben und abnehmen
+
+Die Modulfreigabe für `is-mesh` 1.0 umfasst die Bibliothek, den explizit koordinierten Worker-Betrieb und den öffentlichen Bevy- und Sessionadapter. Die Abnahmematrix nennt die geprüften Lasten und Fehlerfälle. Die älteren Bestandsaufnahmen weiter unten beziehen sich auf ihre jeweiligen Ausgangsstände. [Modulabnahme M01–M23](mesh-v1-abnahme.md)
+
+## Delta-Analyse für die Bibliotheksfinalisierung
+
+Ausgangsstand ist `732a8af`. Die [ECS- und Prozessmessungen](tickprofil.md), die [Sichtmessung](spielersicht.md) und ihre Rohdaten unter `docs/benchmarks` bleiben versionsgebundene Referenzen. Der Windows-Release-Build dieses Commits reproduzierte mit 10.000 stehenden Spielern, 32 Worlds, vier Partitionen, 128 privaten Effekten und 40 Ticks 500.000 Projektionen, null Peer-Updates und 18,26 ms p95. Das Bewegungsszenario ohne Effekte bestätigte 400.000 Peer-Updates bei 18,07 ms p95. Die folgenden Einstufungen beschreiben den Stand **vor** den Änderungen.
+
+| Auftrag | Einstufung am Ausgangsstand | Implementierung, Nachweis oder Lücke |
+| --- | --- | --- |
+| 4.1–4.2 Worker- und Gruppenlast | Teilweise implementiert | `WorkerLoad` enthält ECS- und Peer-Zeit, `GroupTimings` erlaubt Spielwerte. Request-Pumpe, Prozessspeicher, CPU und Rückstau fehlen in der Platzierung. |
+| 4.3 Private Änderungen | Teilweise implementiert | Feldfilter schützen Inhalte. `track<T>` markiert das gesamte Objekt für Spatial und Publisher. Der Stillstandstest reproduziert die unnötige Arbeit. |
+| 5.1–5.6 Session-Zulassung und Lifecycle | Teilweise implementiert | mTLS-Identität, logische Session, Sequenzen, stabile IDs und Authority sind getestet. Externe Grants, exklusive Steuerungsepochen, Ablauf und verbindungsgebundener Widerruf fehlen. Eine eigene Accountverwaltung entfällt. |
+| 6.1–6.2 Transport | Teilweise implementiert | Getrennte interne Kontroll- und Peerkanäle, begrenzte Frames und Request-Pumpe vorhanden. Transportunabhängige öffentliche Übergabe und deren Ressourcenbudgets fehlen. Ein weiterer öffentlicher Socket-Server entfällt. |
+| 7.1–7.4 Persönliche Zustellung | Teilweise implementiert | Exakte 3D-Radien, private Projektion, gepagte mTLS-Abfragen sowie Peer-Baselines getestet. Kontinuierliche individuelle Zustellung, Anwendungs-ACK und berechtigungsgebundener Resume fehlen im externen Clientpfad. |
+| 8.1–8.4 Simulation, Storage und externe Aktionen | Teilweise implementiert | SQLite schützt Fencing, Checkpoints, Receipts und atomare Beispielaktionen. Auch der lokale Standard öffnet SQLite. Ein separater flüchtiger Betrieb und ein Integrationspfad für extern bestätigte Revisionen fehlen. |
+| 9.1–9.4 Authority und Recovery | Implementiert und getestet für Worker-Neustart und abgebrochenen Handoff, teilweise für Betriebsabnahme | Prozess- und Recoverytests prüfen Generation, Freeze und Ersatzprozess. Backup ist dokumentiert. Automatische Übernahme bei Verlust des Authority-Volumes, Partitionstests über mehrere Rechner und abgenommene RTO fehlen. |
+| 10.1–10.8 Parallelität | Teilweise implementiert | Parallele Prozesse, Profiler-Partitionen, Kernskalierung, Affinität und getrennte/dichte Inseltests existieren. Ein Worker-Pool im Prozess tickt seriell. Explizite Weak-Scaling-Reihen, gemeinsames Ressourcenbudget und EPYC-Abnahme sind offen. |
+| 11 Betriebsgrenzen | Teilweise implementiert | mTLS-Rollen, Protokollversion, Framegrenzen, Retry, Drain und Fehlerfalltests existieren. Ressourcenisolation für externe Subscriber und Abnahme unter kombinierter Überlast fehlen. |
+| 12 Öffentliche API | Teilweise implementiert | Externes Bevy-Spiel belegt Plugin, Komponenten und Persistenz. Externe Session, Subscriber und asynchrone Resultate fehlen im Integrationsbeispiel. |
+| 13 Profile | Teilweise implementiert | Release-Profiler, Live-Monitor, Browserlast, Originalvergleich, Wire-, Sicht- und Clusterbenchmarks existieren. Gemeinsame Auswahl der vier Abnahmeprofile fehlt. |
+| 14–15 Freigabe | Nicht implementiert für den neuen Auftrag | Stufen A und B brauchen ihre ergänzten Verträge und lokale Nachweise. Stufe C erfordert ZZSession, spätere Spiellogik, physische Hosts und Ausfallabnahme. |
+
+Für die Auslegung der Worker und die Empfangsrate der Clients gibt es Messungen mit 10.000 Spielern, dauerhaften Checkpoints und 5.000 räumlich getrennten Spielerpaaren. [Aktuelles Tick- und Verbindungsprofil](tickprofil.md)
+
+Ein Worker simuliert eine Bevy-World. Der **Octree** findet benötigte Nachbarn innerhalb eines Bezugssystems. Das **Directory** bündelt die angeforderten Komponenten je Empfänger. Der **Authority-Dienst** entscheidet auf seinem eigenen Datenträger, welcher Worker eine Gruppe verbindlich ändern darf. Bewegte Entities werden direkt an abonnierte Peers übertragen. Ein Worker darf mehrere weit entfernte Regionen bedienen. [Spielintegration](../crates/is-mesh/README.md) · [Directory und Subscriptions](../crates/is-mesh/src/spatial.rs) · [Kontrollspeicher](../crates/is-mesh/src/authority_store.rs)
+
+## Abgleich mit dem Auftrag
+
+Am Ausgangsstand `6cc85be` funktionierten bereits Bevy-Integration, Voxelprovider, Aktionen, Handoff und ein räumlicher R-Baum. Vier Lücken betrafen den Einsatz im Spiel. Der geforderte Octree fehlte. Die Netzwerkworker benötigten Zugriff auf dieselbe Datenbankdatei. Die gemessene automatische Platzierung war auf den lokalen Pool beschränkt. Der Lasttest blendete den ersten Tick einer plötzlichen Gruppenverschmelzung aus. Der aktuelle Stand schließt diese Lücken und misst die Kosten der Übergänge separat.
+
+| Abschnitte | Umsetzung im Spielpfad | Abnahme |
+| --- | --- | --- |
+| 1–2, 5, 18 · Einbindung | Bevy 0.15, eigener Library-Target, Game-Plugin, gewöhnlicher Spawn mit `Managed`, Schreibsysteme mit `With<Simulated>`. Ein eigenes Cargo-Projekt importiert die Bibliothek direkt aus Git. | `npm run test:game`, ausführbares Beispiel `survey_probe` und Neustart mit gespeichertem Stand. [Anschluss eines Spieltyps](../crates/is-mesh/README.md) |
+| 3–4 · Inseln und Interest | Pro Bezugssystem gibt es getrennte ganzzahlige 3D-Octrees für Aktivitätsbereiche und Objekte. Nur die Schnittmenge physischer Aktivitätsbereiche verbindet Inseln. Forecast, Hysterese, entfernte Referenzen, private Sichten und genaue Simulationsdaten haben eigene Regeln. | Vollständige Referenzsuche für zufällige Einfügungen, Bewegungen, Löschungen, Flächenkontakt, entfernte Ursprünge und Koordinatengrenzen. Wechsel und Merge prüfen auch installierte Bevy-Replicas. [Octree](../crates/is-mesh/src/octree.rs) · [Interest-Tests](../crates/is-mesh/tests/spatial.rs) |
+| 6–7 · Lebenszyklus und Placement | Stabile Objekt-, Schema- und Gruppen-IDs, Revisionen, Tombstones und Referenzen. Pool und Netzwerk-Controller verwenden dieselbe Placement-Regel für gemessene Ticklast, Speicher, Cache, Kommunikation, Transferbudget und Mindestverweildauer. | Schemafehler, Gruppenänderungen, automatische Verlagerung von einem überlasteten Prozess, Drain, Sperren neuer Zuständigkeiten und Wiederaufnahme. [Placement](../crates/is-mesh/src/placement.rs) · [Netzwerk-Controller](../examples/infinite-stars/src/supervisor.rs) |
+| 8–10 · Aktionen und Spielzustand | Das Spiel registriert Inventar, Abbau, Bau, Drop, Pickup und Handel. Session und Sequenz überleben einen Socketwechsel. Genehmigungen mehrerer Writer, Aktionsresultat und Bestandsänderungen werden gemeinsam geprüft und gespeichert. Der Spielerclient führt seine Outbox und Vorhersagen lokal. | Wiederholung nach Commit vor Antwort, Abhängigkeiten und Vorräte, Handel zwischen Writern, private Felder und Abgleich von vorhergesagten Drops. [Spiel-Plugin](../examples/infinite-stars/src/lib.rs) · [Vorhersage](../examples/infinite-stars/src/prediction.rs) |
+| 11–13 · Daten, Handoff und Recovery | Inhaltsadressierte Blobs, versionierte Provider, Teilübertragung mit Resume, Deltas, Cache-Pins und Rekonstruktion. Die Umschaltung bindet die Bereitschaft an den finalen Inhalt. Der Store prüft Generation und Ausgangsrevision in der Committransaktion. | Voxel- und Bauplanprovider, falsche Basis, fehlende Historie, verlorenes ACK, Abstürze, Wiederanlauf und erneute Zustellung desselben Belegs. [Bulk](../crates/is-mesh/src/bulk.rs) · [Handoff](../crates/is-mesh/src/handoff.rs) · [Recovery](../crates/is-mesh/tests/recovery.rs) |
+| 14–16 · Netzwerk und Last | Direkte typisierte Nachrichten im Pool, TLS mit beidseitiger Authentifizierung zwischen Prozessen. Separate Worker-Verzeichnisse, pro Inkarnation neu gebundene Prozessschlüssel, begrenzte Nachrichten und Warteschlangen. Der Speicherdienst führt dieselben registrierten Aktionshandler aus wie der direkte Store. | Eigene Ports und Kindprozesse, Dienstneustart, Handoff, paralleler Ersatz eines laufenden Workers, Ablehnung fremder privater Snapshots und gerichteter Netzverkehr. [Mehrprozesstests](../examples/infinite-stars/tests/process.rs) · [Transport- und Codecmessungen](infinite-stars-benchmarks.md) |
+| 17 · M0 bis M7 | Die ursprüngliche Browser-Demo bleibt ausführbar. Die Beispiel-Crate verwendet die öffentliche Bibliothek im direkten Pool und über das Netzwerk. | Ein separates Bevy-Spiel kompiliert gegen die Git-Abhängigkeit. Windows und Debian durchlaufen dieselben Abnahmen. [Externer Integrationstest](../scripts/test-game-integration.mjs) · [Native CI](../.github/workflows/native-mesh.yml) |
+
+## Auf getrennten Rechnern starten
+
+Einmal `cargo build --release --locked -p infinite-stars --bin infinite-stars` ausführen. Die folgenden Befehle verwenden die erzeugte Binary über den Suchpfad. Die Adressen sind Beispiele. Das Spielbeispiel bringt einen Spieler mit einer festen Identität mit. Für eigene Konten erhält jeder Spieler einen eigenen Schlüssel. Der Resolver von `Listener::bind_resolved` ordnet den geprüften Zertifikatsfingerabdruck einer stabilen `Role::Player(actor_id)` zu. Damit bindet der Server Session, private Sicht und wirtschaftliche Aktionen an den jeweiligen Spieler. [Rollen und Serverprüfung](../crates/is-mesh/src/wire.rs)
+
+| Ort | Befehl |
+| --- | --- |
+| Authority-Rechner, einmalig | `infinite-stars provision control 1 worker-a` |
+| Authority-Rechner, einmalig | `infinite-stars provision control 2 worker-b` |
+| Authority-Rechner, einmalig | `infinite-stars provision-client control player` |
+| Authority-Rechner, eigenes Konto für eine bestehende Figur | `infinite-stars provision-client control player-a ACTOR_UUID` |
+| Authority-Rechner | `infinite-stars authority control 10.20.0.10:8640` |
+| Worker A | `infinite-stars worker worker-a 10.20.0.10:8640 10.20.0.11:8641` |
+| Worker B | `infinite-stars worker worker-b 10.20.0.10:8640 10.20.0.12:8642` |
+| Spieler | `infinite-stars client player 10.20.0.11:8641` |
+| Spieler, sichtbare Nachbarn über einen Einstiegsworker abrufen | `infinite-stars sight player-a 10.20.0.11:8641` |
+| Authority-Rechner, Beispielgruppe an Slot 2 übergeben | `infinite-stars migrate control 10.20.0.11:8641 10.20.0.12:8642 2` |
+| Authority-Rechner, Diagnose | `infinite-stars status control 10.20.0.12:8642` |
+| Operator, Bereitschaft und Zahl der Gruppen | `infinite-stars health control 10.20.0.12:8642` |
+| Operator, CPU, Speicher, Phasen, Codec und Warteschlangen | `infinite-stars metrics control 10.20.0.12:8642` |
+| Authority-Rechner, automatische Lastverteilung im Vordergrund | `infinite-stars balance control` |
+| Authority-Rechner, Slot leeren und für neue Zuständigkeiten sperren | `infinite-stars drain control 2` |
+| Authority-Rechner, Slot wieder freigeben | `infinite-stars resume control 2` |
+| Operator, nach erfolgreichem Drain und null Gruppen beenden | `infinite-stars shutdown control 10.20.0.12:8642` |
+
+Übertrage jedes erzeugte Verzeichnis geschützt an seinen Empfänger. `control` enthält Welt, Zulassungen, CA- und Operatorschlüssel und bleibt auf dem Authority-Rechner. Unter Windows die Zugriffsrechte des Dienstkontos für das Verzeichnis setzen. Unter Linux werden private Schlüssel mit Modus 0600 erzeugt. Bei Bindung an eine Wildcard gehört die für Peers erreichbare Adresse als `IP:Port` in `advertise.txt` im Worker-Verzeichnis. Slot 1 betreibt das Directory. Eine weitere Worker-Instanz erhält einen eigenen Slot und ein eigenes Verzeichnis.
+
+Die Ersteinrichtung veröffentlicht Schlüssel und Zertifikate erst nach dem vollständigen Schreiben. Ein Neustart setzt eine unterbrochene Ausgabe mit demselben Schlüssel fort. Die Ausgabe in ein neues Verzeichnis wartet unter Windows kurz auf vorübergehende Dateisperren. Ein bereits veröffentlichtes Ziel bleibt geschützt. Bei einem Prozessabbruch zwischen Verzeichnisexport und Zulassungs-Commit kann die Anmeldung mit dem exportierten Worker-Schlüssel scheitern. Dann denselben Slot in ein frisches Ziel provisionieren.
+
+Bei jedem Prozessstart erzeugt der Worker ein neues Schlüsselpaar. Der Authority-Dienst prüft die Zulassung für den Slot, signiert den öffentlichen Schlüssel und bindet dessen Fingerabdruck atomar an die neue Inkarnation. Ein Ersatz desselben Slots sperrt alte Commits. Der Spieler behält seinen lokalen Outbox-Datenträger. Ein erneutes `provision` für einen Slot in ein neues Zielverzeichnis rotiert dessen Zulassung. [Bereitstellung](../examples/infinite-stars/src/deployment.rs) · [Spielserver](../examples/infinite-stars/src/host.rs)
+
+## Betrieb und Grenzen
+
+Für den internen Worker-Zugang lässt sich folgendes `capacity.json` je Worker einsetzen. `reference_players: false` beschränkt diesen Listener auf interne Rollen. Der Spieladapter nutzt die Bibliotheks-API. In diesem Modus gehört der Listener in das interne Netz. Das mitgelieferte mTLS-Spielerbeispiel verwendet `reference_players: true`.
+
+```json
+{
+  "cpu_cores": 4,
+  "session_capacity": 4096,
+  "internal_connections": 32,
+  "reference_players": false,
+  "requests": {"interactive": 32, "per_session": 8, "peers": 8, "administration": 8},
+  "subscriber": {"bytes_per_poll": 131072, "events_per_poll": 128, "max_visible": 16384, "near_period": 1, "far_period": 4, "ack_timeout_ticks": 40},
+  "checkpoint_groups": 4,
+  "checkpoint_bytes": 8388608
+}
+```
+
+- **CPU und I/O.** `cpu_cores` begrenzt die ausführenden logischen CPUs des gesamten Workers und initialisiert die prozessweiten Bevy-Pools. Optionale `cpu_ids` wählen konkrete zulässige CPUs. Beim Start mehrerer Worker auf einem Host disjunkte Budgets für Simulation und eigene Ressourcen für Authority, Betriebssystem und externe Dienste vorsehen. Linux vererbt die Affinität an neu erzeugte Threads. Unter Windows liegen explizite CPU-IDs in einer Prozessorgruppe. Ein gemeinsam geklonter `BulkExecutor` startet bei Bedarf einen Hintergrundthread.
+- **Rückstau.** Interaktive Jobs erhalten einen begrenzten Eingangs- und einen begrenzten Verteilungspuffer. Bearbeitung rotiert zwischen Verwaltung, Peer-Replikation und interaktiven Sessions. Volle Puffer liefern `Busy`. Pro Subscriber und Quelle wartet höchstens ein Anwendungsframe auf Bestätigung. Nach Ablauf des ACK-Budgets beginnt der Stream mit einem Reset. Das interne Protokoll begrenzt einen Frame auf 1 MiB, ein Komponentenfeld auf 128 KiB, Bulkblöcke auf 32 KiB und einzelne Blobs auf 64 MiB. Spieladapter dürfen engere Grenzen wählen.
+- **Messwerte.** `health` meldet Bereitschaft, Zahl der Authority-Gruppen und Prozesslast. `metrics` liefert zusätzlich Spatial-/Routing-, Publish- und Subscriber-Zeit, Codec-CPU, TLS-Bytes, ausstehende Eingaben, unbestätigte Subscriber-Bytes sowie laufende Checkpoint- und Request-Bytes. Prozess-CPU von 1.000 Promille bedeutet einen ausgelasteten logischen Kern. Phasen sind Teilzeiten. Der Controller berücksichtigt serielle Tick- und Requestarbeit, CPU relativ zum Budget, längste Wartezeit und RSS. `GroupTimings::observe` meldet Gruppenarbeit aus dem Spiel. Fehlt sie, schätzt der Controller mit Workerlast geteilt durch Gruppenzahl. [Ressourcenmessung](../crates/is-mesh/src/placement.rs) · [Platzierung](../examples/infinite-stars/src/supervisor.rs)
+
+Der Controller fragt alle zwei Sekunden die registrierten Prozesse ab. `balance control --once` führt einen einzelnen Durchgang aus. Eine fachliche Gruppe wechselt bei Bedarf als Ganzes. Der Controller berücksichtigt angeforderte Komponenten je Peer und verifizierte Cacheinhalte am Ziel. Standardwerte sind 40 ms Tickarbeit, 256 MiB Cachebudget, 8 MiB Transferbudget und vier Sekunden Mindestverweildauer. Ein Worker kann seine beiden Kapazitätsbudgets per `capacity.json` im eigenen Verzeichnis setzen, beispielsweise `{"tick_budget_us":25000,"memory_bytes":134217728}`. Für die Platzierung verwendet der Controller den größeren Wert aus Prozess-RSS und belegtem Blobcache. Der konfigurierte Wert ist ein Platzierungsbudget. Ein hartes Betriebssystemlimit lässt sich über den Dienstmanager setzen. Gibt es kein geeignetes Ziel, meldet der Controller die Gruppe und der bisherige Writer behält die Zuständigkeit.
+
+- **Ausfall eines Workers.** Mit demselben Slot neu starten. Der Worker stellt seine Gruppen einschließlich bestätigter wirtschaftlicher Änderungen wieder her. Beim geordneten Handoff gilt der exakte Endstand. Kontinuierliche Daten starten nach Absturz beim letzten haltbaren Checkpoint. [Haltbarkeitsregeln](infinite-stars.md)
+- **Ausfall des Authority-Dienstes.** Schreibende Operationen brauchen dessen Bestätigung. Den Dienst an seiner bisherigen Adresse mit dem intakten Datenträger wieder starten. Eine ungeklärte Aktion mit derselben Session und Sequenz wiederholen. Bei unklarem Handoff dasselbe Ticket fortsetzen oder über `abort` den gespeicherten Ausgang klären. Der Beispiel-Controller führt dafür eine haltbare Ticketdatei. [Prozessabnahme](../examples/infinite-stars/tests/process.rs)
+- **Datenträgerverlust.** Der Standarddienst hat eine maßgebliche SQLite-WAL-Datenbank. Für ein konsistentes kaltes Backup Authority und Verwaltungsbefehle beenden und das ganze geschützte `control`-Verzeichnis sichern. Ein einzelnes Volume bietet keine automatische Ausfallsicherung bei Verlust des Rechners. Wiederherstellung aus Backup hat den Datenstand des Backups.
+- **Dichte und Kapazität.** Ein Objekt hat pro interessiertem Worker höchstens eine zusammengefasste Subscription. Individuelle Clients können jeweils eine eigene Sicht benötigen. Der Standardbroker unterstützt bis zu 64 Worker-Slots. Die Octree-Inselrampe prüfte bis zu 1.024 bewegte Bevy-Figuren. Der interne Ticktest prüfte 10.000 Spieler in 625 Inseln. Im WebSocket-Test hielten 10.000 Spieler in 5.000 Zweiergruppen gleichzeitig die Verbindung. Die Lastkurven für dichte Gruppen und die Ergebnisse je Plattform stehen im [Messbericht](tickprofil.md).
+- **Betriebsumgebung.** Der kurze Test prüft das Modell vertrauenswürdiger Worker. Die Standardbereitstellung benötigt eine erreichbare Authority und für neue Routen ein erreichbares Directory. Automatische Bereitstellung weiterer Maschinen, redundanter Speicher und ein Kapazitätsziel mit dem eigenen Gameplay sind Entscheidungen des Betreibers.
+
+**Wiederanlauf.** Bei einem Worker-Absturz denselben Slot mit seinem provisionierten Verzeichnis gegen die laufende Authority starten. Die neue Inkarnation sperrt den alten Writer. Bei Ausfall von Slot 1 müssen neue Routen und Sichtpläne auf das Directory warten. Nach einem Authority-Ausfall zuerst den Dienst mit seinem intakten Volume starten, den Status eines offenen Handoffs abfragen und den zuletzt bestätigten technischen Stand laden. Der Sessionadapter prüft Teilnehmer und Bindung erneut. Externe Zustände werden von ihrer maßgeblichen Quelle hydratisiert, danach Eingaben freigeben.
+
+**Datenverlust und Zeit.** Die periodische Checkpointplanung verteilt Gruppen über 20 Ticks, bei 20 Hz nominell eine Sekunde. Der tatsächlich mögliche Rücksprung reicht bis zur letzten erfolgreichen Bestätigung. Rückstau oder ein unterbrochener Speicherdienst können ihn vergrößern. Für einen ausdrücklich benötigten haltbaren Stand auf `checkpoint_group` warten. Bei Wiederherstellung eines älteren Backups alte Worker vor dem Start isolieren, ihre Zulassungen rotieren und externe Session-Epochen neu vergeben. Ein zurückgespieltes Backup enthält auch die damaligen Fencing- und Zulassungsdaten. Extern bestätigte Fachrevisionen erneut abrufen. Eine garantierte Wiederherstellungszeit und automatische Übernahme eines verlorenen Hosts benötigen eine separate Betriebsabnahme.
+
+## Abnahme wiederholen
+
+```sh
+npm test
+npm run test:game
+npm run test:abnahme
+npm run bench:v1
+npm run smoke
+cargo run --release --locked -p infinite-stars --bin cluster-bench -- target/islands.json --quick
+npm run bench:distributed
+cargo run --release --locked -p infinite-stars --bin mesh-bench -- target/world.json
+npm run bench:compare -- --npcs 3000 --seconds 15 --repeats 1
+```
+
+Der direkte Lasttest prüft nach jedem Schritt die Inseln und den Zustand jeder Replica gegen eine erschöpfende Suche. Prüfzeit und Erzeugung der Testwelt liegen außerhalb der ausgewiesenen Schrittkosten. Im Netztest endet eine Messung erst, wenn alle Empfänger den erwarteten Stand melden. Peer-/Directory-TLS und der Datenverkehr zum Authority-Dienst werden gesondert gezählt. [Szenen und Perzentile](../examples/infinite-stars/src/bin/cluster-bench.rs) · [Netzwerkbenchmark](../examples/infinite-stars/src/bin/cluster-wire.rs)
+
+Am 25. November 2026 bestanden unter Windows und Debian jeweils **692 Rust-Tests, drei TypeScript-Testsuiten, der Client-Produktionsbuild und beide Live-Smokes**. Das separat kompilierte Bevy-Spiel lud nach dem Neustart den gespeicherten Reaktorstand. Beim Octree-Prüfstand meldete der Abhängigkeitsscan für die vier npm-Lockfiles null bekannte Schwachstellen. Der aktuelle RustSec-Scan fand ebenfalls null bekannte Schwachstellen und führt Wartungshinweise für `basic-toml`, `bincode` und `rustls-pemfile`. Das getestete Fehlermodell umfasst Prozessabsturz, Retry, Partition und veraltete Writer. [Aktueller Prüflauf](tickprofil.md) · [Octree-Prüfstand](benchmarks/octree-pruefstand.json)

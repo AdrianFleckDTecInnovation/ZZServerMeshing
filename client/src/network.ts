@@ -157,6 +157,10 @@ export class NetworkClient {
     this.ws = new WebSocket(this.url);
     const diag = initDiag();
     let lastTick = 0;
+    let lastAckTick: number | undefined;
+    const ackBuf = new ArrayBuffer(9);
+    const ackView = new DataView(ackBuf);
+    ackView.setUint8(0, PROTOCOL.FRAME_ACK);
 
     installDiagReport(diag);
 
@@ -226,14 +230,12 @@ export class NetworkClient {
           }
           diag.applied++;
 
-          // Send tick ACK back to server for delta baseline tracking
-          if (this.ws && this.connected) {
-            const ackBuf = new ArrayBuffer(9);
-            const ackView = new DataView(ackBuf);
-            ackView.setUint8(0, PROTOCOL.FRAME_ACK);
+          // The server tracks the highest applied tick with a 40-tick stale limit.
+          if (this.ws && this.connected && (lastAckTick === undefined || frame.tick - lastAckTick >= 4)) {
             ackView.setUint32(1, frame.tick & 0xFFFFFFFF, true);
             ackView.setUint32(5, Math.floor(frame.tick / 0x100000000), true);
             this.ws.send(ackBuf);
+            lastAckTick = frame.tick;
           }
 
           // Reconcile local player prediction with server state
